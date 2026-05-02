@@ -1,0 +1,5 @@
+# Cloned test suites
+JSON-Schema-Test-Suite/
+
+# Mutation testing output
+test_mutation.json

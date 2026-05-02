@@ -1,0 +1,60 @@
+name: Bug Report
+description: Report a bug in go-rotini/jsonschema
+labels: [bug]
+body:
+  - type: textarea
+    id: description
+    attributes:
+      label: Description
+      description: A clear description of the bug.
+    validations:
+      required: true
+
+  - type: textarea
+    id: schema-input
+    attributes:
+      label: Schema
+      description: The JSON Schema that triggers the bug.
+      render: json
+
+  - type: textarea
+    id: instance-input
+    attributes:
+      label: Instance
+      description: The instance document validated against the schema.
+      render: json
+
+  - type: textarea
+    id: expected
+    attributes:
+      label: Expected Behavior
+      description: What you expected to happen.
+    validations:
+      required: true
+
+  - type: textarea
+    id: actual
+    attributes:
+      label: Actual Behavior
+      description: What actually happened. Include error messages if applicable.
+    validations:
+      required: true
+
+  - type: textarea
+    id: reproduce
+    attributes:
+      label: Reproduction
+      description: Minimal Go code that reproduces the issue.
+      render: go
+
+  - type: input
+    id: go-version
+    attributes:
+      label: Go Version
+      placeholder: e.g. 1.26.2
+
+  - type: input
+    id: package-version
+    attributes:
+      label: Package Version
+      placeholder: e.g. v0.1.0
