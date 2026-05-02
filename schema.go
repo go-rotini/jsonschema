@@ -9,10 +9,8 @@ import (
 // Schema is a compiled JSON Schema. Once produced by [Compile] (or its
 // siblings), a Schema is immutable and safe for concurrent validation.
 //
-// Phase 2 populates the source / draft / id / metaSchemaURI metadata. The
-// validator graph (keyword evaluators, ref edges, anchor index) lands in
-// Phase 3 and is intentionally absent from the public API surface so that
-// later phases can extend the type without breaking callers.
+// Phase 3 wires the resource tree, keyword bindings, and resolved ref
+// edges. Phase 4 adds the validator engine that walks them.
 type Schema struct {
 	// source is the canonical JSON byte sequence the schema was compiled
 	// from. [Schema.MarshalJSON] returns this verbatim so a *Schema embeds
@@ -27,6 +25,15 @@ type Schema struct {
 	// metaSchemaURI is the URI from the $schema keyword (or
 	// draft.MetaSchemaURL() when $schema is absent).
 	metaSchemaURI string
+	// resources is the resource tree built at compile time. Phase 4 walks
+	// this for validation.
+	resources *resourceMap
+	// bindings carries one entry per recognized keyword instance — the
+	// compile-time stub Phase 4 turns into a real evaluator chain.
+	bindings []keywordBinding
+	// compileOpts carries the options the schema was compiled with.
+	// Validation re-uses the loader and ref-depth limits stored here.
+	compileOpts *compileOptions
 }
 
 // Draft returns the draft this schema was compiled against.
@@ -95,14 +102,14 @@ func (s *Schema) String() string {
 // Until then this method returns [ErrSchemaNotCompiled] so callers receive
 // a typed error rather than a misleading pass/fail Result.
 func (s *Schema) Validate(_ []byte, _ ...Option) (*Result, error) {
-	return nil, ErrSchemaNotCompiled
+	return nil, ErrValidatorNotImplemented
 }
 
 // ValidateValue validates an already-decoded Go value against the schema.
 //
 // PHASE 3 STUB: see [Schema.Validate].
 func (s *Schema) ValidateValue(_ any, _ ...Option) (*Result, error) {
-	return nil, ErrSchemaNotCompiled
+	return nil, ErrValidatorNotImplemented
 }
 
 // ValidateReader streams instance bytes from r and validates them against
@@ -110,7 +117,7 @@ func (s *Schema) ValidateValue(_ any, _ ...Option) (*Result, error) {
 //
 // PHASE 3 STUB: see [Schema.Validate].
 func (s *Schema) ValidateReader(_ io.Reader, _ ...Option) (*Result, error) {
-	return nil, ErrSchemaNotCompiled
+	return nil, ErrValidatorNotImplemented
 }
 
 // ValidateAndUnmarshal validates instanceJSON, then (on success) decodes it
@@ -118,18 +125,46 @@ func (s *Schema) ValidateReader(_ io.Reader, _ ...Option) (*Result, error) {
 //
 // PHASE 3 STUB: see [Schema.Validate].
 func (s *Schema) ValidateAndUnmarshal(_ []byte, _ any, _ ...Option) error {
-	return ErrSchemaNotCompiled
+	return ErrValidatorNotImplemented
 }
 
-// Option is the validation-time option type. Phase 3+ defines the concrete
-// constructors (WithFormatAssertion, WithStopOnFirstError, ...). Phase 2
-// declares the type only so the [Schema] method signatures are stable.
-type Option func(*runOptions)
+// Resources returns the absolute URIs of every $id-bounded resource the
+// [*Schema] directly contains: the root URI first, then each nested
+// resource in declaration order. Returns nil when the schema is nil or was
+// constructed without a resource map (e.g. a Phase 2 test fixture).
+func (s *Schema) Resources() []string {
+	if s == nil || s.resources == nil {
+		return nil
+	}
+	out := make([]string, 0, len(s.resources.order))
+	seen := make(map[string]struct{}, len(s.resources.order))
+	for _, uri := range s.resources.order {
+		if _, dup := seen[uri]; dup {
+			continue
+		}
+		seen[uri] = struct{}{}
+		out = append(out, uri)
+	}
+	return out
+}
 
-// runOptions carries the validation-time configuration. Phase 2 leaves the
-// struct empty; later phases append fields without changing the public
-// signature of [Option].
-type runOptions struct{}
+// Anchors returns the plain-name anchors declared in the root resource.
+// Returns nil when the schema is nil or was constructed without a resource
+// map. The returned slice is freshly allocated; callers may mutate it.
+func (s *Schema) Anchors() []string {
+	if s == nil || s.resources == nil {
+		return nil
+	}
+	root, ok := s.resources.byURI[s.resources.rootURI]
+	if !ok {
+		return nil
+	}
+	out := make([]string, 0, len(root.anchors))
+	for name := range root.anchors {
+		out = append(out, name)
+	}
+	return out
+}
 
 // newSchemaForTest is an unexported constructor used by Phase 2 tests to
 // exercise Schema accessor methods without the full compiler. It is not

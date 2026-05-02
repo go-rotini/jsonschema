@@ -4,6 +4,7 @@ import (
 	"embed"
 	"fmt"
 	"io/fs"
+	"sync"
 )
 
 // metaSchemaFS embeds the canonical meta-schemas for every supported draft
@@ -49,15 +50,38 @@ func MetaSchemaURL(d Draft) string {
 	return d.MetaSchemaURL()
 }
 
+// metaSchemaCache memoizes [MetaSchema] results per draft so repeated calls
+// don't re-parse the embedded bytes. The compile path uses an embedded-only
+// MapLoader so it never touches the network.
+var (
+	metaSchemaCacheMu sync.Mutex
+	metaSchemaCache   = make(map[Draft]*Schema)
+)
+
 // MetaSchema returns the compiled [*Schema] for the canonical meta-schema
-// of d.
+// of d. The result is memoized; repeated calls return the same pointer.
 //
-// PHASE 3 STUB: requires the compiler. Returns nil + [ErrSchemaNotCompiled]
-// until Phase 3 lands. Callers that just need the meta-schema bytes (e.g.
-// for offline validation tooling) should use [MetaSchemaBytes] instead.
+// The compile path uses a [Compiler] backed by the embedded meta-schema
+// [MapLoader] so refs into the per-vocabulary meta-schemas resolve without
+// network access.
 func MetaSchema(d Draft) (*Schema, error) {
 	if _, ok := metaSchemaPaths[d]; !ok {
 		return nil, fmt.Errorf("%w: %s", ErrUnknownDraft, d.String())
 	}
-	return nil, ErrSchemaNotCompiled
+	metaSchemaCacheMu.Lock()
+	defer metaSchemaCacheMu.Unlock()
+	if s, ok := metaSchemaCache[d]; ok {
+		return s, nil
+	}
+	data, err := MetaSchemaBytes(d)
+	if err != nil {
+		return nil, err
+	}
+	c := NewCompiler(WithLoader(embeddedMetaMapLoader()), WithDefaultDraft(d))
+	s, err := c.Compile(data)
+	if err != nil {
+		return nil, err
+	}
+	metaSchemaCache[d] = s
+	return s, nil
 }

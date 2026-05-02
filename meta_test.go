@@ -45,18 +45,37 @@ func TestMetaSchemaBytesUnknown(t *testing.T) {
 	}
 }
 
-func TestMetaSchemaIsPhase3Stub(t *testing.T) {
+func TestMetaSchemaCompilesEveryDraft(t *testing.T) {
 	for _, d := range []Draft{Draft4, Draft6, Draft7, Draft201909, Draft202012} {
 		s, err := MetaSchema(d)
-		if !errors.Is(err, ErrSchemaNotCompiled) {
-			t.Errorf("MetaSchema(%s) err = %v, want ErrSchemaNotCompiled", d, err)
+		if err != nil {
+			t.Errorf("MetaSchema(%s) err = %v, want nil", d, err)
+			continue
 		}
-		if s != nil {
-			t.Errorf("MetaSchema(%s) returned non-nil Schema", d)
+		if s == nil {
+			t.Errorf("MetaSchema(%s) returned nil Schema", d)
+			continue
+		}
+		if s.Draft() != d {
+			t.Errorf("MetaSchema(%s).Draft() = %s, want %s", d, s.Draft(), d)
 		}
 	}
 	if _, err := MetaSchema(DraftUnknown); !errors.Is(err, ErrUnknownDraft) {
 		t.Errorf("MetaSchema(DraftUnknown) err = %v, want ErrUnknownDraft", err)
+	}
+}
+
+func TestMetaSchemaMemoizes(t *testing.T) {
+	s1, err := MetaSchema(Draft202012)
+	if err != nil {
+		t.Fatalf("MetaSchema: %v", err)
+	}
+	s2, err := MetaSchema(Draft202012)
+	if err != nil {
+		t.Fatalf("MetaSchema: %v", err)
+	}
+	if s1 != s2 {
+		t.Errorf("MetaSchema is not memoized: got two different Schema pointers")
 	}
 }
 
