@@ -27,8 +27,17 @@ var (
 // keyword constants used in multiple branches; extracted so goconst stays
 // quiet and the descent rules stay easy to scan.
 const (
-	keyDefs        = "$defs"
-	keyDefinitions = "definitions"
+	keyDefs              = "$defs"
+	keyDefinitions       = "definitions"
+	keyDependentSchemas  = "dependentSchemas"
+	keyItems             = "items"
+	keyAllOf             = "allOf"
+	keyDependencies      = "dependencies"
+	keyPatternProperties = "patternProperties"
+	keyPrefixItems       = "prefixItems"
+	keyAnyOf             = "anyOf"
+	keyOneOf             = "oneOf"
+	keyProperties        = "properties"
 )
 
 // resolveURI resolves ref against base per RFC 3986. Either argument may be
@@ -229,13 +238,13 @@ func registerAnchors(target *resource, obj map[string]any) {
 // or a single subschema).
 func walkChild(rm *resourceMap, target *resource, k string, v any, subDraft Draft) error {
 	switch k {
-	case "properties", "patternProperties", keyDefs, keyDefinitions, "dependentSchemas":
+	case keyProperties, keyPatternProperties, keyDefs, keyDefinitions, keyDependentSchemas:
 		return walkSchemaMap(rm, target, v, subDraft)
-	case "items", "prefixItems":
+	case keyItems, keyPrefixItems:
 		return walkItemsLike(rm, target, v, subDraft)
-	case "allOf", "anyOf", "oneOf":
+	case keyAllOf, keyAnyOf, keyOneOf:
 		return walkSchemaArray(rm, target, v, subDraft)
-	case "dependencies":
+	case keyDependencies:
 		return walkDependencies(rm, target, v, subDraft)
 	default:
 		return walkNode(rm, target, v, subDraft)
@@ -308,12 +317,12 @@ func walkDependencies(rm *resourceMap, target *resource, v any, subDraft Draft) 
 func descendsInto(k string, _ Draft) bool {
 	switch k {
 	case
-		"properties", "patternProperties", "additionalProperties",
-		"propertyNames", "items", "prefixItems", "additionalItems",
+		keyProperties, keyPatternProperties, "additionalProperties",
+		"propertyNames", keyItems, keyPrefixItems, "additionalItems",
 		"contains", "not", "if", "then", "else",
-		"allOf", "anyOf", "oneOf",
+		keyAllOf, keyAnyOf, keyOneOf,
 		keyDefs, keyDefinitions,
-		"dependentSchemas", "dependencies",
+		keyDependentSchemas, keyDependencies,
 		"unevaluatedItems", "unevaluatedProperties",
 		"contentSchema":
 		return true
@@ -420,9 +429,19 @@ func resolveFragment(res *resource, frag string) (any, error) {
 	case frag == "" || frag == "#":
 		return res.root, nil
 	case strings.HasPrefix(frag, "#/"):
-		return jsonPointer(res.root, frag[1:])
+		// URI-decode the JSON Pointer (the fragment is URI-escaped per
+		// RFC 3986; the schema's pointer tokens themselves use ~0/~1
+		// escaping per RFC 6901).
+		ptr, err := url.PathUnescape(frag[1:])
+		if err != nil {
+			ptr = frag[1:]
+		}
+		return jsonPointer(res.root, ptr)
 	case strings.HasPrefix(frag, "#"):
 		name := frag[1:]
+		if decoded, err := url.PathUnescape(name); err == nil {
+			name = decoded
+		}
 		if v, ok := res.anchors[name]; ok {
 			return v, nil
 		}

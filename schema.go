@@ -2,7 +2,6 @@ package jsonschema
 
 import (
 	"fmt"
-	"io"
 	"strings"
 )
 
@@ -31,6 +30,9 @@ type Schema struct {
 	// bindings carries one entry per recognized keyword instance — the
 	// compile-time stub Phase 4 turns into a real evaluator chain.
 	bindings []keywordBinding
+	// root is the runtime evaluator tree — a parallel structure that the
+	// validator walks against an instance. Populated by the compile path.
+	root *subschema
 	// compileOpts carries the options the schema was compiled with.
 	// Validation re-uses the loader and ref-depth limits stored here.
 	compileOpts *compileOptions
@@ -94,38 +96,6 @@ func (s *Schema) String() string {
 	}
 	b.WriteString(")")
 	return b.String()
-}
-
-// Validate validates instanceJSON against the schema and returns a [*Result].
-//
-// PHASE 3 STUB: the compiler / validator engine lands in Phase 3 / Phase 4.
-// Until then this method returns [ErrSchemaNotCompiled] so callers receive
-// a typed error rather than a misleading pass/fail Result.
-func (s *Schema) Validate(_ []byte, _ ...Option) (*Result, error) {
-	return nil, ErrValidatorNotImplemented
-}
-
-// ValidateValue validates an already-decoded Go value against the schema.
-//
-// PHASE 3 STUB: see [Schema.Validate].
-func (s *Schema) ValidateValue(_ any, _ ...Option) (*Result, error) {
-	return nil, ErrValidatorNotImplemented
-}
-
-// ValidateReader streams instance bytes from r and validates them against
-// the schema.
-//
-// PHASE 3 STUB: see [Schema.Validate].
-func (s *Schema) ValidateReader(_ io.Reader, _ ...Option) (*Result, error) {
-	return nil, ErrValidatorNotImplemented
-}
-
-// ValidateAndUnmarshal validates instanceJSON, then (on success) decodes it
-// into v.
-//
-// PHASE 3 STUB: see [Schema.Validate].
-func (s *Schema) ValidateAndUnmarshal(_ []byte, _ any, _ ...Option) error {
-	return ErrValidatorNotImplemented
 }
 
 // Resources returns the absolute URIs of every $id-bounded resource the

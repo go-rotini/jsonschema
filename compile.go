@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"strings"
 	"sync"
 )
 
@@ -266,14 +267,8 @@ func (c *Compiler) compile(value any, rawSource []byte, baseURI string) (*Schema
 	source := make([]byte, len(rawSource))
 	copy(source, rawSource)
 
-	if c.opts.metaSchemaValidation {
-		// PHASE 3 STUB: meta-schema validation requires Phase 4's
-		// validator engine. We log a TODO via a no-op for now.
-		_ = c.opts.metaSchemaValidation
-	}
-
 	resolvedID, _ := splitFragment(rootURI)
-	return &Schema{
+	schema := &Schema{
 		source:        source,
 		draft:         draft,
 		id:            resolvedID,
@@ -281,7 +276,67 @@ func (c *Compiler) compile(value any, rawSource []byte, baseURI string) (*Schema
 		resources:     rm,
 		bindings:      bindings,
 		compileOpts:   c.opts,
-	}, nil
+	}
+	// Build the runtime evaluator tree.
+	eb := &evalBuilder{
+		schema: schema,
+		rm:     rm,
+		loader: c.opts.loader,
+		draft:  draft,
+		cache:  map[string]*subschema{},
+	}
+	root, err := eb.buildSubschema(value, "#", rootURI, rootURI, true)
+	if err != nil {
+		return nil, err
+	}
+	schema.root = root
+
+	if c.opts.metaSchemaValidation {
+		if err := validateAgainstMetaSchema(schema, value, draft); err != nil {
+			return nil, err
+		}
+	}
+
+	return schema, nil
+}
+
+// validateAgainstMetaSchema validates value (the user schema) against the
+// embedded meta-schema for draft. Failures are returned as a
+// [*CompileError] with the validation errors as a cause.
+func validateAgainstMetaSchema(_ *Schema, value any, draft Draft) error {
+	ms, err := MetaSchema(draft)
+	if err != nil {
+		return &CompileError{Message: "load meta-schema", Cause: err}
+	}
+	res, err := ms.ValidateValue(value)
+	if err != nil {
+		return &CompileError{Message: "meta-schema validation", Cause: err}
+	}
+	if !res.Valid {
+		var msg strings.Builder
+		msg.WriteString("schema does not match meta-schema")
+		for i, ve := range res.Errors {
+			if i >= 5 {
+				msg.WriteString("; ...")
+				break
+			}
+			msg.WriteString("; ")
+			msg.WriteString(ve.Keyword)
+			msg.WriteString(" at ")
+			msg.WriteString(ve.InstanceLocation)
+			msg.WriteString(": ")
+			msg.WriteString(ve.Message)
+		}
+		causes := make([]ValidationError, len(res.Errors))
+		copy(causes, res.Errors)
+		var cause error
+		if len(causes) > 0 {
+			ve := causes[0]
+			cause = &ve
+		}
+		return &CompileError{Message: msg.String(), Cause: cause}
+	}
+	return nil
 }
 
 // seedResources copies any entries registered via [Compiler.AddResource]
@@ -625,12 +680,18 @@ func checkNonEmptyArray(key string, raw any, loc string) error {
 
 // isNonNegativeInteger reports whether v is a JSON number with no fractional
 // part and a value ≥ 0. The compiler uses json.Number throughout so we
-// inspect the wire form when possible.
+// inspect the wire form when possible. Numbers like `2.0` are accepted as
+// integers (per spec: integer = number with no fractional part).
 func isNonNegativeInteger(v any) bool {
 	switch t := v.(type) {
 	case json.Number:
-		i, err := t.Int64()
-		return err == nil && i >= 0
+		if i, err := t.Int64(); err == nil {
+			return i >= 0
+		}
+		if f, err := t.Float64(); err == nil {
+			return f >= 0 && f == float64(int64(f))
+		}
+		return false
 	case int:
 		return t >= 0
 	case int64:

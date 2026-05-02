@@ -93,20 +93,19 @@ func TestSchemaStringMinimal(t *testing.T) {
 	}
 }
 
-func TestSchemaValidateStubs(t *testing.T) {
-	s := newSchemaForTest([]byte(`{}`), Draft202012, "", "")
-
-	if _, err := s.Validate([]byte(`null`)); !errors.Is(err, ErrValidatorNotImplemented) {
-		t.Errorf("Validate err = %v, want ErrValidatorNotImplemented", err)
+func TestSchemaValidateNilSchema(t *testing.T) {
+	var s *Schema
+	if _, err := s.Validate([]byte(`null`)); !errors.Is(err, ErrSchemaNotCompiled) {
+		t.Errorf("Validate(nil schema) err = %v, want ErrSchemaNotCompiled", err)
 	}
-	if _, err := s.ValidateValue(nil); !errors.Is(err, ErrValidatorNotImplemented) {
-		t.Errorf("ValidateValue err = %v, want ErrValidatorNotImplemented", err)
+	if _, err := s.ValidateValue(nil); !errors.Is(err, ErrSchemaNotCompiled) {
+		t.Errorf("ValidateValue(nil schema) err = %v, want ErrSchemaNotCompiled", err)
 	}
-	if _, err := s.ValidateReader(strings.NewReader(`{}`)); !errors.Is(err, ErrValidatorNotImplemented) {
-		t.Errorf("ValidateReader err = %v, want ErrValidatorNotImplemented", err)
+	if _, err := s.ValidateReader(strings.NewReader(`{}`)); !errors.Is(err, ErrSchemaNotCompiled) {
+		t.Errorf("ValidateReader(nil schema) err = %v, want ErrSchemaNotCompiled", err)
 	}
 	var v any
-	if err := s.ValidateAndUnmarshal([]byte(`{}`), &v); !errors.Is(err, ErrValidatorNotImplemented) {
-		t.Errorf("ValidateAndUnmarshal err = %v, want ErrValidatorNotImplemented", err)
+	if err := s.ValidateAndUnmarshal([]byte(`{}`), &v); !errors.Is(err, ErrSchemaNotCompiled) {
+		t.Errorf("ValidateAndUnmarshal(nil schema) err = %v, want ErrSchemaNotCompiled", err)
 	}
 }

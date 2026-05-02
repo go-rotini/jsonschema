@@ -199,6 +199,17 @@ var (
 	// compiled validator graph was called on a Schema produced before the
 	// compiler is wired up. Returned by Phase 2 / Phase 3 stubs.
 	ErrSchemaNotCompiled = errors.New("jsonschema: schema not compiled")
+	// ErrValidationFailed is returned when validation produced no
+	// structured [*ValidationError] but the instance was nevertheless
+	// rejected.
+	ErrValidationFailed = errors.New("jsonschema: validation failed")
+	// ErrNilReader indicates a nil [io.Reader] was passed to
+	// [*Schema.ValidateReader].
+	ErrNilReader = errors.New("jsonschema: nil reader")
+	// ErrUnsupportedSchemaShape indicates a schema slot held a value the
+	// compiler/runtime cannot evaluate (neither a JSON object nor a
+	// boolean schema).
+	ErrUnsupportedSchemaShape = errors.New("jsonschema: unsupported schema shape")
 )
 
 // RenderError produces a human-readable error string with source-line

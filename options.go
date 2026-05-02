@@ -169,7 +169,7 @@ type runOptions struct {
 //
 // Phase 3 leaves the helper unexported and lightly-used; Phase 4 will
 // invoke it from the validator entry points once the engine lands.
-func defaultRunOptions() *runOptions { //nolint:unused // wired up in phase 4.
+func defaultRunOptions() *runOptions {
 	return &runOptions{
 		formatAssertion:     false,
 		contentAssertion:    false,
