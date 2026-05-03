@@ -1,0 +1,27 @@
+{
+  "id": 42,
+  "name": "Alice",
+  "email": "alice@example.com",
+  "createdAt": "2024-01-15T10:30:00Z",
+  "kind": "person",
+  "discriminant": "v1",
+  "score": 87.5,
+  "active": true,
+  "uuid": "550e8400-e29b-41d4-a716-446655440000",
+  "address": {
+    "street": "123 Main St",
+    "city": "Springfield",
+    "zip": "12345"
+  },
+  "tags": ["primary", "alpha"],
+  "matrix": ["row1", 1.5, true, false],
+  "metadata": {"x-region": "us-east"},
+  "encoded": "eyJrIjoxfQ==",
+  "examples": "alice",
+  "anyKind": "hello",
+  "exactlyOne": "xenon",
+  "intersection": "abcd",
+  "negation": "not null",
+  "branching": {"kind": "person", "humanName": "Alice"},
+  "deps": {}
+}

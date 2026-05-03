@@ -2,7 +2,8 @@ TEST_SUITE_DIR  := testdata/JSON-Schema-Test-Suite
 TEST_SUITE_REPO := https://github.com/json-schema-org/JSON-Schema-Test-Suite.git
 
 .PHONY: all clean clone-test-suite lint test test-acceptance test-bench \
-        test-conformance test-fuzz test-mutation test-race
+        test-conformance test-fuzz test-mutation test-race \
+        refresh-acceptance-fixtures
 
 all: clean clone-test-suite lint test test-acceptance test-bench \
      test-conformance test-fuzz test-mutation test-race
@@ -50,3 +51,16 @@ test-mutation: clone-test-suite
 test-race:
 	@go test -race -count=1 -coverprofile=test_race.out ./...
 	@go tool cover -func=test_race.out | tail -1
+
+# Re-fetches the version-pinned upstream acceptance fixtures. Run intentionally
+# at release time when bumping pinned versions; not part of `make all`.
+# json-patch.json and kitchen-sink.json are hand-rolled and not refreshed here.
+refresh-acceptance-fixtures:
+	@curl -fsSL https://spec.openapis.org/oas/3.1/schema/2022-10-07 \
+		-o testdata/acceptance/openapi-3.1.json
+	@curl -fsSL https://raw.githubusercontent.com/asyncapi/spec-json-schemas/master/schemas/2.6.0.json \
+		-o testdata/acceptance/asyncapi-2.6.json
+	@curl -fsSL https://geojson.org/schema/GeoJSON.json \
+		-o testdata/acceptance/geojson.json
+	@curl -fsSL https://json.schemastore.org/avro-avsc.json \
+		-o testdata/acceptance/avro.json

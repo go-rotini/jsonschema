@@ -1,0 +1,40 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://example.com/json-patch.json",
+  "title": "JSON Patch",
+  "description": "RFC 6902 JSON Patch document - hand-rolled minimal schema for acceptance fixtures.",
+  "type": "array",
+  "items": {
+    "oneOf": [
+      {
+        "type": "object",
+        "required": ["op", "path", "value"],
+        "additionalProperties": false,
+        "properties": {
+          "op": {"enum": ["add", "replace", "test"]},
+          "path": {"type": "string", "format": "json-pointer"},
+          "value": {}
+        }
+      },
+      {
+        "type": "object",
+        "required": ["op", "path"],
+        "additionalProperties": false,
+        "properties": {
+          "op": {"enum": ["remove"]},
+          "path": {"type": "string", "format": "json-pointer"}
+        }
+      },
+      {
+        "type": "object",
+        "required": ["op", "from", "path"],
+        "additionalProperties": false,
+        "properties": {
+          "op": {"enum": ["move", "copy"]},
+          "from": {"type": "string", "format": "json-pointer"},
+          "path": {"type": "string", "format": "json-pointer"}
+        }
+      }
+    ]
+  }
+}

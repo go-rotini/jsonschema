@@ -1,0 +1,8 @@
+[
+  {"op": "add", "path": "/foo/bar", "value": 42},
+  {"op": "remove", "path": "/foo/baz"},
+  {"op": "replace", "path": "/foo", "value": {"k": "v"}},
+  {"op": "move", "from": "/a", "path": "/b"},
+  {"op": "copy", "from": "/c", "path": "/d"},
+  {"op": "test", "path": "/e", "value": null}
+]

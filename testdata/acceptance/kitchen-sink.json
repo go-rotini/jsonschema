@@ -1,0 +1,117 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://example.com/kitchen-sink.json",
+  "$comment": "Hand-rolled fixture exercising every Draft 2020-12 keyword the package implements.",
+  "title": "Kitchen Sink",
+  "description": "Every keyword in keywords.go appears at least once.",
+  "$defs": {
+    "address": {
+      "type": "object",
+      "properties": {
+        "street": {"type": "string"},
+        "city": {"type": "string"},
+        "zip": {"type": "string", "pattern": "^[0-9]{5}$"}
+      },
+      "required": ["street", "city"]
+    },
+    "tag": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 32
+    }
+  },
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["id", "name", "kind"],
+  "minProperties": 3,
+  "maxProperties": 64,
+  "properties": {
+    "id": {"type": "integer", "minimum": 1, "exclusiveMinimum": 0},
+    "name": {"type": "string", "minLength": 1, "maxLength": 100},
+    "email": {"type": "string", "format": "email"},
+    "createdAt": {"type": "string", "format": "date-time"},
+    "kind": {"enum": ["person", "company", "robot"]},
+    "discriminant": {"const": "v1"},
+    "score": {"type": "number", "multipleOf": 0.5, "maximum": 100, "exclusiveMaximum": 101},
+    "active": {"type": "boolean", "default": true},
+    "deprecatedField": {"type": "string", "deprecated": true},
+    "secret": {"type": "string", "writeOnly": true},
+    "uuid": {"type": "string", "format": "uuid", "readOnly": true},
+    "address": {"$ref": "#/$defs/address"},
+    "tags": {
+      "type": "array",
+      "items": {"$ref": "#/$defs/tag"},
+      "minItems": 0,
+      "maxItems": 10,
+      "uniqueItems": true,
+      "contains": {"const": "primary"},
+      "minContains": 0,
+      "maxContains": 3
+    },
+    "matrix": {
+      "type": "array",
+      "prefixItems": [
+        {"type": "string"},
+        {"type": "number"}
+      ],
+      "items": {"type": "boolean"},
+      "unevaluatedItems": false
+    },
+    "metadata": {
+      "type": "object",
+      "patternProperties": {
+        "^x-": {"type": "string"}
+      },
+      "propertyNames": {"pattern": "^[a-zA-Z][a-zA-Z0-9_-]*$"},
+      "unevaluatedProperties": false
+    },
+    "encoded": {
+      "type": "string",
+      "contentEncoding": "base64",
+      "contentMediaType": "application/json"
+    },
+    "examples": {
+      "type": "string",
+      "examples": ["alice", "bob"]
+    },
+    "anyKind": {
+      "anyOf": [
+        {"type": "string"},
+        {"type": "integer"}
+      ]
+    },
+    "exactlyOne": {
+      "oneOf": [
+        {"type": "string", "pattern": "^x"},
+        {"type": "string", "pattern": "^y"}
+      ]
+    },
+    "intersection": {
+      "allOf": [
+        {"type": "string"},
+        {"minLength": 3}
+      ]
+    },
+    "negation": {
+      "not": {"type": "null"}
+    },
+    "branching": {
+      "if": {"type": "object", "properties": {"kind": {"const": "robot"}}, "required": ["kind"]},
+      "then": {"required": ["modelNumber"]},
+      "else": {"required": ["humanName"]}
+    },
+    "deps": {
+      "type": "object",
+      "dependentRequired": {
+        "creditCard": ["billingAddress"]
+      },
+      "dependentSchemas": {
+        "creditCard": {
+          "properties": {
+            "expiry": {"type": "string", "format": "date"}
+          }
+        }
+      }
+    }
+  }
+}
