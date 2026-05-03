@@ -133,7 +133,7 @@ fmt.Println(string(schema))
 
 ## Multi-Format Input
 
-Schemas and instances can be authored as JSONC, YAML, or TOML. The adapters delegate to the rotini sister packages and preserve numeric literals via `json.Number` so `multipleOf` / `minimum` / `maximum` evaluate against the wire form.
+Schemas and instances can be authored as JSONC, YAML, or TOML. The adapters delegate to the corresponding rotini packages and preserve numeric literals via `json.Number` so `multipleOf` / `minimum` / `maximum` evaluate against the wire form.
 
 ```go
 schemaYAML := []byte(`
@@ -196,24 +196,6 @@ if err := schema.ValidateAndUnmarshal(instance, &u); err != nil {
 ```
 
 `Schema.MarshalJSON` returns canonical schema bytes that round-trip through `encoding/json.Unmarshal` + `CompileValue`.
-
-## Comparison
-
-| Feature | santhosh-tekuri/v5 | xeipuuv | kaptinlin | invopop | **go-rotini/jsonschema** |
-|---|---|---|---|---|---|
-| Draft 2020-12 | yes | no | yes | n/a | **yes** |
-| Draft 2019-09 | yes | no | yes | n/a | **yes** |
-| Draft 7 / 6 / 4 | yes | yes | yes | n/a | **yes** |
-| Compile/validate split | yes | yes | yes | n/a | **yes** |
-| All four output formats | partial | no | yes | n/a | **yes** |
-| Generic `ValidateTo[T]` | no | no | no | n/a | **yes** |
-| Multi-format instance input | no | no | no | n/a | **yes** |
-| Schema generation from Go types | no | no | partial | yes | **yes** |
-| Custom keywords / vocabularies | yes | partial | yes | n/a | **yes** |
-| Source-pointer error formatting | no | partial | partial | n/a | **yes** |
-| DoS protection (depth/size/refs) | partial | partial | yes | n/a | **yes** (all four) |
-
-`n/a` means the package is single-purpose and the row does not apply.
 
 ## Documentation
 
