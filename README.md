@@ -127,8 +127,10 @@ type Tree struct {
 schema, _ := jsonschema.GenerateBytes(Tree{})
 fmt.Println(string(schema))
 // {"$schema":"https://json-schema.org/draft/2020-12/schema",
-//  "$defs":{"Tree":{"type":"object","properties":{...}}},
-//  "$ref":"#/$defs/Tree"}
+//  "$ref":"#/$defs/Tree",
+//  "$defs":{"Tree":{"type":"object","properties":{
+//    "label":{"type":"string"},
+//    "children":{"type":"array","items":{"$ref":"#/$defs/Tree"}}}}}}
 ```
 
 ## Multi-Format Input
@@ -178,7 +180,11 @@ fmt.Println(string(result.Output(jsonschema.OutputFlag)))
 // {"valid":false}
 
 fmt.Println(string(result.Output(jsonschema.OutputBasic)))
-// {"valid":false,"errors":[{"keywordLocation":"/properties/name/minLength", ...}]}
+// {"valid":false,"keywordLocation":"","instanceLocation":"","errors":[
+//   {"valid":false,"keywordLocation":"","instanceLocation":"","error":"validation failed"},
+//   {"valid":false,"keywordLocation":"/properties/name/minLength",
+//    "instanceLocation":"/name","error":"string length 1 is below minLength 3"}
+// ]}
 ```
 
 `OutputDetailed` emits a nested tree pruned to failing branches; `OutputVerbose` keeps the full tree including passing groups. The wire shape validates against the spec's output meta-schema (also exposed via `OutputMetaSchema`).
