@@ -266,6 +266,16 @@ type runCtx struct {
 	// nested branches (which capture errors into a fresh slice via
 	// evaluateBranch) still short-circuit at the outer-most level.
 	stopFired bool
+	// contentDecoded carries decoded bytes from contentEncoding to a sibling
+	// contentMediaType evaluator at the same instance location. Lazily
+	// allocated; only populated when content assertion is enabled.
+	contentDecoded map[string][]byte
+	// contentParsed carries parsed JSON values from contentMediaType to a
+	// sibling contentSchema evaluator. Lazily allocated.
+	contentParsed map[string]any
+	// formatWarned records format names already warned-about under
+	// UnknownFormatWarn so we don't spam logs on big schemas.
+	formatWarned map[string]struct{}
 }
 
 // annotationEntry is the internal record of one annotation. We keep the
