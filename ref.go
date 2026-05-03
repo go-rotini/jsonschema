@@ -113,6 +113,11 @@ type resource struct {
 	// at validation time walks the dynamic scope; here we only build the
 	// per-resource index.
 	dynamicAnchors map[string]any
+	// recursiveAnchor is true when the resource root carries
+	// "$recursiveAnchor": true (Draft 2019-09 only). $recursiveRef walks
+	// the dynamic scope from outermost to innermost looking for the first
+	// resource whose recursiveAnchor flag is set.
+	recursiveAnchor bool
 	// draft is the effective draft for this resource. Inherited from the
 	// containing resource unless an explicit $schema is declared.
 	draft Draft
@@ -154,11 +159,15 @@ func walkNode(rm *resourceMap, current *resource, node any, draft Draft) error {
 	}
 
 	idKey, subDraft := resolveDraftAndIDKey(obj, current.draft, draft)
-	target, err := openResourceIfNeeded(rm, current, obj, idKey, subDraft)
+	target, opened, err := openResourceIfNeeded(rm, current, obj, idKey, subDraft)
 	if err != nil {
 		return err
 	}
-	registerAnchors(target, obj)
+	// isResourceRoot is true on the very first walk into a resource: either
+	// we just opened a fresh one via $id, or this object is the resource's
+	// root (the same map that walkResource registered as current.root).
+	isResourceRoot := opened || sameMap(target.root, obj)
+	registerAnchors(target, obj, isResourceRoot)
 	for k, v := range obj {
 		if !descendsInto(k, draft) {
 			continue
@@ -189,19 +198,32 @@ func resolveDraftAndIDKey(obj map[string]any, inherited, descent Draft) (string,
 
 // openResourceIfNeeded returns the resource that owns obj. If obj declares a
 // nested $id, a fresh resource is allocated and registered on rm; otherwise
-// current is returned unchanged.
-func openResourceIfNeeded(rm *resourceMap, current *resource, obj map[string]any, idKey string, subDraft Draft) (*resource, error) {
+// current is returned unchanged. The boolean is true when a fresh resource
+// was opened.
+func openResourceIfNeeded(rm *resourceMap, current *resource, obj map[string]any, idKey string, subDraft Draft) (*resource, bool, error) {
 	rawID, ok := obj[idKey]
 	if !ok {
-		return current, nil
+		return current, false, nil
 	}
 	idStr, ok := rawID.(string)
 	if !ok || idStr == "" {
-		return current, nil
+		return current, false, nil
+	}
+	// Pre-2019-09 ($id == "id" in Draft 4, or $id in Draft 6/7) allowed
+	// a plain-name fragment $id (e.g. {"$id": "#foo"}) as an alternative
+	// way to declare an anchor. In modern drafts (2019-09+) $id must be
+	// an absolute URI or absolute path; a plain-name $id does NOT open a
+	// new resource — it indexes the schema as an anchor in the parent.
+	if subDraft <= Draft7 && strings.HasPrefix(idStr, "#") && !strings.HasPrefix(idStr, "#/") {
+		name := idStr[1:]
+		if name != "" {
+			current.anchors[name] = obj
+		}
+		return current, false, nil
 	}
 	absID, err := resolveURI(current.baseURI, idStr)
 	if err != nil {
-		return nil, &CompileError{KeywordLocation: idKey, Message: "invalid " + idKey, Cause: err}
+		return nil, false, &CompileError{KeywordLocation: idKey, Message: "invalid " + idKey, Cause: err}
 	}
 	absID, _ = splitFragment(absID)
 	res := &resource{
@@ -213,11 +235,13 @@ func openResourceIfNeeded(rm *resourceMap, current *resource, obj map[string]any
 	}
 	rm.byURI[absID] = res
 	rm.order = append(rm.order, absID)
-	return res, nil
+	return res, true, nil
 }
 
 // registerAnchors records $anchor and $dynamicAnchor entries on target.
-func registerAnchors(target *resource, obj map[string]any) {
+// When isResourceRoot is true, "$recursiveAnchor": true on obj also flips the
+// resource's recursiveAnchor flag (Draft 2019-09).
+func registerAnchors(target *resource, obj map[string]any, isResourceRoot bool) {
 	if v, ok := obj["$anchor"]; ok {
 		if name, ok := v.(string); ok && name != "" {
 			target.anchors[name] = obj
@@ -228,6 +252,13 @@ func registerAnchors(target *resource, obj map[string]any) {
 			target.dynamicAnchors[name] = obj
 			if _, dup := target.anchors[name]; !dup {
 				target.anchors[name] = obj
+			}
+		}
+	}
+	if isResourceRoot {
+		if v, ok := obj["$recursiveAnchor"]; ok {
+			if b, ok := v.(bool); ok && b {
+				target.recursiveAnchor = true
 			}
 		}
 	}
@@ -495,4 +526,15 @@ func unescapePointerToken(s string) string {
 	s = strings.ReplaceAll(s, "~1", "/")
 	s = strings.ReplaceAll(s, "~0", "~")
 	return s
+}
+
+// sameMap reports whether the two values are the same map[string]any (by
+// underlying header). Used to detect that we are at a resource's root object
+// without panicking on uncomparable map equality.
+func sameMap(a any, b map[string]any) bool {
+	am, ok := a.(map[string]any)
+	if !ok {
+		return false
+	}
+	return fmt.Sprintf("%p", am) == fmt.Sprintf("%p", b)
 }

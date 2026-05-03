@@ -625,33 +625,61 @@ func (e *itemsEval) eval(ctx *runCtx, instance any) {
 	}
 }
 
+// siblingItemsArrayLen returns the length of the sibling `items` keyword's
+// value when it is an array of schemas. Returns -1 when items is missing or
+// is a single schema, in which case additionalItems is a no-op (per
+// Draft 4–7 spec).
+func siblingItemsArrayLen(b *evalBuilder) int {
+	parent, ok := b.currentParent.(map[string]any)
+	if !ok {
+		return -1
+	}
+	rawItems, ok := parent["items"]
+	if !ok {
+		return -1
+	}
+	arr, ok := rawItems.([]any)
+	if !ok {
+		return -1
+	}
+	return len(arr)
+}
+
+// additionalItemsEval implements pre-2019-09 `additionalItems`. The keyword
+// only applies when the sibling `items` is an ARRAY of schemas (the legacy
+// "tuple" form): it covers indices past the array prefix. When `items` is a
+// single schema (the modern single-form), or when `items` is missing entirely,
+// `additionalItems` has no effect — items already covers (or trivially
+// permits) every index.
 type additionalItemsEval struct {
 	loc string
 	sub *subschema
+	// itemsArrayLen is the length of the sibling items array when items is
+	// an array of schemas. -1 means items is a single schema or missing,
+	// in which case the evaluator is a no-op.
+	itemsArrayLen int
 }
 
 func (e *additionalItemsEval) keyword() string { return "additionalItems" }
 
 func (e *additionalItemsEval) eval(ctx *runCtx, instance any) {
+	if e.itemsArrayLen < 0 {
+		// items is a single schema (or missing): additionalItems is a
+		// no-op per spec.
+		return
+	}
 	arr, ok := instance.([]any)
 	if !ok {
 		return
 	}
-	start := 0
-	if v, ok := ctx.getAnnotation("items"); ok {
-		switch iv := v.(type) {
-		case evaluatedItems:
-			start = int(iv) + 1
-		case evaluatedItemsAll:
-			return
-		}
+	start := e.itemsArrayLen
+	if start >= len(arr) {
+		return
 	}
 	for i := start; i < len(arr); i++ {
 		ctx.evaluateChild(e.sub, arr[i], itoaInt(i), "additionalItems")
 	}
-	if len(arr) > start {
-		recordItemsAnno(ctx, "additionalItems", e.loc, evaluatedItemsAll{})
-	}
+	recordItemsAnno(ctx, "additionalItems", e.loc, evaluatedItemsAll{})
 }
 
 type containsEval struct {
@@ -780,7 +808,7 @@ func init() {
 		if err != nil {
 			return nil, err
 		}
-		return &additionalItemsEval{loc: loc, sub: sub}, nil
+		return &additionalItemsEval{loc: loc, sub: sub, itemsArrayLen: siblingItemsArrayLen(b)}, nil
 	})
 	registerEvaluator("contains", func(b *evalBuilder, raw any, loc string) (evaluator, error) {
 		sub, err := b.buildSubschema(raw, loc, b.currentBase, b.currentResource, false)

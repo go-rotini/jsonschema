@@ -207,7 +207,7 @@ func orderKeys(m map[string]any) []string {
 // priority runs first. Within a priority bracket the order is stable.
 func evalPriority(name string) int {
 	switch name {
-	case "$ref", "$dynamicRef":
+	case "$ref", "$dynamicRef", "$recursiveRef":
 		return 0
 	case "type", "enum", "const":
 		return 5

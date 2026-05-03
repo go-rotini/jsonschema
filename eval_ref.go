@@ -85,6 +85,44 @@ func (e *refEval) subschemaFor(target any) *subschema {
 	return nil
 }
 
+// dynamicScopeRefEval is the shared evaluation core for $dynamicRef and
+// $recursiveRef. Both keywords differ only in the scope-walk predicate
+// (lookupTarget) and in the static fallback target. The depth-limit, error
+// shape, subschema-build, and dispatch are identical.
+func dynamicScopeRefEval(
+	ctx *runCtx,
+	kw, loc, source string,
+	staticTarget any,
+	lookupTarget func() any,
+	subschemaFor func(any) *subschema,
+	instance any,
+) {
+	ctx.refDepth++
+	defer func() { ctx.refDepth-- }()
+	maxDepth := 100
+	if ctx.schema != nil && ctx.schema.compileOpts != nil {
+		maxDepth = ctx.schema.compileOpts.maxRefDepth
+	}
+	if ctx.refDepth > maxDepth {
+		ctx.addError(loc, kw, "", ErrMaxRefDepth.Error())
+		return
+	}
+	target := lookupTarget()
+	if target == nil {
+		target = staticTarget
+	}
+	if target == nil {
+		ctx.addError(loc, kw, "", fmt.Sprintf("cannot resolve %q", source))
+		return
+	}
+	sub := subschemaFor(target)
+	if sub == nil {
+		ctx.addError(loc, kw, "", fmt.Sprintf("cannot build subschema for %q", source))
+		return
+	}
+	ctx.evaluate(sub, instance)
+}
+
 // =====================================================================
 // $dynamicRef
 // =====================================================================.
@@ -103,33 +141,9 @@ type dynamicRefEval struct {
 func (e *dynamicRefEval) keyword() string { return "$dynamicRef" }
 
 func (e *dynamicRefEval) eval(ctx *runCtx, instance any) {
-	ctx.refDepth++
-	defer func() { ctx.refDepth-- }()
-	maxDepth := 100
-	if ctx.schema != nil && ctx.schema.compileOpts != nil {
-		maxDepth = ctx.schema.compileOpts.maxRefDepth
-	}
-	if ctx.refDepth > maxDepth {
-		ctx.addError(e.loc, "$dynamicRef", "", ErrMaxRefDepth.Error())
-		return
-	}
-	// Walk dynamic scope from outermost to innermost looking for a matching
-	// $dynamicAnchor.
-	target := e.findDynamic(ctx)
-	if target == nil {
-		// Fall back to static $ref-style resolution.
-		target = e.target
-	}
-	if target == nil {
-		ctx.addError(e.loc, "$dynamicRef", "", fmt.Sprintf("cannot resolve %q", e.source))
-		return
-	}
-	sub := e.subschemaFor(target)
-	if sub == nil {
-		ctx.addError(e.loc, "$dynamicRef", "", fmt.Sprintf("cannot build subschema for %q", e.source))
-		return
-	}
-	ctx.evaluate(sub, instance)
+	dynamicScopeRefEval(ctx, "$dynamicRef", e.loc, e.source, e.target,
+		func() any { return e.findDynamic(ctx) },
+		e.subschemaFor, instance)
 }
 
 func (e *dynamicRefEval) findDynamic(ctx *runCtx) any {
@@ -177,6 +191,83 @@ func rawIdentity(v any) any {
 		return &t
 	}
 	return v
+}
+
+// =====================================================================
+// $recursiveRef (Draft 2019-09)
+// =====================================================================.
+
+// recursiveRefEval implements Draft 2019-09's $recursiveRef. It mirrors
+// dynamicRefEval but its scope-walk predicate looks for the OUTERMOST
+// resource whose root carries "$recursiveAnchor": true rather than a
+// matching $dynamicAnchor name. When no in-scope resource carries the flag,
+// the eval falls back to static $ref-style resolution against the parsed
+// target captured at compile time.
+type recursiveRefEval struct {
+	loc       string
+	source    string
+	absolute  string
+	targetURI string
+	target    any
+	builder   *evalBuilder
+}
+
+func (e *recursiveRefEval) keyword() string { return "$recursiveRef" }
+
+func (e *recursiveRefEval) eval(ctx *runCtx, instance any) {
+	dynamicScopeRefEval(ctx, "$recursiveRef", e.loc, e.source, e.target,
+		func() any { return e.findRecursive(ctx) },
+		e.subschemaFor, instance)
+}
+
+// findRecursive walks ctx.dynamicScope outermost-first, returning the root
+// of the first resource whose recursiveAnchor flag is set. Returns nil when
+// no in-scope resource is anchored — and per spec when the *initial* target
+// resource itself does not carry $recursiveAnchor: true the keyword is
+// equivalent to a static $ref, which the caller handles via the fallback to
+// e.target.
+func (e *recursiveRefEval) findRecursive(ctx *runCtx) any {
+	if ctx.schema == nil || ctx.schema.resources == nil {
+		return nil
+	}
+	// Per the 2019-09 spec, $recursiveRef only "recurses" when the target
+	// resource (the one the ref's static base resolves to) ALSO carries
+	// $recursiveAnchor: true. Otherwise it behaves exactly like $ref.
+	if e.targetURI != "" {
+		tgtRes, ok := ctx.schema.resources.byURI[e.targetURI]
+		if !ok || !tgtRes.recursiveAnchor {
+			return nil
+		}
+	} else {
+		// No static target captured; without a recursive-anchored
+		// target, the spec's "behaves like $ref" branch applies.
+		return nil
+	}
+	for _, uri := range ctx.dynamicScope {
+		res, ok := ctx.schema.resources.byURI[uri]
+		if !ok {
+			continue
+		}
+		if res.recursiveAnchor {
+			return res.root
+		}
+	}
+	return nil
+}
+
+func (e *recursiveRefEval) subschemaFor(target any) *subschema {
+	if e.builder == nil {
+		return nil
+	}
+	key := fmt.Sprintf("rec:%p", rawIdentity(target))
+	if cached, ok := e.builder.cache[key]; ok {
+		return cached
+	}
+	sub, err := e.builder.buildSubschema(target, key, e.targetURI, e.targetURI, true)
+	if err != nil {
+		return nil
+	}
+	return sub
 }
 
 //nolint:gochecknoinits // evaluator registry is built at package init by design.
@@ -230,12 +321,30 @@ func init() {
 		}
 		return ev, nil
 	})
+	registerEvaluator("$recursiveRef", func(b *evalBuilder, raw any, loc string) (evaluator, error) {
+		ref, ok := raw.(string)
+		if !ok {
+			return nil, &CompileError{KeywordLocation: loc, Message: "$recursiveRef must be a string"}
+		}
+		baseURI := b.currentBase
+		if baseURI == "" {
+			baseURI = b.schema.id
+		}
+		resolved, err := resolveRef(b.rm, b.loader, baseURI, ref, nil, b.draft)
+		ev := &recursiveRefEval{loc: loc, source: ref, builder: b}
+		if err == nil {
+			ev.absolute = resolved.AbsoluteURI
+			ev.targetURI = resolved.TargetURI
+			ev.target = resolved.Target
+		}
+		return ev, nil
+	})
 	// $dynamicAnchor / $anchor / $defs / $id / $schema / $vocabulary /
-	// $comment / definitions are no-ops at evaluation time (handled by
-	// resource resolution at compile time).
+	// $comment / definitions / $recursiveAnchor are no-ops at evaluation
+	// time (handled by resource resolution at compile time).
 	for _, name := range []string{"$dynamicAnchor", "$anchor", "$defs", "$id", "id",
 		"$schema", "$vocabulary", "$comment", "definitions",
-		"$recursiveRef", "$recursiveAnchor"} {
+		"$recursiveAnchor"} {
 		n := name
 		registerEvaluator(n, func(_ *evalBuilder, _ any, _ string) (evaluator, error) {
 			return &noopEval{name: n}, nil
