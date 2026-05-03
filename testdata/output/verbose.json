@@ -1,0 +1,52 @@
+{
+  "annotations": [
+    {
+      "annotation": [
+        "age",
+        "name"
+      ],
+      "instanceLocation": "",
+      "keywordLocation": "/properties",
+      "valid": true
+    },
+    {
+      "annotation": "Person",
+      "instanceLocation": "",
+      "keywordLocation": "/title",
+      "valid": true
+    }
+  ],
+  "errors": [
+    {
+      "errors": [
+        {
+          "annotations": [
+            {
+              "annotation": "Name field",
+              "instanceLocation": "/name",
+              "keywordLocation": "/properties/name/title",
+              "valid": true
+            }
+          ],
+          "errors": [
+            {
+              "error": "string length 1 is below minLength 3",
+              "instanceLocation": "/name",
+              "keywordLocation": "/properties/name/minLength",
+              "valid": false
+            }
+          ],
+          "instanceLocation": "/name",
+          "keywordLocation": "/properties/name",
+          "valid": false
+        }
+      ],
+      "instanceLocation": "/name",
+      "keywordLocation": "/properties",
+      "valid": false
+    }
+  ],
+  "instanceLocation": "",
+  "keywordLocation": "",
+  "valid": false
+}

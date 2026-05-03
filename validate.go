@@ -60,7 +60,11 @@ func (s *Schema) ValidateValue(v any, opts ...Option) (*Result, error) {
 		ctx.evaluate(root, v)
 	}
 	res := &Result{Valid: len(ctx.errors) == 0, Errors: ctx.errors}
-	if ro.collectAnnotations {
+	// In stop-on-first-error mode the validator bails on the first failure
+	// and skips annotation work, since neither unevaluated* keywords nor
+	// the Detailed/Verbose output formats are useful when the validator
+	// short-circuits. The flat error list still surfaces the first error.
+	if ro.collectAnnotations && !ro.stopOnFirstError {
 		res.Annotations = ctx.publicAnnotations()
 	}
 	return res, nil

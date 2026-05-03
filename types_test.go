@@ -167,19 +167,15 @@ func TestValidationErrorUnwrapCauses(t *testing.T) {
 	_ = probe
 }
 
-func TestResultOutputStub(t *testing.T) {
-	// Phase 2 stub: every format renders the Flag-style payload.
+func TestResultOutputFlag(t *testing.T) {
+	// The Flag format is unconditionally a one-shot {"valid": ...} payload.
 	r := &Result{Valid: true}
-	for _, f := range []OutputFormat{OutputFlag, OutputBasic, OutputDetailed, OutputVerbose} {
-		got := r.Output(f)
-		if string(got) != `{"valid":true}` {
-			t.Errorf("Output(%s) = %s, want flag-only true payload", f, got)
-		}
+	if got := string(r.Output(OutputFlag)); got != `{"valid":true}` {
+		t.Errorf("Output(flag) valid = %s", got)
 	}
 	r.Valid = false
-	got := r.Output(OutputBasic)
-	if string(got) != `{"valid":false}` {
-		t.Errorf("Output() invalid: got %s", got)
+	if got := string(r.Output(OutputFlag)); got != `{"valid":false}` {
+		t.Errorf("Output(flag) invalid = %s", got)
 	}
 	// Defensive nil handling.
 	var nilR *Result

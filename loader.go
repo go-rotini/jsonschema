@@ -419,6 +419,18 @@ func embeddedMetaMapLoader() MapLoader {
 	// .json file under meta/draft-*/, parse its $id and register the URI.
 	registerVocabMeta(m, "meta/draft-2019-09/meta")
 	registerVocabMeta(m, "meta/draft-2020-12/meta")
+	// Output-format meta-schema (Draft 2020-12). Register by its canonical
+	// $id so tests and callers can $ref it without network access.
+	if data, err := fs.ReadFile(metaSchemaFS, "meta/output-2020-12.json"); err == nil {
+		if id := extractID(data); id != "" {
+			m[id] = data
+			if trimmed, found := strings.CutSuffix(id, "#"); found {
+				m[trimmed] = data
+			} else {
+				m[id+"#"] = data
+			}
+		}
+	}
 	return m
 }
 

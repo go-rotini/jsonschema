@@ -1,0 +1,19 @@
+{
+  "errors": [
+    {
+      "error": "validation failed",
+      "instanceLocation": "",
+      "keywordLocation": "",
+      "valid": false
+    },
+    {
+      "error": "string length 1 is below minLength 3",
+      "instanceLocation": "/name",
+      "keywordLocation": "/properties/name/minLength",
+      "valid": false
+    }
+  ],
+  "instanceLocation": "",
+  "keywordLocation": "",
+  "valid": false
+}

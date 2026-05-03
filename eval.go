@@ -262,6 +262,10 @@ type runCtx struct {
 	annoEntries     []annotationEntry         // ordered annotation log for output
 	refDepth        int
 	validationDepth int
+	// stopFired is set when stopOnFirstError sees its first error so that
+	// nested branches (which capture errors into a fresh slice via
+	// evaluateBranch) still short-circuit at the outer-most level.
+	stopFired bool
 }
 
 // annotationEntry is the internal record of one annotation. We keep the
@@ -317,19 +321,28 @@ func (ctx *runCtx) evaluateChild(sub *subschema, instance any, instanceTok, sche
 // error/annotation buffer. Used by oneOf/anyOf/if/not so each branch's
 // failures do not contaminate the outer context. Returns the captured
 // errors+annotations for the caller to merge.
+//
+// The outer-context stopFired flag is preserved across the call so that
+// stop-on-first-error short-circuits the parent walk even when a branch
+// produces an isolated error.
 func (ctx *runCtx) evaluateBranch(sub *subschema, instance any) ([]ValidationError, []annotationEntry) {
 	saved := ctx.errors
 	savedAnno := ctx.annoEntries
 	savedAnnoMap := ctx.annotations
+	savedStop := ctx.stopFired
 	ctx.errors = nil
 	ctx.annoEntries = nil
 	ctx.annotations = make(map[string]map[string]any)
+	// branches are speculative — they collect their own errors but should
+	// not propagate stopFired to siblings; we restore the saved flag below.
+	ctx.stopFired = false
 	ctx.evaluate(sub, instance)
 	br := ctx.errors
 	annos := ctx.annoEntries
 	ctx.errors = saved
 	ctx.annoEntries = savedAnno
 	ctx.annotations = savedAnnoMap
+	ctx.stopFired = savedStop
 	return br, annos
 }
 
@@ -346,6 +359,9 @@ func (ctx *runCtx) addError(keywordLoc, keyword, _, msg string) {
 		Keyword:          keyword,
 		Message:          msg,
 	})
+	if ctx.opts.stopOnFirstError {
+		ctx.stopFired = true
+	}
 }
 
 // addCausesError appends a compound error with nested causes.
@@ -360,11 +376,14 @@ func (ctx *runCtx) addCausesError(keywordLoc, keyword, msg string, causes []Vali
 		Message:          msg,
 		Causes:           causes,
 	})
+	if ctx.opts.stopOnFirstError {
+		ctx.stopFired = true
+	}
 }
 
 // shouldStop reports whether validation should stop early.
 func (ctx *runCtx) shouldStop() bool {
-	if ctx.opts.stopOnFirstError && len(ctx.errors) > 0 {
+	if ctx.opts.stopOnFirstError && (ctx.stopFired || len(ctx.errors) > 0) {
 		return true
 	}
 	return false

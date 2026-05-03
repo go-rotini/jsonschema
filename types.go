@@ -141,21 +141,6 @@ type Result struct {
 	Annotations []Annotation
 }
 
-// Output renders the result in the requested format per Draft 2020-12 §12.
-//
-// PHASE 5 STUB: the full Basic / Detailed / Verbose renderers land in
-// Phase 5. The Phase 2 stub returns the Flag-format JSON ({"valid": ...})
-// for every format selector so callers can already wire the API end-to-end.
-func (r *Result) Output(_ OutputFormat) []byte {
-	if r == nil {
-		return []byte(`{"valid":false}`)
-	}
-	if r.Valid {
-		return []byte(`{"valid":true}`)
-	}
-	return []byte(`{"valid":false}`)
-}
-
 // Annotation is a successful keyword annotation produced during validation.
 type Annotation struct {
 	// KeywordLocation is the JSON Pointer to the keyword in the schema that
