@@ -1,12 +1,9 @@
-package multifmt_test
+package jsonschema
 
 import (
 	"errors"
 	"sync"
 	"testing"
-
-	"github.com/go-rotini/jsonschema"
-	"github.com/go-rotini/jsonschema/multifmt"
 )
 
 // kitchenSinkSchemaJSON is shared across format-equivalence tests so each
@@ -30,9 +27,9 @@ const kitchenSinkSchemaJSON = `{
   "additionalProperties": false
 }`
 
-func mustCompileJSON(t *testing.T, schemaJSON string) *jsonschema.Schema {
+func mustCompileJSONForMultifmt(t *testing.T, schemaJSON string) *Schema {
 	t.Helper()
-	s, err := jsonschema.Compile([]byte(schemaJSON))
+	s, err := Compile([]byte(schemaJSON))
 	if err != nil {
 		t.Fatalf("compile json schema: %v", err)
 	}
@@ -59,7 +56,7 @@ func TestLoadJSONC_RoundTrip(t *testing.T) {
   },
   "additionalProperties": false,
 }`
-	s, err := multifmt.LoadJSONC([]byte(src))
+	s, err := LoadJSONC([]byte(src))
 	if err != nil {
 		t.Fatalf("LoadJSONC: %v", err)
 	}
@@ -97,7 +94,7 @@ properties:
     additionalProperties: false
 additionalProperties: false
 `
-	s, err := multifmt.LoadYAML([]byte(src))
+	s, err := LoadYAML([]byte(src))
 	if err != nil {
 		t.Fatalf("LoadYAML: %v", err)
 	}
@@ -137,7 +134,7 @@ additionalProperties = false
 type = "number"
 multipleOf = 0.1
 `
-	s, err := multifmt.LoadTOML([]byte(src))
+	s, err := LoadTOML([]byte(src))
 	if err != nil {
 		t.Fatalf("LoadTOML: %v", err)
 	}
@@ -151,7 +148,7 @@ multipleOf = 0.1
 }
 
 func TestValidateJSONC_Instance(t *testing.T) {
-	s := mustCompileJSON(t, kitchenSinkSchemaJSON)
+	s := mustCompileJSONForMultifmt(t, kitchenSinkSchemaJSON)
 	src := `{
   // an instance with comments + trailing commas
   "name": "alice",
@@ -159,7 +156,7 @@ func TestValidateJSONC_Instance(t *testing.T) {
   "tags": ["a", "b"],
   "meta": {"score": 0.3,},
 }`
-	res, err := multifmt.ValidateJSONC(s, []byte(src))
+	res, err := ValidateJSONC(s, []byte(src))
 	if err != nil {
 		t.Fatalf("ValidateJSONC: %v", err)
 	}
@@ -169,14 +166,14 @@ func TestValidateJSONC_Instance(t *testing.T) {
 }
 
 func TestValidateYAML_Instance(t *testing.T) {
-	s := mustCompileJSON(t, kitchenSinkSchemaJSON)
+	s := mustCompileJSONForMultifmt(t, kitchenSinkSchemaJSON)
 	src := `name: alice
 age: 30
 tags: [a, b]
 meta:
   score: 0.3
 `
-	res, err := multifmt.ValidateYAML(s, []byte(src))
+	res, err := ValidateYAML(s, []byte(src))
 	if err != nil {
 		t.Fatalf("ValidateYAML: %v", err)
 	}
@@ -186,14 +183,14 @@ meta:
 }
 
 func TestValidateYAML_Aliases(t *testing.T) {
-	s := mustCompileJSON(t, kitchenSinkSchemaJSON)
+	s := mustCompileJSONForMultifmt(t, kitchenSinkSchemaJSON)
 	src := `name: &n alice
 age: 30
 tags: [*n, b]
 meta:
   score: 0.3
 `
-	res, err := multifmt.ValidateYAML(s, []byte(src))
+	res, err := ValidateYAML(s, []byte(src))
 	if err != nil {
 		t.Fatalf("ValidateYAML alias: %v", err)
 	}
@@ -203,7 +200,7 @@ meta:
 }
 
 func TestValidateTOML_Instance(t *testing.T) {
-	s := mustCompileJSON(t, kitchenSinkSchemaJSON)
+	s := mustCompileJSONForMultifmt(t, kitchenSinkSchemaJSON)
 	src := `name = "alice"
 age = 30
 tags = ["a", "b"]
@@ -211,7 +208,7 @@ tags = ["a", "b"]
 [meta]
 score = 0.3
 `
-	res, err := multifmt.ValidateTOML(s, []byte(src))
+	res, err := ValidateTOML(s, []byte(src))
 	if err != nil {
 		t.Fatalf("ValidateTOML: %v", err)
 	}
@@ -227,10 +224,10 @@ func TestValidateTOML_Datetime(t *testing.T) {
     "ts": {"type": "string", "format": "date-time"}
   }
 }`
-	s := mustCompileJSON(t, schema)
+	s := mustCompileJSONForMultifmt(t, schema)
 	src := `ts = 2024-05-02T13:14:15Z
 `
-	res, err := multifmt.ValidateTOML(s, []byte(src), jsonschema.WithFormatAssertion(true))
+	res, err := ValidateTOML(s, []byte(src), WithFormatAssertion(true))
 	if err != nil {
 		t.Fatalf("ValidateTOML datetime: %v", err)
 	}
@@ -243,19 +240,19 @@ func TestNumberPrecision_MultipleOf(t *testing.T) {
 	// {"multipleOf": 0.1} with instance 0.3 fails under naive float64
 	// round-trip; the adapter must preserve number text via json.Number.
 	schemaJSON := `{"multipleOf": 0.1}`
-	s := mustCompileJSON(t, schemaJSON)
+	s := mustCompileJSONForMultifmt(t, schemaJSON)
 
 	cases := []struct {
 		name string
-		fn   func() (*jsonschema.Result, error)
+		fn   func() (*Result, error)
 	}{
-		{"jsonc", func() (*jsonschema.Result, error) { return multifmt.ValidateJSONC(s, []byte(`0.3`)) }},
-		{"yaml", func() (*jsonschema.Result, error) { return multifmt.ValidateYAML(s, []byte(`0.3`)) }},
-		{"toml-doc", func() (*jsonschema.Result, error) {
+		{"jsonc", func() (*Result, error) { return ValidateJSONC(s, []byte(`0.3`)) }},
+		{"yaml", func() (*Result, error) { return ValidateYAML(s, []byte(`0.3`)) }},
+		{"toml-doc", func() (*Result, error) {
 			// TOML can't host a bare scalar at the document root; nest under
 			// a property and re-shape the schema accordingly.
-			objSchema := mustCompileJSON(t, `{"type":"object","properties":{"x":{"multipleOf":0.1}}}`)
-			return multifmt.ValidateTOML(objSchema, []byte("x = 0.3\n"))
+			objSchema := mustCompileJSONForMultifmt(t, `{"type":"object","properties":{"x":{"multipleOf":0.1}}}`)
+			return ValidateTOML(objSchema, []byte("x = 0.3\n"))
 		}},
 	}
 	for _, tc := range cases {
@@ -274,10 +271,10 @@ func TestNumberPrecision_MultipleOf(t *testing.T) {
 func TestNumberPrecision_LargeInteger(t *testing.T) {
 	// Just above Number.MAX_SAFE_INTEGER (2^53). float64 round-trip would
 	// collapse 9007199254740993 to 9007199254740992 and fail the minimum.
-	schema := mustCompileJSON(t, `{"minimum": 9007199254740993}`)
+	schema := mustCompileJSONForMultifmt(t, `{"minimum": 9007199254740993}`)
 
 	t.Run("jsonc", func(t *testing.T) {
-		res, err := multifmt.ValidateJSONC(schema, []byte(`9007199254740993`))
+		res, err := ValidateJSONC(schema, []byte(`9007199254740993`))
 		if err != nil {
 			t.Fatalf("validate: %v", err)
 		}
@@ -286,8 +283,8 @@ func TestNumberPrecision_LargeInteger(t *testing.T) {
 		}
 	})
 	t.Run("toml", func(t *testing.T) {
-		objSchema := mustCompileJSON(t, `{"type":"object","properties":{"x":{"minimum":9007199254740993}}}`)
-		res, err := multifmt.ValidateTOML(objSchema, []byte("x = 9007199254740993\n"))
+		objSchema := mustCompileJSONForMultifmt(t, `{"type":"object","properties":{"x":{"minimum":9007199254740993}}}`)
+		res, err := ValidateTOML(objSchema, []byte("x = 9007199254740993\n"))
 		if err != nil {
 			t.Fatalf("validate: %v", err)
 		}
@@ -299,7 +296,7 @@ func TestNumberPrecision_LargeInteger(t *testing.T) {
 	// json.Number with the original text, so the comparator gets the full
 	// digit string. Verify it.
 	t.Run("yaml", func(t *testing.T) {
-		res, err := multifmt.ValidateYAML(schema, []byte("9007199254740993\n"))
+		res, err := ValidateYAML(schema, []byte("9007199254740993\n"))
 		if err != nil {
 			t.Fatalf("validate: %v", err)
 		}
@@ -310,33 +307,33 @@ func TestNumberPrecision_LargeInteger(t *testing.T) {
 }
 
 func TestMalformed_ReturnsError_NoPanic(t *testing.T) {
-	s := mustCompileJSON(t, `{"type":"object"}`)
+	s := mustCompileJSONForMultifmt(t, `{"type":"object"}`)
 	cases := []struct {
 		name string
 		fn   func() error
 	}{
 		{"jsonc", func() error {
-			_, err := multifmt.ValidateJSONC(s, []byte(`{"a":`))
+			_, err := ValidateJSONC(s, []byte(`{"a":`))
 			return err
 		}},
 		{"yaml", func() error {
-			_, err := multifmt.ValidateYAML(s, []byte("a: [1, 2,\n"))
+			_, err := ValidateYAML(s, []byte("a: [1, 2,\n"))
 			return err
 		}},
 		{"toml", func() error {
-			_, err := multifmt.ValidateTOML(s, []byte("a = "))
+			_, err := ValidateTOML(s, []byte("a = "))
 			return err
 		}},
 		{"load-jsonc", func() error {
-			_, err := multifmt.LoadJSONC([]byte(`{"type":`))
+			_, err := LoadJSONC([]byte(`{"type":`))
 			return err
 		}},
 		{"load-yaml", func() error {
-			_, err := multifmt.LoadYAML([]byte("type: [object,\n"))
+			_, err := LoadYAML([]byte("type: [object,\n"))
 			return err
 		}},
 		{"load-toml", func() error {
-			_, err := multifmt.LoadTOML([]byte("type = "))
+			_, err := LoadTOML([]byte("type = "))
 			return err
 		}},
 	}
@@ -356,22 +353,22 @@ func TestNilSchema_ReturnsSentinel(t *testing.T) {
 		fn   func() error
 	}{
 		{"jsonc", func() error {
-			_, err := multifmt.ValidateJSONC(nil, []byte(`{}`))
+			_, err := ValidateJSONC(nil, []byte(`{}`))
 			return err
 		}},
 		{"yaml", func() error {
-			_, err := multifmt.ValidateYAML(nil, []byte(`{}`))
+			_, err := ValidateYAML(nil, []byte(`{}`))
 			return err
 		}},
 		{"toml", func() error {
-			_, err := multifmt.ValidateTOML(nil, []byte(`x = 1`))
+			_, err := ValidateTOML(nil, []byte(`x = 1`))
 			return err
 		}},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			err := tc.fn()
-			if !errors.Is(err, jsonschema.ErrSchemaNotCompiled) {
+			if !errors.Is(err, ErrSchemaNotCompiled) {
 				t.Fatalf("expected ErrSchemaNotCompiled, got %v", err)
 			}
 		})
@@ -380,7 +377,7 @@ func TestNilSchema_ReturnsSentinel(t *testing.T) {
 
 func TestConcurrency_NoRace(t *testing.T) {
 	t.Parallel()
-	s := mustCompileJSON(t, kitchenSinkSchemaJSON)
+	s := mustCompileJSONForMultifmt(t, kitchenSinkSchemaJSON)
 
 	jsonInstance := []byte(`{
   // hi
@@ -405,7 +402,7 @@ score = 0.3
 	for i := 0; i < goroutines; i++ {
 		go func() {
 			defer wg.Done()
-			res, err := multifmt.ValidateJSONC(s, jsonInstance)
+			res, err := ValidateJSONC(s, jsonInstance)
 			if err != nil {
 				errCh <- err
 				return
@@ -416,7 +413,7 @@ score = 0.3
 		}()
 		go func() {
 			defer wg.Done()
-			res, err := multifmt.ValidateYAML(s, yamlInstance)
+			res, err := ValidateYAML(s, yamlInstance)
 			if err != nil {
 				errCh <- err
 				return
@@ -427,7 +424,7 @@ score = 0.3
 		}()
 		go func() {
 			defer wg.Done()
-			res, err := multifmt.ValidateTOML(s, tomlInstance)
+			res, err := ValidateTOML(s, tomlInstance)
 			if err != nil {
 				errCh <- err
 				return
@@ -463,22 +460,22 @@ required = ["x"]
 type = "integer"
 minimum = 0
 `
-	s1, err := multifmt.LoadJSONC([]byte(jsoncSchema))
+	s1, err := LoadJSONC([]byte(jsoncSchema))
 	if err != nil {
 		t.Fatalf("LoadJSONC: %v", err)
 	}
-	s2, err := multifmt.LoadYAML([]byte(yamlSchema))
+	s2, err := LoadYAML([]byte(yamlSchema))
 	if err != nil {
 		t.Fatalf("LoadYAML: %v", err)
 	}
-	s3, err := multifmt.LoadTOML([]byte(tomlSchema))
+	s3, err := LoadTOML([]byte(tomlSchema))
 	if err != nil {
 		t.Fatalf("LoadTOML: %v", err)
 	}
 
 	good := []byte(`{"x":5}`)
 	bad := []byte(`{"x":-1}`)
-	for _, s := range []*jsonschema.Schema{s1, s2, s3} {
+	for _, s := range []*Schema{s1, s2, s3} {
 		gr, err := s.Validate(good)
 		if err != nil || !gr.Valid {
 			t.Fatalf("good instance: err=%v errors=%v", err, gr)
@@ -496,7 +493,7 @@ minimum = 0
 func TestLoadJSONC_InvalidSchema(t *testing.T) {
 	// Compile-time error path: schema decodes fine but is structurally
 	// wrong (multipleOf must be a positive number).
-	_, err := multifmt.LoadJSONC([]byte(`{"multipleOf": -1}`))
+	_, err := LoadJSONC([]byte(`{"multipleOf": -1}`))
 	if err == nil {
 		t.Fatalf("expected compile error")
 	}

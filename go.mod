@@ -10,6 +10,12 @@ tool (
 )
 
 require (
+	github.com/go-rotini/jsonc v1.0.0
+	github.com/go-rotini/toml v1.0.1
+	github.com/go-rotini/yaml v1.0.5
+)
+
+require (
 	4d63.com/gocheckcompilerdirectives v1.3.0 // indirect
 	4d63.com/gochecknoglobals v0.2.2 // indirect
 	codeberg.org/chavacava/garif v0.2.0 // indirect

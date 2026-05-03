@@ -1,12 +1,10 @@
-// Package multifmt adapts the sister go-rotini format packages
+package jsonschema
+
+// This file provides multi-format input adapters that load JSON Schema
+// schemas and instances from JSONC, YAML, or TOML in addition to plain
+// JSON. The adapters delegate to the sister go-rotini format packages
 // ([github.com/go-rotini/jsonc], [github.com/go-rotini/yaml],
-// [github.com/go-rotini/toml]) so JSON Schema schemas and instances can be
-// loaded from JSONC, YAML, or TOML in addition to plain JSON.
-//
-// The package is opt-in: callers who only need JSON schemas/instances do
-// not pay the cost of pulling in the non-JSON parsers because multifmt is
-// shipped as its own Go module (separate go.mod). The core
-// [github.com/go-rotini/jsonschema] package therefore stays stdlib-only.
+// [github.com/go-rotini/toml]).
 //
 // # Number precision
 //
@@ -30,9 +28,9 @@
 //
 // # Concurrency
 //
-// All exported functions are stateless and safe for concurrent use. The
-// returned [github.com/go-rotini/jsonschema.Schema] inherits the parent
-// package's concurrency guarantees.
+// All exported multi-format functions are stateless and safe for
+// concurrent use. The returned [*Schema] inherits the package's
+// concurrency guarantees.
 //
 // # Limitations
 //
@@ -46,7 +44,6 @@
 //     values are flattened to strings (RFC3339-style for full datetimes,
 //     date-only/time-only forms for the local-* variants). Validate them
 //     against {"type": "string", "format": "date-time"} (or "date" / "time").
-package multifmt
 
 import (
 	"encoding/json"
@@ -57,36 +54,36 @@ import (
 	"strings"
 
 	"github.com/go-rotini/jsonc"
-	"github.com/go-rotini/jsonschema"
 	"github.com/go-rotini/toml"
 	"github.com/go-rotini/yaml"
 )
 
-// Sentinel errors returned by the multifmt adapters. All errors emitted by
-// this package wrap one of these so callers can match via [errors.Is].
+// Sentinel errors returned by the multi-format adapters. All errors
+// emitted by these adapters wrap one of these so callers can match via
+// [errors.Is].
 var (
 	// ErrInvalidYAML indicates a structural problem in YAML input that the
 	// adapter could not convert to a JSON-compatible value (e.g. unresolved
 	// aliases, cyclic merges, or multi-document streams).
-	ErrInvalidYAML = errors.New("multifmt: invalid yaml")
+	ErrInvalidYAML = errors.New("jsonschema: invalid yaml")
 	// ErrInvalidTOML indicates a structural problem in TOML input the
 	// adapter could not represent as a JSON-compatible value (e.g.
 	// integer literal out of range, malformed AST shape).
-	ErrInvalidTOML = errors.New("multifmt: invalid toml")
+	ErrInvalidTOML = errors.New("jsonschema: invalid toml")
 )
 
 // LoadJSONC parses a JSONC schema document via [github.com/go-rotini/jsonc]
 // and compiles it as a JSON Schema. Comments and trailing commas in the
 // source are tolerated; numeric literals retain their original text via
 // [json.Number] so multipleOf / minimum / maximum evaluate correctly.
-func LoadJSONC(schemaJSONC []byte, opts ...jsonschema.CompileOption) (*jsonschema.Schema, error) {
+func LoadJSONC(schemaJSONC []byte, opts ...CompileOption) (*Schema, error) {
 	v, err := decodeJSONC(schemaJSONC)
 	if err != nil {
-		return nil, fmt.Errorf("multifmt: load jsonc: %w", err)
+		return nil, fmt.Errorf("jsonschema: load jsonc: %w", err)
 	}
-	s, err := jsonschema.CompileValue(v, opts...)
+	s, err := CompileValue(v, opts...)
 	if err != nil {
-		return nil, fmt.Errorf("multifmt: compile jsonc schema: %w", err)
+		return nil, fmt.Errorf("jsonschema: compile jsonc schema: %w", err)
 	}
 	return s, nil
 }
@@ -94,27 +91,27 @@ func LoadJSONC(schemaJSONC []byte, opts ...jsonschema.CompileOption) (*jsonschem
 // LoadYAML parses a YAML schema document and compiles it as a JSON Schema.
 // The first document in the stream is used; multi-document streams are
 // rejected with [ErrInvalidYAML].
-func LoadYAML(schemaYAML []byte, opts ...jsonschema.CompileOption) (*jsonschema.Schema, error) {
+func LoadYAML(schemaYAML []byte, opts ...CompileOption) (*Schema, error) {
 	v, err := decodeYAML(schemaYAML)
 	if err != nil {
-		return nil, fmt.Errorf("multifmt: load yaml: %w", err)
+		return nil, fmt.Errorf("jsonschema: load yaml: %w", err)
 	}
-	s, err := jsonschema.CompileValue(v, opts...)
+	s, err := CompileValue(v, opts...)
 	if err != nil {
-		return nil, fmt.Errorf("multifmt: compile yaml schema: %w", err)
+		return nil, fmt.Errorf("jsonschema: compile yaml schema: %w", err)
 	}
 	return s, nil
 }
 
 // LoadTOML parses a TOML schema document and compiles it as a JSON Schema.
-func LoadTOML(schemaTOML []byte, opts ...jsonschema.CompileOption) (*jsonschema.Schema, error) {
+func LoadTOML(schemaTOML []byte, opts ...CompileOption) (*Schema, error) {
 	v, err := decodeTOML(schemaTOML)
 	if err != nil {
-		return nil, fmt.Errorf("multifmt: load toml: %w", err)
+		return nil, fmt.Errorf("jsonschema: load toml: %w", err)
 	}
-	s, err := jsonschema.CompileValue(v, opts...)
+	s, err := CompileValue(v, opts...)
 	if err != nil {
-		return nil, fmt.Errorf("multifmt: compile toml schema: %w", err)
+		return nil, fmt.Errorf("jsonschema: compile toml schema: %w", err)
 	}
 	return s, nil
 }
@@ -122,51 +119,51 @@ func LoadTOML(schemaTOML []byte, opts ...jsonschema.CompileOption) (*jsonschema.
 // ValidateJSONC decodes data as JSONC and validates the resulting Go value
 // against s. Number-precision-sensitive keywords see the original numeric
 // text via [json.Number].
-func ValidateJSONC(s *jsonschema.Schema, data []byte, opts ...jsonschema.Option) (*jsonschema.Result, error) {
+func ValidateJSONC(s *Schema, data []byte, opts ...Option) (*Result, error) {
 	if s == nil {
-		return nil, jsonschema.ErrSchemaNotCompiled
+		return nil, ErrSchemaNotCompiled
 	}
 	v, err := decodeJSONC(data)
 	if err != nil {
-		return nil, fmt.Errorf("multifmt: validate jsonc: %w", err)
+		return nil, fmt.Errorf("jsonschema: validate jsonc: %w", err)
 	}
 	res, err := s.ValidateValue(v, opts...)
 	if err != nil {
-		return nil, fmt.Errorf("multifmt: validate jsonc: %w", err)
+		return nil, fmt.Errorf("jsonschema: validate jsonc: %w", err)
 	}
 	return res, nil
 }
 
 // ValidateYAML decodes data as YAML and validates the resulting Go value
 // against s.
-func ValidateYAML(s *jsonschema.Schema, data []byte, opts ...jsonschema.Option) (*jsonschema.Result, error) {
+func ValidateYAML(s *Schema, data []byte, opts ...Option) (*Result, error) {
 	if s == nil {
-		return nil, jsonschema.ErrSchemaNotCompiled
+		return nil, ErrSchemaNotCompiled
 	}
 	v, err := decodeYAML(data)
 	if err != nil {
-		return nil, fmt.Errorf("multifmt: validate yaml: %w", err)
+		return nil, fmt.Errorf("jsonschema: validate yaml: %w", err)
 	}
 	res, err := s.ValidateValue(v, opts...)
 	if err != nil {
-		return nil, fmt.Errorf("multifmt: validate yaml: %w", err)
+		return nil, fmt.Errorf("jsonschema: validate yaml: %w", err)
 	}
 	return res, nil
 }
 
 // ValidateTOML decodes data as TOML and validates the resulting Go value
 // against s.
-func ValidateTOML(s *jsonschema.Schema, data []byte, opts ...jsonschema.Option) (*jsonschema.Result, error) {
+func ValidateTOML(s *Schema, data []byte, opts ...Option) (*Result, error) {
 	if s == nil {
-		return nil, jsonschema.ErrSchemaNotCompiled
+		return nil, ErrSchemaNotCompiled
 	}
 	v, err := decodeTOML(data)
 	if err != nil {
-		return nil, fmt.Errorf("multifmt: validate toml: %w", err)
+		return nil, fmt.Errorf("jsonschema: validate toml: %w", err)
 	}
 	res, err := s.ValidateValue(v, opts...)
 	if err != nil {
-		return nil, fmt.Errorf("multifmt: validate toml: %w", err)
+		return nil, fmt.Errorf("jsonschema: validate toml: %w", err)
 	}
 	return res, nil
 }

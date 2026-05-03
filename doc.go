@@ -106,10 +106,13 @@
 //
 // # Multi-Format Input
 //
-// The optional sub-package "multifmt" adapts [go-rotini/jsonc],
-// [go-rotini/yaml], and [go-rotini/toml] so that schemas and instances can
-// be loaded from any of those formats. Callers that only need JSON input
-// avoid pulling in non-JSON parsers.
+// In addition to JSON, the package can load schemas and instances written
+// as JSONC, YAML, or TOML via the [LoadJSONC], [LoadYAML], [LoadTOML],
+// [ValidateJSONC], [ValidateYAML], and [ValidateTOML] entry points. These
+// adapters delegate to [go-rotini/jsonc], [go-rotini/yaml], and
+// [go-rotini/toml]; numeric literals are preserved via [encoding/json.Number]
+// so number-precision keywords (multipleOf, minimum, maximum, const)
+// evaluate against the original wire form.
 //
 // # Error Handling
 //

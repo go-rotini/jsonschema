@@ -11,7 +11,7 @@ This package is used as the default JSON Schema support package for [rotini](htt
 - All four output formats from Draft 2020-12 §12: Flag, Basic, Detailed, Verbose
 - Generic `ValidateTo[T]` typed-decode in one call
 - Schema generation from Go types via reflection (`Generate`, `GenerateBytes`, `FromType`)
-- Multi-format instance and schema input through the `multifmt/` sub-package (JSONC, YAML, TOML)
+- Multi-format instance and schema input (JSONC, YAML, TOML) via `LoadJSONC` / `LoadYAML` / `LoadTOML` and their `Validate*` counterparts
 - `$ref` and `$dynamicRef` resolution; pluggable `Loader` (HTTPS-only by default; opt-in HTTP / file)
 - Custom keywords and vocabularies via `WithVocabulary`
 - Built-in format validators: `date-time`, `date`, `time`, `duration`, `email`, `idn-email`, `hostname`, `idn-hostname`, `ipv4`, `ipv6`, `uri`, `uri-reference`, `iri`, `iri-reference`, `uri-template`, `json-pointer`, `relative-json-pointer`, `uuid`, `regex`
@@ -19,7 +19,7 @@ This package is used as the default JSON Schema support package for [rotini](htt
 - Two strict modes: `WithMetaSchemaValidation` (compile-time meta-schema check) and `WithFormatAssertion` (runtime format assertion)
 - `RenderError` for human-readable validation errors with a source pointer into the instance
 - DoS protection: max ref depth, max recursion depth, max document size, ref-loop detection
-- Zero runtime dependencies in the core package; sister-package format support is opt-in via `multifmt/`
+- Sister-package format support (JSONC / YAML / TOML) provided by [go-rotini/jsonc](https://github.com/go-rotini/jsonc), [go-rotini/yaml](https://github.com/go-rotini/yaml), and [go-rotini/toml](https://github.com/go-rotini/toml)
 
 ## Installation
 
