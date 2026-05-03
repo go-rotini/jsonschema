@@ -6,10 +6,9 @@ import (
 )
 
 // Schema is a compiled JSON Schema. Once produced by [Compile] (or its
-// siblings), a Schema is immutable and safe for concurrent validation.
-//
-// Phase 3 wires the resource tree, keyword bindings, and resolved ref
-// edges. Phase 4 adds the validator engine that walks them.
+// siblings), a Schema is immutable and safe for concurrent validation —
+// callers may freely share a single [*Schema] across goroutines and call
+// any of the Validate-family methods concurrently.
 type Schema struct {
 	// source is the canonical JSON byte sequence the schema was compiled
 	// from. [Schema.MarshalJSON] returns this verbatim so a *Schema embeds
@@ -24,11 +23,11 @@ type Schema struct {
 	// metaSchemaURI is the URI from the $schema keyword (or
 	// draft.MetaSchemaURL() when $schema is absent).
 	metaSchemaURI string
-	// resources is the resource tree built at compile time. Phase 4 walks
-	// this for validation.
+	// resources is the resource tree built at compile time. The validator
+	// walks this for ref / dynamicRef resolution.
 	resources *resourceMap
-	// bindings carries one entry per recognized keyword instance — the
-	// compile-time stub Phase 4 turns into a real evaluator chain.
+	// bindings carries one entry per recognized keyword instance, captured
+	// for introspection helpers and metadata-only consumers.
 	bindings []keywordBinding
 	// root is the runtime evaluator tree — a parallel structure that the
 	// validator walks against an instance. Populated by the compile path.
@@ -101,7 +100,7 @@ func (s *Schema) String() string {
 // Resources returns the absolute URIs of every $id-bounded resource the
 // [*Schema] directly contains: the root URI first, then each nested
 // resource in declaration order. Returns nil when the schema is nil or was
-// constructed without a resource map (e.g. a Phase 2 test fixture).
+// constructed without a resource map.
 func (s *Schema) Resources() []string {
 	if s == nil || s.resources == nil {
 		return nil
@@ -136,9 +135,9 @@ func (s *Schema) Anchors() []string {
 	return out
 }
 
-// newSchemaForTest is an unexported constructor used by Phase 2 tests to
-// exercise Schema accessor methods without the full compiler. It is not
-// part of the public API.
+// newSchemaForTest is an unexported constructor used by tests to exercise
+// Schema accessor methods without the full compiler. It is not part of the
+// public API.
 func newSchemaForTest(source []byte, draft Draft, id, metaSchemaURI string) *Schema {
 	cp := append([]byte(nil), source...)
 	return &Schema{

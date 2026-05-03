@@ -195,9 +195,9 @@ var (
 	// ErrLoaderRejected indicates a [Loader] declined a URI scheme (e.g.
 	// the default chain rejecting http:// without explicit opt-in).
 	ErrLoaderRejected = errors.New("jsonschema: loader rejected URI scheme")
-	// ErrSchemaNotCompiled indicates a [*Schema] method requiring the
-	// compiled validator graph was called on a Schema produced before the
-	// compiler is wired up. Returned by Phase 2 / Phase 3 stubs.
+	// ErrSchemaNotCompiled indicates a [*Schema] method was called on a
+	// nil receiver, or on a value that was not produced by the compiler
+	// (e.g. a zero-value [Schema] literal).
 	ErrSchemaNotCompiled = errors.New("jsonschema: schema not compiled")
 	// ErrValidationFailed is returned when validation produced no
 	// structured [*ValidationError] but the instance was nevertheless
@@ -212,16 +212,14 @@ var (
 	ErrUnsupportedSchemaShape = errors.New("jsonschema: unsupported schema shape")
 )
 
-// RenderError produces a human-readable error string with source-line
-// context — pointing at both the schema and the instance position of a
-// failure. The optional color argument enables ANSI escape sequences in the
-// output.
-//
-// PHASE 5+ STUB: the full pretty-printer with line/column extraction lands
-// in Phase 5 once the validator surfaces structured locations. The Phase 2
-// stub returns err.Error() so callers can already wire the API end-to-end.
-//
-// TODO(phase5): implement schema/instance source-pointer rendering.
+// RenderError produces a human-readable error string. The signature accepts
+// the schema and instance source bytes plus an optional color flag so the
+// surface can grow into the full source-pointer formatter described in the
+// requirements doc; the v0.1 implementation returns err.Error() unchanged.
+// Programmatic callers should use [errors.Is] / [errors.As] against the
+// typed errors ([*CompileError], [*ValidationError], [*RefError],
+// [*LoaderError], [*FormatError]) and switch on
+// [ValidationError.Keyword] for stable error classification.
 func RenderError(_, _ []byte, err error, _ ...bool) string {
 	if err == nil {
 		return ""

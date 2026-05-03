@@ -10,20 +10,21 @@ import (
 	"sync"
 )
 
-// ErrValidatorNotImplemented is returned by every [*Schema] Validate method
-// while the validator engine is awaiting Phase 4. Compiled schemas already
-// carry their full structural state — refs are resolved, resources are
-// indexed, keyword stubs are bound — but no instance walk is implemented yet.
-var ErrValidatorNotImplemented = errors.New("jsonschema: validator engine not implemented (phase 4)")
+// ErrValidatorNotImplemented is returned by the package-level [Validate]
+// shorthand. It is a deliberate stub: the shorthand is discouraged because
+// it discards the [*Schema] after a single use. Callers should compile once
+// via [Compile] (or [NewCompiler]) and call [*Schema.Validate] for each
+// instance.
+var ErrValidatorNotImplemented = errors.New("jsonschema: package-level Validate shorthand not implemented; call Compile then Schema.Validate")
 
 // errTrailingContent is the static sentinel used by [decodeSchemaBytes]
 // when the schema document is followed by extra non-whitespace bytes.
 var errTrailingContent = errors.New("trailing content after schema")
 
-// keywordBinding is the compile-time stub that ties a recognized keyword at
-// a specific subschema location to its evaluator. Phase 3 records the (name,
-// raw value) pair plus structural validity; Phase 4 replaces RawValue with
-// a real evaluator.
+// keywordBinding ties a recognized keyword at a specific subschema location
+// to its raw value and (for refs) its pre-resolved target. The validator
+// graph is built from these bindings; bindings persist on the compiled
+// [*Schema] so introspection helpers can enumerate them.
 type keywordBinding struct {
 	// Name is the keyword identifier (e.g. "minLength", "$ref").
 	Name string
@@ -32,7 +33,7 @@ type keywordBinding struct {
 	// RawValue is the parsed value of the keyword (json.Unmarshal'd).
 	RawValue any
 	// Resolved is non-nil for $ref / $dynamicRef bindings: it carries the
-	// pre-resolved target so Phase 4 can walk the edge directly.
+	// pre-resolved target the validator walks when crossing the edge.
 	Resolved *resolvedRef
 }
 
@@ -90,13 +91,11 @@ func MustCompileURL(uri string, opts ...CompileOption) *Schema {
 	return s
 }
 
-// Validate compiles the schema once and validates instance against it.
-// Equivalent to Compile(schema).Validate(instance) but discouraged for hot
-// paths — use the two-step form to amortize compilation.
-//
-// PHASE 3 NOTE: validation is a Phase 4 deliverable. The function compiles
-// schemaJSON for typed-error coverage and then returns
-// [ErrValidatorNotImplemented] in place of a [*Result].
+// Validate is a discouraged shorthand: it compiles schemaJSON for typed-error
+// coverage and then returns [ErrValidatorNotImplemented] in place of a
+// [*Result]. The single-shot form would discard the [*Schema] after one use,
+// so callers should compile once via [Compile] (or [NewCompiler]) and call
+// [*Schema.Validate] for each instance to amortize compilation.
 func Validate(schemaJSON, _ []byte, _ ...Option) (*Result, error) {
 	if _, err := Compile(schemaJSON); err != nil {
 		return nil, err

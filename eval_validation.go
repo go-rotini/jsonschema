@@ -344,10 +344,9 @@ func init() {
 		// Draft 6+: exclusiveMaximum is a number on its own.
 		if _, ok := raw.(bool); ok && b.draft <= Draft4 {
 			// In Draft 4, exclusiveMaximum-as-bool flips a sibling maximum;
-			// we don't see that sibling here, so we handle this by leaving
-			// the keyword as a no-op and letting `maximum` carry the
-			// semantics (Phase 4 doesn't currently model the sibling
-			// relationship; simpler is to skip the boolean form silently).
+			// the sibling check is folded into the maximum evaluator, so
+			// here we leave the keyword as a no-op and let `maximum` carry
+			// the semantics.
 			return &noopEval{name: "exclusiveMaximum"}, nil
 		}
 		r, ok := numberToRat(raw)

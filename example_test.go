@@ -38,11 +38,9 @@ func ExampleSchema_Validate() {
 	// false true
 }
 
-// ExampleValidate exercises the package-level one-shot Validate entry point
-// (returns ErrValidatorNotImplemented in Phase 3 — Phase 4 wires the engine,
-// so the documented behavior post-Phase-4 is the (Result, error) pair shown
-// below).
-func ExampleValidate() {
+// ExampleSchema_Validate_integer demonstrates compiling a schema with a
+// numeric type assertion and validating an integer instance.
+func ExampleSchema_Validate_integer() {
 	schema := jsonschema.MustCompile([]byte(`{"type":"integer"}`))
 	res, err := schema.Validate([]byte(`42`))
 	if err != nil {

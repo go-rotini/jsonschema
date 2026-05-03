@@ -12,11 +12,13 @@ This package is used as the default JSON Schema support package for [rotini](htt
 - Generic `ValidateTo[T]` typed-decode in one call
 - Schema generation from Go types via reflection (`Generate`, `GenerateBytes`, `FromType`)
 - Multi-format instance and schema input (JSONC, YAML, TOML) via `LoadJSONC` / `LoadYAML` / `LoadTOML` and their `Validate*` counterparts
-- `$ref` and `$dynamicRef` resolution; pluggable `Loader` (HTTPS-only by default; opt-in HTTP / file)
+- `$ref`, `$dynamicRef`, `$recursiveRef`, plain-name anchors, and pluggable `Loader` (HTTPS-only by default; opt-in HTTP / file)
 - Custom keywords and vocabularies via `WithVocabulary`
 - Built-in format validators: `date-time`, `date`, `time`, `duration`, `email`, `idn-email`, `hostname`, `idn-hostname`, `ipv4`, `ipv6`, `uri`, `uri-reference`, `iri`, `iri-reference`, `uri-template`, `json-pointer`, `relative-json-pointer`, `uuid`, `regex`
 - Content vocabulary: `contentEncoding`, `contentMediaType`, `contentSchema` (annotation-only by default)
 - Two strict modes: `WithMetaSchemaValidation` (compile-time meta-schema check) and `WithFormatAssertion` (runtime format assertion)
+- OpenAPI 3.1 dialect support (`VocabOAS`, `OASDialectURL`)
+- Bowtie connector for cross-implementation conformance testing
 - `RenderError` for human-readable validation errors with a source pointer into the instance
 - DoS protection: max ref depth, max recursion depth, max document size, ref-loop detection
 - Sister-package format support (JSONC / YAML / TOML) provided by [go-rotini/jsonc](https://github.com/go-rotini/jsonc), [go-rotini/yaml](https://github.com/go-rotini/yaml), and [go-rotini/toml](https://github.com/go-rotini/toml)
@@ -88,20 +90,6 @@ func main() {
 }
 ```
 
-## Integrating With encoding/json
-
-The standard library does not have a schema layer, so there is no drop-in replacement to mirror. Instead, the two libraries integrate at the boundary: `Schema.ValidateAndUnmarshal` validates `instanceJSON` against the schema and, on success, decodes it via `encoding/json.Unmarshal` in a single call.
-
-```go
-var u User
-if err := schema.ValidateAndUnmarshal(instance, &u); err != nil {
-	// err is either a *jsonschema.ValidationError chain or a json.Unmarshal error.
-	log.Fatal(err)
-}
-```
-
-`Schema.MarshalJSON` returns canonical schema bytes that round-trip through `encoding/json.Unmarshal` + `CompileValue`.
-
 ## Schema Generation From Go Types
 
 Two tags drive generation:
@@ -129,6 +117,85 @@ Tag option vocabulary:
 | `$id=uri`, `$ref=uri` | identity / reference |
 
 Self-referential types are emitted as `$defs` entries with internal `$ref` links.
+
+```go
+type Tree struct {
+	Label    string  `json:"label"`
+	Children []*Tree `json:"children,omitempty"`
+}
+
+schema, _ := jsonschema.GenerateBytes(Tree{})
+fmt.Println(string(schema))
+// {"$schema":"https://json-schema.org/draft/2020-12/schema",
+//  "$defs":{"Tree":{"type":"object","properties":{...}}},
+//  "$ref":"#/$defs/Tree"}
+```
+
+## Multi-Format Input
+
+Schemas and instances can be authored as JSONC, YAML, or TOML. The adapters delegate to the rotini sister packages and preserve numeric literals via `json.Number` so `multipleOf` / `minimum` / `maximum` evaluate against the wire form.
+
+```go
+schemaYAML := []byte(`
+type: object
+properties:
+  port:
+    type: integer
+    minimum: 1
+    maximum: 65535
+required: [port]
+`)
+
+schema, err := jsonschema.LoadYAML(schemaYAML)
+if err != nil {
+	log.Fatal(err)
+}
+
+instanceTOML := []byte(`port = 8080`)
+result, err := jsonschema.ValidateTOML(schema, instanceTOML)
+if err != nil {
+	log.Fatal(err)
+}
+fmt.Println("valid:", result.Valid)
+```
+
+Equivalent entry points exist for JSONC: `LoadJSONC` and `ValidateJSONC`.
+
+## Output Formats
+
+`Result.Output` renders a validation result in any of the four formats from Draft 2020-12 §12 — Flag, Basic, Detailed, Verbose.
+
+```go
+schema := jsonschema.MustCompile([]byte(`{
+	"type": "object",
+	"properties": {"name": {"type": "string", "minLength": 3}},
+	"required": ["name"]
+}`))
+
+result, _ := schema.Validate([]byte(`{"name": "x"}`))
+
+fmt.Println(string(result.Output(jsonschema.OutputFlag)))
+// {"valid":false}
+
+fmt.Println(string(result.Output(jsonschema.OutputBasic)))
+// {"valid":false,"errors":[{"keywordLocation":"/properties/name/minLength", ...}]}
+```
+
+`OutputDetailed` emits a nested tree pruned to failing branches; `OutputVerbose` keeps the full tree including passing groups. The wire shape validates against the spec's output meta-schema (also exposed via `OutputMetaSchema`).
+
+## Integrating With encoding/json
+
+The standard library does not have a schema layer, so there is no drop-in replacement to mirror. Instead, the two libraries integrate at the boundary: `Schema.ValidateAndUnmarshal` validates `instanceJSON` against the schema and, on success, decodes it via `encoding/json.Unmarshal` in a single call.
+
+```go
+var u User
+if err := schema.ValidateAndUnmarshal(instance, &u); err != nil {
+	// err is either a *jsonschema.ValidationError chain or a json.Unmarshal error.
+	log.Fatal(err)
+}
+```
+
+`Schema.MarshalJSON` returns canonical schema bytes that round-trip through `encoding/json.Unmarshal` + `CompileValue`.
 
 ## Comparison
 

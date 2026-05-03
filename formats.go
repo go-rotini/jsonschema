@@ -803,7 +803,7 @@ func isHostnameLabel(lbl string) bool {
 // 5891). Pragmatic stdlib-only implementation: any UTF-8 hostname whose
 // labels look reasonable (no NULs, no control chars, length bounds) is
 // accepted. Bidi and full UTS#46 normalization are not implemented; that is
-// a documented limitation (see Phase 6 closeout in the requirements doc).
+// a documented v0.1 limitation.
 func validateIDNHostname(s string) error {
 	if s == "" || len(s) > 255*4 {
 		return formatErr("idn-hostname", s, "bad length")

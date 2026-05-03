@@ -362,9 +362,9 @@ func descendsInto(k string, _ Draft) bool {
 }
 
 // resolvedRef is the compile-time representation of a resolved $ref edge.
-// The validator (Phase 4) consults the Target / TargetURI to evaluate the
-// target subschema; until then the struct is built and stored on the
-// schema's keyword bindings without being evaluated.
+// The validator consults the Target / TargetURI to evaluate the target
+// subschema and follows lazy edges (cycles) at run time bounded by
+// [WithMaxRefDepth].
 type resolvedRef struct {
 	// Source is the literal $ref value as written in the schema.
 	Source string

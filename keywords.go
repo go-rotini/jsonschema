@@ -1,10 +1,10 @@
 package jsonschema
 
 // Keyword is the metadata-only interface every JSON Schema keyword satisfies.
-// Phase 2 stores keyword metadata (name + version range) so the compiler can
-// route a schema member to the right evaluator and so tooling can enumerate
-// the active set per draft. The actual evaluator interface lands in Phase 4
-// alongside the validator engine.
+// It carries the keyword's name and the [Draft] range in which it is
+// recognized. The compiler uses these values to route a schema member to its
+// evaluator; tooling uses them to enumerate the keyword set active for a
+// given draft via [KeywordsForDraft] / [LookupKeyword].
 type Keyword interface {
 	// Name returns the keyword as it appears in a schema (e.g. "minLength").
 	Name() string
@@ -17,7 +17,7 @@ type Keyword interface {
 
 // Vocabulary groups a set of keywords under a single URI per Draft 2019-09's
 // vocabulary mechanism. The standard vocabularies are registered at package
-// init time; callers can add their own via [WithVocabulary] (Phase 3+).
+// init time; callers can add their own via [WithVocabulary].
 type Vocabulary struct {
 	// URI is the canonical identifier for the vocabulary (e.g.
 	// VocabApplicator).
@@ -73,10 +73,9 @@ const (
 	OASBaseSchemaURL = "https://spec.openapis.org/oas/3.1/schema/2022-10-07"
 )
 
-// simpleKeyword is the Phase 2 stub implementation of [Keyword]. It carries
-// the metadata only. Phase 4 introduces a dedicated evaluator type per
-// keyword and replaces the registry entries; until then the compiler treats
-// every keyword as a metadata-only stub.
+// simpleKeyword is the metadata-only implementation of [Keyword] used by the
+// standard vocabularies. The evaluator graph for each keyword is registered
+// separately via the per-keyword evaluator builders in eval_*.go.
 type simpleKeyword struct {
 	name    string
 	since   Draft

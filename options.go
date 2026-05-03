@@ -122,9 +122,9 @@ func WithRegexEngine(e RegexEngine) CompileOption {
 // against its declared meta-schema. Catches typos and structural errors
 // early. Default: false (off for performance; recommended in CI).
 //
-// PHASE 3 NOTE: the validator engine lands in Phase 4, so the actual meta-
-// schema validation is deferred. Phase 3 stores the option so callers can
-// configure the compiler today.
+// When the schema declares the OpenAPI 3.1 dialect URL ([OASDialectURL])
+// the embedded dialect meta-schema is used; otherwise the standard
+// meta-schema for the schema's draft is used.
 func WithMetaSchemaValidation(b bool) CompileOption {
 	return func(o *compileOptions) { o.metaSchemaValidation = b }
 }
@@ -144,8 +144,9 @@ func WithLoaderTrace(w io.Writer) CompileOption {
 // Option configures a single validation call. Applied to [*Schema] Validate
 // methods and the package-level [Validate] function.
 //
-// PHASE 3 NOTE: the validator engine lands in Phase 4. Phase 3 declares the
-// constructors so Phase 4 can plug them in without churning the API surface.
+// Options are evaluated left-to-right; later options override earlier ones
+// for the same field. Most callers will mix [WithFormatAssertion],
+// [WithStopOnFirstError], [WithMaxValidationDepth], and [WithCustomFormat].
 type Option func(*runOptions)
 
 // runOptions carries the per-call validation configuration.
@@ -166,9 +167,6 @@ type runOptions struct {
 // defaultRunOptions returns a freshly-initialized [*runOptions] with sensible
 // defaults: format / content as annotation-only, validation depth at 1000,
 // annotation collection enabled, no instance-size cap.
-//
-// Phase 3 leaves the helper unexported and lightly-used; Phase 4 will
-// invoke it from the validator entry points once the engine lands.
 func defaultRunOptions() *runOptions {
 	return &runOptions{
 		formatAssertion:     false,
@@ -257,13 +255,12 @@ func WithCollectAnnotations(b bool) Option {
 	return func(o *runOptions) { o.collectAnnotations = b }
 }
 
-// GenerateOption configures the schema generator. The generator is a Phase 7
-// deliverable; Phase 3 only declares the option type and constructors so
-// later phases can compile against the public surface without churn.
+// GenerateOption configures the schema generator. Pass options to [Generate],
+// [GenerateBytes], [FromType], or [NewGenerator]; later constructors return a
+// reusable [*Generator] that amortizes option parsing across many types.
 type GenerateOption func(*generateOptions)
 
-// generateOptions carries the generator's configuration. Phase 7 wires these
-// up; Phase 3 simply stores the values.
+// generateOptions carries the generator's configuration.
 type generateOptions struct {
 	draft                     Draft
 	id                        string
@@ -370,10 +367,8 @@ func WithCustomEmitter[T any](fn func(reflect.Type) *Schema) GenerateOption {
 
 // WithDocReader extracts Go doc comments from src files (passed as an
 // [fs.FS]) and uses them as the description annotation for matching struct
-// fields.
-//
-// PHASE 7 STUB: the option is stored on [generateOptions] but Phase 7 wires
-// up the AST walker that consumes it.
+// fields. The generator parses the source files lazily on first use; if the
+// FS contains no Go sources the option is a no-op.
 func WithDocReader(src fs.FS) GenerateOption {
 	return func(o *generateOptions) { o.docReaderFS = src }
 }
