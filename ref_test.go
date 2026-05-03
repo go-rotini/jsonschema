@@ -2,6 +2,8 @@ package jsonschema
 
 import (
 	"errors"
+	"fmt"
+	"strings"
 	"testing"
 )
 
@@ -259,5 +261,177 @@ func TestJSONPointerInvalidIndex(t *testing.T) {
 	root := []any{"x"}
 	if _, err := jsonPointer(root, "/foo"); err == nil {
 		t.Error("expected invalid-index error")
+	}
+}
+
+// TestRefSelfLoop verifies that a top-level {"$ref": "#"} terminates
+// (via WithMaxRefDepth) instead of recursing forever.
+func TestRefSelfLoop(t *testing.T) {
+	schema, err := Compile([]byte(`{"$ref":"#"}`))
+	if err != nil {
+		t.Fatalf("compile: %v", err)
+	}
+	res, err := schema.Validate([]byte(`null`))
+	if err != nil {
+		// Some configurations surface the depth limit as an error rather
+		// than a result error; both are acceptable.
+		if !strings.Contains(err.Error(), "max ref depth") {
+			t.Fatalf("validate: %v", err)
+		}
+		return
+	}
+	if res == nil {
+		t.Fatal("nil result")
+	}
+	if res.Valid {
+		return
+	}
+	found := false
+	for _, e := range res.Errors {
+		if strings.Contains(e.Message, "max ref depth") {
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Fatalf("expected max-ref-depth error in result, got: %+v", res.Errors)
+	}
+}
+
+// TestRefBillionLaughs builds a schema where each $defs entry references
+// the next several times. The expansion would be exponential under naive
+// inlining; with WithMaxRefDepth in place the validator must terminate
+// cleanly.
+func TestRefBillionLaughs(t *testing.T) {
+	const levels = 12
+	var b strings.Builder
+	b.WriteString(`{"$defs":{`)
+	for i := 0; i <= levels; i++ {
+		if i > 0 {
+			b.WriteString(",")
+		}
+		if i == levels {
+			fmt.Fprintf(&b, `"l%d":{"type":"string"}`, i)
+			continue
+		}
+		fmt.Fprintf(&b, `"l%d":{"allOf":[{"$ref":"#/$defs/l%d"},{"$ref":"#/$defs/l%d"},{"$ref":"#/$defs/l%d"}]}`, i, i+1, i+1, i+1)
+	}
+	b.WriteString(`},"$ref":"#/$defs/l0"}`)
+	schema, err := Compile([]byte(b.String()), WithMaxRefDepth(50))
+	if err != nil {
+		t.Fatalf("compile: %v", err)
+	}
+	res, err := schema.Validate([]byte(`"hi"`))
+	if err != nil {
+		if strings.Contains(err.Error(), "max ref depth") {
+			return
+		}
+		t.Fatalf("validate: %v", err)
+	}
+	if res == nil {
+		t.Fatal("nil result")
+	}
+	// Either Valid:true (validation bounded) or a max-ref-depth error are
+	// acceptable; the only failure mode is stack overflow / OOM.
+	_ = res
+}
+
+// TestRefMutuallyRecursiveAcrossIDs exercises two $id-bounded resources
+// that reference one another via absolute refs, then validates an instance
+// that alternates between them.
+func TestRefMutuallyRecursiveAcrossIDs(t *testing.T) {
+	schema, err := Compile([]byte(`{
+		"$id": "https://example.com/root",
+		"$schema": "https://json-schema.org/draft/2020-12/schema",
+		"$defs": {
+			"a": {
+				"$id": "https://example.com/a",
+				"type": "object",
+				"properties": {"next": {"$ref": "https://example.com/b"}}
+			},
+			"b": {
+				"$id": "https://example.com/b",
+				"type": "object",
+				"properties": {"next": {"$ref": "https://example.com/a"}}
+			}
+		},
+		"$ref": "https://example.com/a"
+	}`))
+	if err != nil {
+		t.Fatalf("compile: %v", err)
+	}
+	res, err := schema.Validate([]byte(`{"next":{"next":{"next":{}}}}`))
+	if err != nil {
+		t.Fatalf("validate: %v", err)
+	}
+	if !res.Valid {
+		t.Fatalf("expected valid; got %+v", res.Errors)
+	}
+}
+
+// TestRefPlainNameAnchorEndToEnd exercises plain-name fragment refs (#name)
+// that land on a $anchor declaration in a nested $defs entry, end-to-end
+// through Compile + Validate.
+func TestRefPlainNameAnchorEndToEnd(t *testing.T) {
+	schema, err := Compile([]byte(`{
+		"$schema": "https://json-schema.org/draft/2020-12/schema",
+		"$id": "https://example.com/anchored",
+		"$defs": {
+			"named": {
+				"$anchor": "myThing",
+				"type": "string",
+				"minLength": 2
+			}
+		},
+		"$ref": "#myThing"
+	}`))
+	if err != nil {
+		t.Fatalf("compile: %v", err)
+	}
+	res, err := schema.Validate([]byte(`"ok"`))
+	if err != nil {
+		t.Fatalf("validate: %v", err)
+	}
+	if !res.Valid {
+		t.Fatalf("expected valid; got errors: %+v", res.Errors)
+	}
+	res, err = schema.Validate([]byte(`"x"`))
+	if err != nil {
+		t.Fatalf("validate: %v", err)
+	}
+	if res.Valid {
+		t.Fatal("expected anchor-targeted minLength=2 to reject single-char string")
+	}
+}
+
+// TestRefRecursiveDynamic exercises a $dynamicRef that recurses through
+// itself across nested instance values. The canonical use case is a tree
+// schema where each node carries a list of children referencing the same
+// schema. With WithMaxRefDepth and instance-bounded recursion, the walk
+// must terminate.
+func TestRefRecursiveDynamic(t *testing.T) {
+	schema, err := Compile([]byte(`{
+		"$schema": "https://json-schema.org/draft/2020-12/schema",
+		"$id": "https://example.com/tree",
+		"$dynamicAnchor": "node",
+		"type": "object",
+		"properties": {
+			"value": {"type": "string"},
+			"children": {
+				"type": "array",
+				"items": {"$dynamicRef": "#node"}
+			}
+		}
+	}`))
+	if err != nil {
+		t.Fatalf("compile: %v", err)
+	}
+	tree := []byte(`{"value":"root","children":[{"value":"a","children":[]},{"value":"b","children":[{"value":"b1","children":[]}]}]}`)
+	res, err := schema.Validate(tree)
+	if err != nil {
+		t.Fatalf("validate: %v", err)
+	}
+	if !res.Valid {
+		t.Fatalf("expected valid; got errors: %+v", res.Errors)
 	}
 }
