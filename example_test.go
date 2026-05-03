@@ -38,6 +38,23 @@ func ExampleSchema_Validate() {
 	// false true
 }
 
+// ExampleValidate is the one-shot Compile + Validate convenience for
+// callers that only validate one instance and don't need to retain the
+// compiled [*jsonschema.Schema].
+func ExampleValidate() {
+	res, err := jsonschema.Validate(
+		[]byte(`{"type":"integer","minimum":0}`),
+		[]byte(`-5`),
+	)
+	if err != nil {
+		fmt.Println("err:", err)
+		return
+	}
+	fmt.Println(res.Valid)
+	// Output:
+	// false
+}
+
 // ExampleSchema_Validate_integer demonstrates compiling a schema with a
 // numeric type assertion and validating an integer instance.
 func ExampleSchema_Validate_integer() {

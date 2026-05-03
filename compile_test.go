@@ -379,10 +379,27 @@ func TestCompileMutuallyRecursive(t *testing.T) {
 	}
 }
 
-func TestValidateTopLevelStubReturnsValidatorNotImplemented(t *testing.T) {
-	_, err := Validate([]byte(`{}`), []byte(`null`))
-	if !errors.Is(err, ErrValidatorNotImplemented) {
-		t.Errorf("Validate err = %v, want ErrValidatorNotImplemented", err)
+func TestValidateTopLevelValidatesInstance(t *testing.T) {
+	res, err := Validate(
+		[]byte(`{"type":"string","minLength":3}`),
+		[]byte(`"ok!"`),
+	)
+	if err != nil {
+		t.Fatalf("Validate err = %v", err)
+	}
+	if !res.Valid {
+		t.Errorf("Validate res.Valid = false, want true; errors=%v", res.Errors)
+	}
+
+	res, err = Validate(
+		[]byte(`{"type":"string","minLength":3}`),
+		[]byte(`"x"`),
+	)
+	if err != nil {
+		t.Fatalf("Validate err = %v", err)
+	}
+	if res.Valid {
+		t.Errorf("Validate res.Valid = true, want false for short string")
 	}
 }
 

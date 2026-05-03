@@ -10,13 +10,6 @@ import (
 	"sync"
 )
 
-// ErrValidatorNotImplemented is returned by the package-level [Validate]
-// shorthand. It is a deliberate stub: the shorthand is discouraged because
-// it discards the [*Schema] after a single use. Callers should compile once
-// via [Compile] (or [NewCompiler]) and call [*Schema.Validate] for each
-// instance.
-var ErrValidatorNotImplemented = errors.New("jsonschema: package-level Validate shorthand not implemented; call Compile then Schema.Validate")
-
 // errTrailingContent is the static sentinel used by [decodeSchemaBytes]
 // when the schema document is followed by extra non-whitespace bytes.
 var errTrailingContent = errors.New("trailing content after schema")
@@ -91,16 +84,16 @@ func MustCompileURL(uri string, opts ...CompileOption) *Schema {
 	return s
 }
 
-// Validate is a discouraged shorthand: it compiles schemaJSON for typed-error
-// coverage and then returns [ErrValidatorNotImplemented] in place of a
-// [*Result]. The single-shot form would discard the [*Schema] after one use,
-// so callers should compile once via [Compile] (or [NewCompiler]) and call
-// [*Schema.Validate] for each instance to amortize compilation.
-func Validate(schemaJSON, _ []byte, _ ...Option) (*Result, error) {
-	if _, err := Compile(schemaJSON); err != nil {
+// Validate compiles schemaJSON and validates instanceJSON against it in one
+// call. This is a convenience for one-shot use; callers performing multiple
+// validations against the same schema should call [Compile] once and use
+// [*Schema.Validate] to amortize compilation cost.
+func Validate(schemaJSON, instanceJSON []byte, opts ...Option) (*Result, error) {
+	s, err := Compile(schemaJSON)
+	if err != nil {
 		return nil, err
 	}
-	return nil, ErrValidatorNotImplemented
+	return s.Validate(instanceJSON, opts...)
 }
 
 // Compiler holds compile-time configuration and a cache of compiled remote
