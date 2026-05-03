@@ -292,7 +292,7 @@ func (c *Compiler) compile(value any, rawSource []byte, baseURI string) (*Schema
 	schema.root = root
 
 	if c.opts.metaSchemaValidation {
-		if err := validateAgainstMetaSchema(schema, value, draft); err != nil {
+		if err := validateAgainstMetaSchema(schema, value, draft, metaSchemaURI); err != nil {
 			return nil, err
 		}
 	}
@@ -301,12 +301,23 @@ func (c *Compiler) compile(value any, rawSource []byte, baseURI string) (*Schema
 }
 
 // validateAgainstMetaSchema validates value (the user schema) against the
-// embedded meta-schema for draft. Failures are returned as a
-// [*CompileError] with the validation errors as a cause.
-func validateAgainstMetaSchema(_ *Schema, value any, draft Draft) error {
-	ms, err := MetaSchema(draft)
-	if err != nil {
-		return &CompileError{Message: "load meta-schema", Cause: err}
+// embedded meta-schema for draft, or — when metaSchemaURI names a known
+// dialect ([dialectMetaSchemaPaths]) — against the dialect's meta-schema.
+// Failures are returned as a [*CompileError] with the validation errors as
+// a cause.
+func validateAgainstMetaSchema(_ *Schema, value any, draft Draft, metaSchemaURI string) error {
+	var ms *Schema
+	if metaSchemaURI != "" {
+		if dialectMS, ok := metaSchemaForDialect(metaSchemaURI); ok {
+			ms = dialectMS
+		}
+	}
+	if ms == nil {
+		s, err := MetaSchema(draft)
+		if err != nil {
+			return &CompileError{Message: "load meta-schema", Cause: err}
+		}
+		ms = s
 	}
 	res, err := ms.ValidateValue(value)
 	if err != nil {

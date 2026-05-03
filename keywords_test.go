@@ -35,14 +35,16 @@ func TestVocabularyConstants(t *testing.T) {
 	}
 }
 
-func TestVocabulariesReturnsEightStdEntries(t *testing.T) {
+func TestVocabulariesReturnsStdEntries(t *testing.T) {
 	v := Vocabularies()
-	if len(v) != 8 {
-		t.Fatalf("Vocabularies len = %d, want 8", len(v))
+	// Eight Draft 2020-12 vocabularies plus the OpenAPI 3.1 base vocabulary.
+	if len(v) != 9 {
+		t.Fatalf("Vocabularies len = %d, want 9", len(v))
 	}
 	want := []string{
 		VocabCore, VocabApplicator, VocabUnevaluated, VocabValidation,
 		VocabFormatAnnot, VocabFormatAssert, VocabContent, VocabMetaData,
+		VocabOAS,
 	}
 	for i, w := range want {
 		if v[i].URI != w {
@@ -228,8 +230,16 @@ func TestVocabularyURIsAreUnique(t *testing.T) {
 			t.Errorf("duplicate vocabulary URI %q", v.URI)
 		}
 		seen[v.URI] = true
-		if !strings.HasPrefix(v.URI, "https://json-schema.org/draft/2020-12/vocab/") {
-			t.Errorf("vocabulary URI %q does not match the 2020-12 prefix", v.URI)
+		// Standard Draft 2020-12 vocabularies share a stable prefix; the
+		// OpenAPI 3.1 base vocabulary lives under spec.openapis.org and
+		// is enumerated explicitly.
+		switch {
+		case strings.HasPrefix(v.URI, "https://json-schema.org/draft/2020-12/vocab/"):
+			// ok
+		case v.URI == VocabOAS:
+			// ok
+		default:
+			t.Errorf("vocabulary URI %q does not match a known prefix", v.URI)
 		}
 	}
 }

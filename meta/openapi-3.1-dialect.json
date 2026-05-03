@@ -1,0 +1,65 @@
+{
+  "$id": "https://spec.openapis.org/oas/3.1/dialect/base",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$dynamicAnchor": "meta",
+  "title": "OpenAPI 3.1 Schema Object Dialect",
+  "description": "A JSON Schema dialect describing the JSON Schema Schema Objects used by OpenAPI 3.1. This is JSON Schema Draft 2020-12 with the OpenAPI base vocabulary applied.",
+
+  "$vocabulary": {
+    "https://json-schema.org/draft/2020-12/vocab/core": true,
+    "https://json-schema.org/draft/2020-12/vocab/applicator": true,
+    "https://json-schema.org/draft/2020-12/vocab/unevaluated": true,
+    "https://json-schema.org/draft/2020-12/vocab/validation": true,
+    "https://json-schema.org/draft/2020-12/vocab/meta-data": true,
+    "https://json-schema.org/draft/2020-12/vocab/format-annotation": true,
+    "https://json-schema.org/draft/2020-12/vocab/content": true,
+    "https://spec.openapis.org/oas/3.1/vocab/base": false
+  },
+
+  "allOf": [
+    { "$ref": "https://json-schema.org/draft/2020-12/schema" },
+    { "$ref": "#/$defs/oas-base" }
+  ],
+
+  "$defs": {
+    "oas-base": {
+      "$dynamicAnchor": "meta",
+      "type": ["object", "boolean"],
+      "properties": {
+        "example": true,
+        "discriminator": { "$ref": "#/$defs/discriminator" },
+        "externalDocs": { "$ref": "#/$defs/external-docs" },
+        "xml": { "$ref": "#/$defs/xml" }
+      }
+    },
+    "discriminator": {
+      "type": "object",
+      "properties": {
+        "propertyName": { "type": "string" },
+        "mapping": {
+          "type": "object",
+          "additionalProperties": { "type": "string" }
+        }
+      },
+      "required": ["propertyName"]
+    },
+    "external-docs": {
+      "type": "object",
+      "properties": {
+        "url": { "type": "string", "format": "uri-reference" },
+        "description": { "type": "string" }
+      },
+      "required": ["url"]
+    },
+    "xml": {
+      "type": "object",
+      "properties": {
+        "name": { "type": "string" },
+        "namespace": { "type": "string", "format": "uri" },
+        "prefix": { "type": "string" },
+        "attribute": { "type": "boolean" },
+        "wrapped": { "type": "boolean" }
+      }
+    }
+  }
+}

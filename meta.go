@@ -26,6 +26,16 @@ var metaSchemaPaths = map[Draft]string{
 	Draft202012: "meta/draft-2020-12.json",
 }
 
+// dialectMetaSchemaPaths maps known dialect meta-schema URIs (those that
+// are not one of the canonical draft URLs) to embedded files in
+// [metaSchemaFS]. The package consults this map before falling back to the
+// draft-keyed meta-schema in [validateAgainstMetaSchema] so that schemas
+// declaring `$schema: "https://spec.openapis.org/oas/3.1/dialect/base"`
+// validate against the correct dialect rather than plain Draft 2020-12.
+var dialectMetaSchemaPaths = map[string]string{
+	OASDialectURL: "meta/openapi-3.1-dialect.json",
+}
+
 // MetaSchemaBytes returns the JSON bytes of the canonical meta-schema for
 // d. The bytes are a slice into the package's embedded copy and must be
 // treated as read-only; callers that need a mutable buffer should copy.
@@ -56,6 +66,9 @@ func MetaSchemaURL(d Draft) string {
 var (
 	metaSchemaCacheMu sync.Mutex
 	metaSchemaCache   = make(map[Draft]*Schema)
+
+	dialectMetaSchemaCacheMu sync.Mutex
+	dialectMetaSchemaCache   = make(map[string]*Schema)
 )
 
 // MetaSchema returns the compiled [*Schema] for the canonical meta-schema
@@ -84,4 +97,32 @@ func MetaSchema(d Draft) (*Schema, error) {
 	}
 	metaSchemaCache[d] = s
 	return s, nil
+}
+
+// metaSchemaForDialect returns the compiled meta-schema for the dialect URI
+// uri, or (nil, false) when uri does not name an embedded dialect. The
+// result is memoized; repeated calls for the same URI return the same
+// pointer. Used by [validateAgainstMetaSchema] when a schema's `$schema`
+// names a dialect rather than a canonical draft URL.
+func metaSchemaForDialect(uri string) (*Schema, bool) {
+	path, ok := dialectMetaSchemaPaths[uri]
+	if !ok {
+		return nil, false
+	}
+	dialectMetaSchemaCacheMu.Lock()
+	defer dialectMetaSchemaCacheMu.Unlock()
+	if s, ok := dialectMetaSchemaCache[uri]; ok {
+		return s, true
+	}
+	data, err := fs.ReadFile(metaSchemaFS, path)
+	if err != nil {
+		return nil, false
+	}
+	c := NewCompiler(WithLoader(embeddedMetaMapLoader()), WithDefaultDraft(Draft202012))
+	s, err := c.Compile(data)
+	if err != nil {
+		return nil, false
+	}
+	dialectMetaSchemaCache[uri] = s
+	return s, true
 }

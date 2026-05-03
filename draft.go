@@ -93,6 +93,11 @@ func (d Draft) DefsKeyword() string {
 // Both http:// and https:// variants of the legacy URLs are accepted, and
 // trailing # fragments are tolerated. Returns [DraftUnknown] when no draft
 // matches.
+//
+// The OpenAPI 3.1 dialect URL ([OASDialectURL]) maps to [Draft202012] —
+// the dialect is a strict superset of Draft 2020-12, so resolving it to
+// Draft 2020-12 wires the schema into the standard 2020-12 evaluator graph
+// and lets the OAS-specific annotation keywords ride along.
 func DraftFromMetaSchemaURL(url string) Draft {
 	canon := canonicalizeMetaSchemaURL(url)
 	switch canon {
@@ -105,6 +110,8 @@ func DraftFromMetaSchemaURL(url string) Draft {
 	case "json-schema.org/draft/2019-09/schema":
 		return Draft201909
 	case "json-schema.org/draft/2020-12/schema":
+		return Draft202012
+	case "spec.openapis.org/oas/3.1/dialect/base":
 		return Draft202012
 	default:
 		return DraftUnknown

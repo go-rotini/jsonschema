@@ -431,6 +431,20 @@ func embeddedMetaMapLoader() MapLoader {
 			}
 		}
 	}
+	// OpenAPI 3.1 Schema Object dialect meta-schema. Registers under its
+	// canonical $id ([OASDialectURL]) so callers declaring
+	// `$schema: "https://spec.openapis.org/oas/3.1/dialect/base"` can
+	// resolve the dialect offline.
+	if data, err := fs.ReadFile(metaSchemaFS, "meta/openapi-3.1-dialect.json"); err == nil {
+		if id := extractID(data); id != "" {
+			m[id] = data
+			if trimmed, found := strings.CutSuffix(id, "#"); found {
+				m[trimmed] = data
+			} else {
+				m[id+"#"] = data
+			}
+		}
+	}
 	return m
 }
 

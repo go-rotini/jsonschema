@@ -52,6 +52,25 @@ const (
 	// VocabMetaData identifies title / description / default / examples /
 	// readOnly / writeOnly / deprecated.
 	VocabMetaData = "https://json-schema.org/draft/2020-12/vocab/meta-data"
+	// VocabOAS identifies the OpenAPI 3.1 base vocabulary that ships with
+	// the OAS dialect ([OASDialectURL]). It contributes the four annotation-
+	// only keywords [discriminator], [xml], [externalDocs], and [example].
+	// The package registers this vocabulary unconditionally so OpenAPI 3.1
+	// schemas compile cleanly whether or not their $schema points at the
+	// OAS dialect.
+	VocabOAS = "https://spec.openapis.org/oas/3.1/vocab/base"
+)
+
+// OAS dialect identifiers for OpenAPI 3.1.
+const (
+	// OASDialectURL is the canonical URI of the OpenAPI 3.1 Schema Object
+	// dialect's meta-schema. A schema declaring this URL as $schema opts
+	// into Draft 2020-12 plus the [VocabOAS] vocabulary.
+	OASDialectURL = "https://spec.openapis.org/oas/3.1/dialect/base"
+	// OASBaseSchemaURL is the canonical $id of the upstream OpenAPI 3.1
+	// document schema (the schema that validates OpenAPI documents
+	// themselves, distinct from the dialect that those schemas use).
+	OASBaseSchemaURL = "https://spec.openapis.org/oas/3.1/schema/2022-10-07"
 )
 
 // simpleKeyword is the Phase 2 stub implementation of [Keyword]. It carries
@@ -207,6 +226,21 @@ var stdVocabularies = []Vocabulary{
 			kw("readOnly", Draft7, DraftUnknown),
 			kw("writeOnly", Draft7, DraftUnknown),
 			kw("examples", Draft6, DraftUnknown),
+		},
+	},
+	{
+		// OpenAPI 3.1 base vocabulary. The OAS dialect layers these four
+		// annotation-only keywords on top of Draft 2020-12. They are
+		// recognized for every draft from 2020-12 onward (since the
+		// dialect itself is built on 2020-12); pre-2020-12 schemas that
+		// happen to use them still tolerate them as unknown keywords
+		// when WithStrictKeywords is off.
+		URI: VocabOAS,
+		Keywords: []Keyword{
+			kw("discriminator", Draft202012, DraftUnknown),
+			kw("xml", Draft202012, DraftUnknown),
+			kw("externalDocs", Draft202012, DraftUnknown),
+			kw("example", Draft202012, DraftUnknown),
 		},
 	},
 }
