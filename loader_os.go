@@ -5,9 +5,8 @@ import (
 	"os"
 )
 
-// readFileImpl is the production implementation of the FileLoader's read
-// hook. It exists in its own file so the test code can override it via the
-// readFile var in loader.go.
+// readFileImpl is the production read hook for FileLoader; tests can
+// override the readFile var in loader.go.
 func readFileImpl(path string) ([]byte, error) {
 	data, err := os.ReadFile(path)
 	if err != nil {

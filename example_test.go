@@ -14,14 +14,14 @@ func ExampleCompile() {
 		fmt.Println("compile error:", err)
 		return
 	}
-	res, err := schema.Validate([]byte(`"hi"`))
+	res, err := schema.Validate([]byte(`"hello"`))
 	if err != nil {
 		fmt.Println("validate error:", err)
 		return
 	}
 	fmt.Println(res.Valid)
 	// Output:
-	// false
+	// true
 }
 
 // ExampleSchema_Validate demonstrates validating an instance against a
@@ -105,4 +105,58 @@ func ExampleNewCompiler() {
 	fmt.Println(r1.Valid, r2.Valid)
 	// Output:
 	// true true
+}
+
+// ExampleLoadJSONC compiles a schema authored as JSONC (JSON with comments)
+// and validates a JSON instance against it.
+func ExampleLoadJSONC() {
+	schemaJSONC := []byte(`{
+		// minimum string length is 3
+		"type": "string",
+		"minLength": 3
+	}`)
+	schema, err := jsonschema.LoadJSONC(schemaJSONC)
+	if err != nil {
+		fmt.Println("load error:", err)
+		return
+	}
+	res, _ := schema.Validate([]byte(`"hello"`))
+	fmt.Println(res.Valid)
+	// Output:
+	// true
+}
+
+// ExampleLoadYAML compiles a schema authored as YAML and validates a JSON
+// instance against it.
+func ExampleLoadYAML() {
+	schemaYAML := []byte(`type: integer
+minimum: 0
+maximum: 100
+`)
+	schema, err := jsonschema.LoadYAML(schemaYAML)
+	if err != nil {
+		fmt.Println("load error:", err)
+		return
+	}
+	res, _ := schema.Validate([]byte(`42`))
+	fmt.Println(res.Valid)
+	// Output:
+	// true
+}
+
+// ExampleLoadTOML compiles a schema authored as TOML and validates a JSON
+// instance against it.
+func ExampleLoadTOML() {
+	schemaTOML := []byte(`type = "string"
+minLength = 1
+`)
+	schema, err := jsonschema.LoadTOML(schemaTOML)
+	if err != nil {
+		fmt.Println("load error:", err)
+		return
+	}
+	res, _ := schema.Validate([]byte(`"hi"`))
+	fmt.Println(res.Valid)
+	// Output:
+	// true
 }

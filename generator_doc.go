@@ -54,16 +54,10 @@ func (g *Generator) loadDocCache() map[string]string {
 	return g.docCache
 }
 
-// buildDocCache walks the fs.FS, parses each `.go` file, and harvests
-// per-field doc comments. The map is keyed by:
-//   - `<TypeName>.<FieldName>` for type-qualified lookups, and
-//   - `<FieldName>` as a convenience fallback.
-//
-// Conflicts between fallbacks are resolved last-write-wins; callers that
-// need precise targeting should write a `description=` tag instead. Per-
-// file errors are intentionally swallowed — the doc reader is documented
-// as best-effort and must not fail generation when a Go source is
-// malformed or unreadable.
+// buildDocCache walks the fs.FS, parses each Go file, and harvests
+// per-field doc comments keyed by "<TypeName>.<FieldName>" plus a bare
+// "<FieldName>" fallback (last-write-wins on collision). Per-file errors
+// are swallowed: the doc reader is best-effort.
 func buildDocCache(fsys fs.FS) map[string]string {
 	out := make(map[string]string)
 	fset := token.NewFileSet()
@@ -89,9 +83,7 @@ func buildDocCache(fsys fs.FS) map[string]string {
 	return out
 }
 
-// harvestFile pulls type-spec field doc-comments out of a parsed file and
-// writes them into out. Only struct types are considered (interfaces and
-// other shapes don't apply to the generator's reflection walk).
+// harvestFile collects struct-field doc comments from f into out.
 func harvestFile(f *ast.File, out map[string]string) {
 	for _, decl := range f.Decls {
 		gd, ok := decl.(*ast.GenDecl)
@@ -123,10 +115,8 @@ func harvestFile(f *ast.File, out map[string]string) {
 	}
 }
 
-// fieldDocText extracts the doc text associated with a field declaration.
-// Prefers a leading doc comment block; falls back to a trailing line
-// comment on the same line. Returns the trimmed first paragraph so common
-// godoc-style multi-line comments collapse into one description string.
+// fieldDocText returns the leading doc comment for a field, or — failing
+// that — its trailing line comment, condensed to a single line.
 func fieldDocText(field *ast.Field) string {
 	if field.Doc != nil {
 		return condenseComment(field.Doc.Text())
@@ -137,8 +127,8 @@ func fieldDocText(field *ast.Field) string {
 	return ""
 }
 
-// condenseComment turns a multi-line godoc string into a single-line
-// description by joining non-blank lines with a space.
+// condenseComment joins a multi-line godoc string's non-blank lines with
+// single spaces.
 func condenseComment(in string) string {
 	in = strings.TrimSpace(in)
 	if in == "" {

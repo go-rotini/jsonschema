@@ -21,14 +21,11 @@ type compileOptions struct {
 	baseURI              string
 	maxRefDepth          int
 	strictKeywords       bool
-	customVocabularies   []Vocabulary
-	regexEngine          RegexEngine
 	metaSchemaValidation bool
 	refCollisionPolicy   RefCollisionPolicy
 	loaderTrace          io.Writer
 	defaultDraftSet      bool
 	loaderSet            bool
-	regexEngineSet       bool
 	maxRefDepthSet       bool
 }
 
@@ -85,37 +82,10 @@ func WithStrictKeywords(b bool) CompileOption {
 	return func(o *compileOptions) { o.strictKeywords = b }
 }
 
-// WithVocabulary registers a custom [Vocabulary] (a set of additional
-// keywords). Custom vocabularies take effect when their URI appears in the
-// schema's $vocabulary block.
-func WithVocabulary(v Vocabulary) CompileOption {
-	return func(o *compileOptions) {
-		o.customVocabularies = append(o.customVocabularies, v)
-	}
-}
-
-// RegexEngine swaps the regex engine used to compile the "pattern" keyword.
-// The default engine uses Go's [regexp] in Perl mode, which covers a useful
-// subset of ECMA-262 — incompatible patterns surface as compile errors.
-type RegexEngine interface {
-	// Compile parses pattern and returns a compiled matcher.
-	Compile(pattern string) (RegexMatcher, error)
-}
-
-// RegexMatcher is the minimal interface that a regex engine must expose for
-// the validator's "pattern" keyword. Implementations should be safe for
-// concurrent use.
-type RegexMatcher interface {
-	// MatchString reports whether pattern matches anywhere in s.
-	MatchString(s string) bool
-}
-
-// WithRegexEngine swaps the regex engine used by the "pattern" keyword.
-func WithRegexEngine(e RegexEngine) CompileOption {
-	return func(o *compileOptions) {
-		o.regexEngine = e
-		o.regexEngineSet = true
-	}
+// WithStrict is a zero-argument shorthand for [WithStrictKeywords](true).
+// Provided for consistency with the rotini sister packages.
+func WithStrict() CompileOption {
+	return WithStrictKeywords(true)
 }
 
 // WithMetaSchemaValidation enables compile-time validation of each schema
@@ -131,12 +101,15 @@ func WithMetaSchemaValidation(b bool) CompileOption {
 
 // WithRefCollisionPolicy controls behavior when two compiled documents
 // declare the same $id. Default: [RefCollisionError] (compile fails).
+//
+// In v0.1, only [RefCollisionError] is wired — other policy values are
+// reserved for v0.2 and currently behave the same as [RefCollisionError].
 func WithRefCollisionPolicy(p RefCollisionPolicy) CompileOption {
 	return func(o *compileOptions) { o.refCollisionPolicy = p }
 }
 
-// WithLoaderTrace writes one line per [Loader] call to w (URI, outcome,
-// duration, cache hit/miss). Useful for diagnosing $ref resolution.
+// WithLoaderTrace writes one line per [Loader] fetch to w. Useful for
+// diagnosing $ref resolution. Default: nil (no trace).
 func WithLoaderTrace(w io.Writer) CompileOption {
 	return func(o *compileOptions) { o.loaderTrace = w }
 }
@@ -202,9 +175,16 @@ func WithStopOnFirstError(b bool) Option {
 }
 
 // WithMaxInstanceSize rejects instance documents larger than n bytes before
-// parsing. Default: 0 (no limit).
+// parsing. n <= 0 disables the limit. Default: 0 (no limit). Returns
+// [ErrInstanceTooLarge] when an instance exceeds the cap.
 func WithMaxInstanceSize(n int) Option {
 	return func(o *runOptions) { o.maxInstanceSize = n }
+}
+
+// WithMaxDocumentSize is a sister-package alias for [WithMaxInstanceSize].
+// Both options write to the same underlying field; later calls win.
+func WithMaxDocumentSize(n int) Option {
+	return WithMaxInstanceSize(n)
 }
 
 // WithMaxValidationDepth limits recursion into nested objects/arrays to
@@ -212,6 +192,11 @@ func WithMaxInstanceSize(n int) Option {
 // Default: 1000.
 func WithMaxValidationDepth(n int) Option {
 	return func(o *runOptions) { o.maxValidationDepth = n }
+}
+
+// WithMaxDepth is a sister-package alias for [WithMaxValidationDepth].
+func WithMaxDepth(n int) Option {
+	return WithMaxValidationDepth(n)
 }
 
 // WithUnknownFormat controls handling of unrecognized "format" names.
@@ -237,14 +222,18 @@ func WithMaxErrors(n int) Option {
 	return func(o *runOptions) { o.maxErrors = n }
 }
 
-// WithReadOnly enables direction-aware validation in the "output" direction.
-// readOnly properties remain required if listed in required; writeOnly
-// properties become optional and are skipped if present.
+// WithReadOnly enables direction-aware validation in the "read" direction
+// (the value is being produced as output). Required properties whose schema
+// is annotated `"writeOnly": true` are not enforced because such fields
+// should not appear in output documents.
 func WithReadOnly(b bool) Option {
 	return func(o *runOptions) { o.readOnly = b }
 }
 
-// WithWriteOnly is the inverse of [WithReadOnly] for the "input" direction.
+// WithWriteOnly enables direction-aware validation in the "write" direction
+// (the value is being submitted as input). Required properties whose schema
+// is annotated `"readOnly": true` are not enforced because such fields
+// should not appear in input documents.
 func WithWriteOnly(b bool) Option {
 	return func(o *runOptions) { o.writeOnly = b }
 }
@@ -307,10 +296,6 @@ func WithGenerateOmitDescriptions(b bool) GenerateOption {
 
 // WithGenerateDurationAsString emits time.Duration as
 // {"type":"string","format":"duration"} instead of integer nanoseconds.
-//
-// The function name has the Generate prefix to disambiguate from any future
-// runtime option of the same intent; the underlying generator option is
-// equivalent to the requirements doc's "WithDurationAsString".
 func WithGenerateDurationAsString(b bool) GenerateOption {
 	return func(o *generateOptions) { o.durationAsString = b }
 }
@@ -320,8 +305,10 @@ func WithGenerateNullablePointers(b bool) GenerateOption {
 	return func(o *generateOptions) { o.nullablePointers = b }
 }
 
-// WithGenerateOrderedProperties uses [MapSlice] ordering for properties so
-// the emitted schema preserves Go field declaration order. Default: true.
+// WithGenerateOrderedProperties controls whether emitted struct schemas
+// preserve Go field declaration order. When true (default), `properties`
+// keys are emitted in declaration order. When false, the generator emits a
+// plain map[string]any whose key order is unspecified.
 func WithGenerateOrderedProperties(b bool) GenerateOption {
 	return func(o *generateOptions) {
 		o.orderedProperties = b

@@ -174,14 +174,15 @@ var (
 	// ErrUnknownKeyword indicates a keyword that is not registered for the
 	// active draft and [WithStrictKeywords] is enabled.
 	ErrUnknownKeyword = errors.New("jsonschema: unknown keyword")
-	// ErrUnknownVocabulary indicates a $vocabulary URI that the compiler
-	// has not been taught (no built-in or custom vocabulary matched).
-	ErrUnknownVocabulary = errors.New("jsonschema: unknown vocabulary")
 	// ErrUnknownFormat indicates a "format" value with no registered
-	// validator while the unknown-format policy is FormatError.
+	// validator while the unknown-format policy is [UnknownFormatError].
+	// Surfaced as the [FormatError.Cause] inside the wrapping
+	// [*ValidationError.Cause].
 	ErrUnknownFormat = errors.New("jsonschema: unknown format")
-	// ErrRefCycle indicates a cyclic $ref chain that the compiler could not
-	// turn into a lazy edge (e.g. a self-loop with no validation depth limit).
+	// ErrRefCycle indicates a cyclic $ref chain that the compiler could
+	// not turn into a lazy edge. Reserved for future use; v0.1's compile
+	// path resolves every cycle into a lazy edge bounded at run time by
+	// [WithMaxRefDepth] (which surfaces as [ErrMaxRefDepth]).
 	ErrRefCycle = errors.New("jsonschema: ref cycle detected")
 	// ErrMaxRefDepth indicates a single keyword evaluation followed more
 	// than [WithMaxRefDepth] hops.
@@ -208,18 +209,22 @@ var (
 	ErrNilReader = errors.New("jsonschema: nil reader")
 	// ErrUnsupportedSchemaShape indicates a schema slot held a value the
 	// compiler/runtime cannot evaluate (neither a JSON object nor a
-	// boolean schema).
+	// boolean schema). Surfaced as the [CompileError.Cause].
 	ErrUnsupportedSchemaShape = errors.New("jsonschema: unsupported schema shape")
 )
 
-// RenderError produces a human-readable error string. The signature accepts
-// the schema and instance source bytes plus an optional color flag so the
-// surface can grow into the full source-pointer formatter described in the
-// requirements doc; the v0.1 implementation returns err.Error() unchanged.
-// Programmatic callers should use [errors.Is] / [errors.As] against the
-// typed errors ([*CompileError], [*ValidationError], [*RefError],
-// [*LoaderError], [*FormatError]) and switch on
-// [ValidationError.Keyword] for stable error classification.
+// RenderError produces a human-readable error string.
+//
+// In v0.1 this is a passthrough: the function returns err.Error() and the
+// schema/instance bytes plus the color flag are accepted for forward
+// compatibility but are not used. The full source-pointer formatter
+// (showing the offending JSON line with a caret marker) is planned for
+// v0.2; the signature here is stable across that change.
+//
+// Programmatic callers should not parse the returned string — use
+// [errors.Is] / [errors.As] against the typed errors ([*CompileError],
+// [*ValidationError], [*RefError], [*LoaderError], [*FormatError]) and
+// switch on [ValidationError.Keyword] for stable classification.
 func RenderError(_, _ []byte, err error, _ ...bool) string {
 	if err == nil {
 		return ""

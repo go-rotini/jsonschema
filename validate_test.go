@@ -2,6 +2,7 @@ package jsonschema
 
 import (
 	"errors"
+	"fmt"
 	"strings"
 	"testing"
 )
@@ -16,7 +17,7 @@ type validateCase struct {
 func runValidateCases(t *testing.T, cases []validateCase) {
 	t.Helper()
 	for i, c := range cases {
-		t.Run(c.schema+"/"+c.data, func(t *testing.T) {
+		t.Run(fmt.Sprintf("%d_%s_%s", i, c.schema, c.data), func(t *testing.T) {
 			s, err := Compile([]byte(c.schema))
 			if err != nil {
 				t.Fatalf("case %d compile: %v (schema=%s)", i, err, c.schema)
@@ -507,5 +508,29 @@ func TestValidate_NilSchemaErrors(t *testing.T) {
 	var s *Schema
 	if _, err := s.Validate([]byte(`null`)); !errors.Is(err, ErrSchemaNotCompiled) {
 		t.Errorf("Validate(nil): %v", err)
+	}
+}
+
+// TestValidateRejectsTrailingContent confirms the instance decoder mirrors
+// the schema decoder: a single document followed by extra non-whitespace
+// content is rejected (no concatenated-document smuggling).
+func TestValidateRejectsTrailingContent(t *testing.T) {
+	s := MustCompile([]byte(`{"type":"integer"}`))
+	cases := []string{
+		`5 "trailing"`,
+		`5 5`,
+		`{"a":1} {"b":2}`,
+		`[1,2,3] []`,
+	}
+	for _, src := range cases {
+		t.Run(src, func(t *testing.T) {
+			_, err := s.Validate([]byte(src))
+			if err == nil {
+				t.Fatalf("Validate(%q): expected error", src)
+			}
+			if !errors.Is(err, errTrailingContent) {
+				t.Errorf("Validate(%q): errors.Is(err, errTrailingContent) = false; err = %v", src, err)
+			}
+		})
 	}
 }

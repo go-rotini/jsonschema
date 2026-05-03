@@ -12,7 +12,7 @@ This package defaults to safe behavior to mitigate denial-of-service attacks:
 
 - **Reference depth** is bounded via `WithMaxRefDepth` to prevent runaway `$ref` chains.
 - **Validation depth** is bounded to prevent stack exhaustion.
-- **Document size** can be capped via `WithMaxDocumentSize` option.
+- **Instance size** can be capped via `WithMaxDocumentSize` (alias `WithMaxInstanceSize`) to bound the bytes accepted from any single instance before parsing.
 - **Remote loaders** are HTTPS-only by default; HTTP and `file://` schemes are opt-in.
 
 These limits can be configured via compile and validate options but are set to safe defaults out of the box.

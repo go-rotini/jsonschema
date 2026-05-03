@@ -5,10 +5,6 @@ import (
 	"regexp"
 )
 
-// =====================================================================
-// allOf / anyOf / oneOf / not
-// =====================================================================.
-
 type allOfEval struct {
 	loc  string
 	subs []*subschema
@@ -108,7 +104,7 @@ func (e *notEval) eval(ctx *runCtx, instance any) {
 
 //nolint:gochecknoinits // evaluator registry is built at package init by design.
 func init() {
-	registerEvaluator("allOf", func(b *evalBuilder, raw any, loc string) (evaluator, error) {
+	registerEvaluator("allOf", func(b *evalBuilder, f *buildFrame, raw any, loc string) (evaluator, error) {
 		arr, ok := raw.([]any)
 		if !ok {
 			return nil, &CompileError{KeywordLocation: loc, Message: "allOf must be an array"}
@@ -116,7 +112,7 @@ func init() {
 		subs := make([]*subschema, 0, len(arr))
 		for i, item := range arr {
 			itemLoc := loc + "/" + itoaInt(i)
-			sub, err := b.buildSubschema(item, itemLoc, b.currentBase, b.currentResource, false)
+			sub, err := b.buildSubschemaFrame(f, item, itemLoc, f.base, f.resource)
 			if err != nil {
 				return nil, err
 			}
@@ -124,7 +120,7 @@ func init() {
 		}
 		return &allOfEval{loc: loc, subs: subs}, nil
 	})
-	registerEvaluator("anyOf", func(b *evalBuilder, raw any, loc string) (evaluator, error) {
+	registerEvaluator("anyOf", func(b *evalBuilder, f *buildFrame, raw any, loc string) (evaluator, error) {
 		arr, ok := raw.([]any)
 		if !ok {
 			return nil, &CompileError{KeywordLocation: loc, Message: "anyOf must be an array"}
@@ -132,7 +128,7 @@ func init() {
 		subs := make([]*subschema, 0, len(arr))
 		for i, item := range arr {
 			itemLoc := loc + "/" + itoaInt(i)
-			sub, err := b.buildSubschema(item, itemLoc, b.currentBase, b.currentResource, false)
+			sub, err := b.buildSubschemaFrame(f, item, itemLoc, f.base, f.resource)
 			if err != nil {
 				return nil, err
 			}
@@ -140,7 +136,7 @@ func init() {
 		}
 		return &anyOfEval{loc: loc, subs: subs}, nil
 	})
-	registerEvaluator("oneOf", func(b *evalBuilder, raw any, loc string) (evaluator, error) {
+	registerEvaluator("oneOf", func(b *evalBuilder, f *buildFrame, raw any, loc string) (evaluator, error) {
 		arr, ok := raw.([]any)
 		if !ok {
 			return nil, &CompileError{KeywordLocation: loc, Message: "oneOf must be an array"}
@@ -148,7 +144,7 @@ func init() {
 		subs := make([]*subschema, 0, len(arr))
 		for i, item := range arr {
 			itemLoc := loc + "/" + itoaInt(i)
-			sub, err := b.buildSubschema(item, itemLoc, b.currentBase, b.currentResource, false)
+			sub, err := b.buildSubschemaFrame(f, item, itemLoc, f.base, f.resource)
 			if err != nil {
 				return nil, err
 			}
@@ -156,18 +152,14 @@ func init() {
 		}
 		return &oneOfEval{loc: loc, subs: subs}, nil
 	})
-	registerEvaluator("not", func(b *evalBuilder, raw any, loc string) (evaluator, error) {
-		sub, err := b.buildSubschema(raw, loc, b.currentBase, b.currentResource, false)
+	registerEvaluator("not", func(b *evalBuilder, f *buildFrame, raw any, loc string) (evaluator, error) {
+		sub, err := b.buildSubschemaFrame(f, raw, loc, f.base, f.resource)
 		if err != nil {
 			return nil, err
 		}
 		return &notEval{loc: loc, sub: sub}, nil
 	})
 }
-
-// =====================================================================
-// if / then / else (combined into one evaluator under "if")
-// =====================================================================.
 
 type ifThenElseEval struct {
 	loc     string
@@ -193,10 +185,8 @@ func (e *ifThenElseEval) eval(ctx *runCtx, instance any) {
 	}
 }
 
-// then/else are bound at the schema level (alongside `if`); since the
-// builder iterates keys independently we register them as no-ops here so the
-// per-keyword dispatcher does not error on them. The actual logic is folded
-// into ifThenElseEval, which is built when `if` is seen.
+// noopEval handles "then" / "else" key dispatch; their subschemas are
+// folded into the parent ifThenElseEval when "if" is seen.
 type noopEval struct{ name string }
 
 func (n *noopEval) keyword() string       { return n.name }
@@ -204,29 +194,18 @@ func (n *noopEval) eval(_ *runCtx, _ any) {}
 
 //nolint:gochecknoinits // evaluator registry is built at package init by design.
 func init() {
-	registerEvaluator("if", func(b *evalBuilder, raw any, loc string) (evaluator, error) {
-		// Look up sibling then/else from the parent map. We need the parent
-		// raw object — passed via the buildSubschema call. We store the raw
-		// schema on the subschema during build, but the builder calls our
-		// constructor before adding to evaluators. Workaround: stash a
-		// per-build object pointer via b. For now we accept that `if`
-		// requires us to find then/else via the same parent object — which
-		// the builder has access to because we are mid-walk.
-		// Simpler: we rely on the builder's "raw" being pulled from the
-		// surrounding map keyed by 'if'; we build the if-subschema here
-		// only, and let then/else be discovered at eval-time via siblings
-		// recorded on the subschema.
-		// To do that cleanly, build the if/then/else trio together using
-		// b.currentParent (set by buildSubschema). We add this state below.
-		ifSub, err := b.buildSubschema(raw, loc, b.currentBase, b.currentResource, false)
+	registerEvaluator("if", func(b *evalBuilder, f *buildFrame, raw any, loc string) (evaluator, error) {
+		// then / else are read off the parent map and folded into this
+		// ifThenElseEval (the dispatcher sees them as no-ops).
+		ifSub, err := b.buildSubschemaFrame(f, raw, loc, f.base, f.resource)
 		if err != nil {
 			return nil, err
 		}
 		ev := &ifThenElseEval{loc: loc, ifSub: ifSub}
-		if parent, ok := b.currentParent.(map[string]any); ok {
+		if parent, ok := f.parent.(map[string]any); ok {
 			if rawThen, ok := parent["then"]; ok {
-				thenLoc := strParentLoc(b.currentLoc) + "/then"
-				thenSub, err := b.buildSubschema(rawThen, thenLoc, b.currentBase, b.currentResource, false)
+				thenLoc := strParentLoc(f.loc) + "/then"
+				thenSub, err := b.buildSubschemaFrame(f, rawThen, thenLoc, f.base, f.resource)
 				if err != nil {
 					return nil, err
 				}
@@ -234,8 +213,8 @@ func init() {
 				ev.thenLoc = thenLoc
 			}
 			if rawElse, ok := parent["else"]; ok {
-				elseLoc := strParentLoc(b.currentLoc) + "/else"
-				elseSub, err := b.buildSubschema(rawElse, elseLoc, b.currentBase, b.currentResource, false)
+				elseLoc := strParentLoc(f.loc) + "/else"
+				elseSub, err := b.buildSubschemaFrame(f, rawElse, elseLoc, f.base, f.resource)
 				if err != nil {
 					return nil, err
 				}
@@ -245,22 +224,17 @@ func init() {
 		}
 		return ev, nil
 	})
-	registerEvaluator("then", func(_ *evalBuilder, _ any, _ string) (evaluator, error) {
+	registerEvaluator("then", func(_ *evalBuilder, _ *buildFrame, _ any, _ string) (evaluator, error) {
 		return &noopEval{name: "then"}, nil
 	})
-	registerEvaluator("else", func(_ *evalBuilder, _ any, _ string) (evaluator, error) {
+	registerEvaluator("else", func(_ *evalBuilder, _ *buildFrame, _ any, _ string) (evaluator, error) {
 		return &noopEval{name: "else"}, nil
 	})
 }
 
-// strParentLoc returns the parent location of a child schema location.
-// Given "#/foo", returns "#/foo"; the caller appends /then or /else as
-// needed. The builder's currentLoc already points at the parent subschema.
+// strParentLoc returns its argument; the caller appends /then or /else.
+// Kept as a function for parity with future location-derivation logic.
 func strParentLoc(loc string) string { return loc }
-
-// =====================================================================
-// dependentSchemas / dependencies (legacy)
-// =====================================================================.
 
 type dependentSchemasEval struct {
 	loc  string
@@ -315,7 +289,7 @@ func (e *dependenciesEval) eval(ctx *runCtx, instance any) {
 
 //nolint:gochecknoinits // evaluator registry is built at package init by design.
 func init() {
-	registerEvaluator("dependentSchemas", func(b *evalBuilder, raw any, loc string) (evaluator, error) {
+	registerEvaluator("dependentSchemas", func(b *evalBuilder, f *buildFrame, raw any, loc string) (evaluator, error) {
 		m, ok := raw.(map[string]any)
 		if !ok {
 			return nil, &CompileError{KeywordLocation: loc, Message: "dependentSchemas must be an object"}
@@ -323,7 +297,7 @@ func init() {
 		deps := map[string]*subschema{}
 		for k, v := range m {
 			subLoc := loc + "/" + escapePointerToken(k)
-			sub, err := b.buildSubschema(v, subLoc, b.currentBase, b.currentResource, false)
+			sub, err := b.buildSubschemaFrame(f, v, subLoc, f.base, f.resource)
 			if err != nil {
 				return nil, err
 			}
@@ -331,7 +305,7 @@ func init() {
 		}
 		return &dependentSchemasEval{loc: loc, deps: deps}, nil
 	})
-	registerEvaluator("dependencies", func(b *evalBuilder, raw any, loc string) (evaluator, error) {
+	registerEvaluator("dependencies", func(b *evalBuilder, f *buildFrame, raw any, loc string) (evaluator, error) {
 		m, ok := raw.(map[string]any)
 		if !ok {
 			return nil, &CompileError{KeywordLocation: loc, Message: "dependencies must be an object"}
@@ -342,7 +316,7 @@ func init() {
 			subLoc := loc + "/" + escapePointerToken(k)
 			switch t := v.(type) {
 			case map[string]any, bool:
-				sub, err := b.buildSubschema(t, subLoc, b.currentBase, b.currentResource, false)
+				sub, err := b.buildSubschemaFrame(f, t, subLoc, f.base, f.resource)
 				if err != nil {
 					return nil, err
 				}
@@ -360,10 +334,6 @@ func init() {
 		return &dependenciesEval{loc: loc, schemas: schemas, required: required}, nil
 	})
 }
-
-// =====================================================================
-// properties / patternProperties / additionalProperties / propertyNames
-// =====================================================================.
 
 type propertiesEval struct {
 	loc  string
@@ -482,7 +452,7 @@ func (e *propertyNamesEval) eval(ctx *runCtx, instance any) {
 
 //nolint:gochecknoinits // evaluator registry is built at package init by design.
 func init() {
-	registerEvaluator("properties", func(b *evalBuilder, raw any, loc string) (evaluator, error) {
+	registerEvaluator("properties", func(b *evalBuilder, f *buildFrame, raw any, loc string) (evaluator, error) {
 		m, ok := raw.(map[string]any)
 		if !ok {
 			return nil, &CompileError{KeywordLocation: loc, Message: "properties must be an object"}
@@ -490,7 +460,7 @@ func init() {
 		subs := map[string]*subschema{}
 		for k, v := range m {
 			subLoc := loc + "/" + escapePointerToken(k)
-			sub, err := b.buildSubschema(v, subLoc, b.currentBase, b.currentResource, false)
+			sub, err := b.buildSubschemaFrame(f, v, subLoc, f.base, f.resource)
 			if err != nil {
 				return nil, err
 			}
@@ -498,7 +468,7 @@ func init() {
 		}
 		return &propertiesEval{loc: loc, subs: subs}, nil
 	})
-	registerEvaluator("patternProperties", func(b *evalBuilder, raw any, loc string) (evaluator, error) {
+	registerEvaluator("patternProperties", func(b *evalBuilder, f *buildFrame, raw any, loc string) (evaluator, error) {
 		m, ok := raw.(map[string]any)
 		if !ok {
 			return nil, &CompileError{KeywordLocation: loc, Message: "patternProperties must be an object"}
@@ -510,7 +480,7 @@ func init() {
 				return nil, &CompileError{KeywordLocation: loc, Message: "invalid pattern in patternProperties", Cause: err}
 			}
 			subLoc := loc + "/" + escapePointerToken(k)
-			sub, err := b.buildSubschema(v, subLoc, b.currentBase, b.currentResource, false)
+			sub, err := b.buildSubschemaFrame(f, v, subLoc, f.base, f.resource)
 			if err != nil {
 				return nil, err
 			}
@@ -518,15 +488,15 @@ func init() {
 		}
 		return &patternPropertiesEval{loc: loc, patterns: patterns}, nil
 	})
-	registerEvaluator("additionalProperties", func(b *evalBuilder, raw any, loc string) (evaluator, error) {
-		sub, err := b.buildSubschema(raw, loc, b.currentBase, b.currentResource, false)
+	registerEvaluator("additionalProperties", func(b *evalBuilder, f *buildFrame, raw any, loc string) (evaluator, error) {
+		sub, err := b.buildSubschemaFrame(f, raw, loc, f.base, f.resource)
 		if err != nil {
 			return nil, err
 		}
 		return &additionalPropertiesEval{loc: loc, sub: sub}, nil
 	})
-	registerEvaluator("propertyNames", func(b *evalBuilder, raw any, loc string) (evaluator, error) {
-		sub, err := b.buildSubschema(raw, loc, b.currentBase, b.currentResource, false)
+	registerEvaluator("propertyNames", func(b *evalBuilder, f *buildFrame, raw any, loc string) (evaluator, error) {
+		sub, err := b.buildSubschemaFrame(f, raw, loc, f.base, f.resource)
 		if err != nil {
 			return nil, err
 		}
@@ -557,10 +527,6 @@ func mergeKeysAnnotation(ctx *runCtx, keyword, loc string, keys evaluatedKeys) {
 		value:       keys,
 	})
 }
-
-// =====================================================================
-// prefixItems / items / additionalItems / contains
-// =====================================================================.
 
 type prefixItemsEval struct {
 	loc  string
@@ -600,7 +566,7 @@ func (e *itemsEval) eval(ctx *runCtx, instance any) {
 		return
 	}
 	if e.isPrefix {
-		// Legacy items-as-array form: validate first N items.
+		// Pre-2020-12 items-as-array form (now spelled prefixItems).
 		n := min(len(e.subs), len(arr))
 		for i := range n {
 			ctx.evaluateChild(e.subs[i], arr[i], itoaInt(i), "items/"+itoaInt(i))
@@ -611,7 +577,6 @@ func (e *itemsEval) eval(ctx *runCtx, instance any) {
 		return
 	}
 	start := 0
-	// If prefixItems annotation already set, start past it.
 	if v, ok := ctx.getAnnotation("prefixItems"); ok {
 		if iv, ok := v.(evaluatedItems); ok {
 			start = int(iv) + 1
@@ -625,12 +590,11 @@ func (e *itemsEval) eval(ctx *runCtx, instance any) {
 	}
 }
 
-// siblingItemsArrayLen returns the length of the sibling `items` keyword's
-// value when it is an array of schemas. Returns -1 when items is missing or
-// is a single schema, in which case additionalItems is a no-op (per
-// Draft 4–7 spec).
-func siblingItemsArrayLen(b *evalBuilder) int {
-	parent, ok := b.currentParent.(map[string]any)
+// siblingItemsArrayLen returns the length of the sibling "items" array,
+// or -1 if items is missing or a single schema (additionalItems is a
+// no-op per Draft 4–7 in those cases).
+func siblingItemsArrayLen(f *buildFrame) int {
+	parent, ok := f.parent.(map[string]any)
 	if !ok {
 		return -1
 	}
@@ -645,18 +609,12 @@ func siblingItemsArrayLen(b *evalBuilder) int {
 	return len(arr)
 }
 
-// additionalItemsEval implements pre-2019-09 `additionalItems`. The keyword
-// only applies when the sibling `items` is an ARRAY of schemas (the legacy
-// "tuple" form): it covers indices past the array prefix. When `items` is a
-// single schema (the modern single-form), or when `items` is missing entirely,
-// `additionalItems` has no effect — items already covers (or trivially
-// permits) every index.
+// additionalItemsEval implements pre-2019-09 "additionalItems": it covers
+// indices past the sibling "items" array prefix. itemsArrayLen is -1 when
+// items is missing or a single schema (the evaluator is then a no-op).
 type additionalItemsEval struct {
-	loc string
-	sub *subschema
-	// itemsArrayLen is the length of the sibling items array when items is
-	// an array of schemas. -1 means items is a single schema or missing,
-	// in which case the evaluator is a no-op.
+	loc           string
+	sub           *subschema
 	itemsArrayLen int
 }
 
@@ -664,8 +622,6 @@ func (e *additionalItemsEval) keyword() string { return "additionalItems" }
 
 func (e *additionalItemsEval) eval(ctx *runCtx, instance any) {
 	if e.itemsArrayLen < 0 {
-		// items is a single schema (or missing): additionalItems is a
-		// no-op per spec.
 		return
 	}
 	arr, ok := instance.([]any)
@@ -718,8 +674,7 @@ func (e *containsEval) eval(ctx *runCtx, instance any) {
 		ctx.addError(e.loc, "contains", "", fmt.Sprintf("contains matched %d items; maxContains is %d", count, e.maxContains))
 	}
 	if count > 0 {
-		// `contains` annotates the indices it matched (used by
-		// unevaluatedItems).
+		// Annotate matched indices so unevaluatedItems can read them.
 		mergeContainsAnnotation(ctx, e.loc, matched)
 	}
 }
@@ -766,7 +721,7 @@ func recordItemsAnno(ctx *runCtx, keyword, loc string, value any) {
 
 //nolint:gochecknoinits // evaluator registry is built at package init by design.
 func init() {
-	registerEvaluator("prefixItems", func(b *evalBuilder, raw any, loc string) (evaluator, error) {
+	registerEvaluator("prefixItems", func(b *evalBuilder, f *buildFrame, raw any, loc string) (evaluator, error) {
 		arr, ok := raw.([]any)
 		if !ok {
 			return nil, &CompileError{KeywordLocation: loc, Message: "prefixItems must be an array"}
@@ -774,7 +729,7 @@ func init() {
 		subs := make([]*subschema, 0, len(arr))
 		for i, item := range arr {
 			itemLoc := loc + "/" + itoaInt(i)
-			sub, err := b.buildSubschema(item, itemLoc, b.currentBase, b.currentResource, false)
+			sub, err := b.buildSubschemaFrame(f, item, itemLoc, f.base, f.resource)
 			if err != nil {
 				return nil, err
 			}
@@ -782,14 +737,14 @@ func init() {
 		}
 		return &prefixItemsEval{loc: loc, subs: subs}, nil
 	})
-	registerEvaluator("items", func(b *evalBuilder, raw any, loc string) (evaluator, error) {
-		// Draft 2020-12: items is always a schema. Older drafts allowed an
-		// array of schemas (legacy form).
-		if arr, ok := raw.([]any); ok && b.draft < Draft202012 {
+	registerEvaluator("items", func(b *evalBuilder, f *buildFrame, raw any, loc string) (evaluator, error) {
+		// 2020-12 items is always a schema; pre-2020-12 also allowed an
+		// array of schemas (the legacy "tuple" form).
+		if arr, ok := raw.([]any); ok && f.draft < Draft202012 {
 			subs := make([]*subschema, 0, len(arr))
 			for i, item := range arr {
 				itemLoc := loc + "/" + itoaInt(i)
-				sub, err := b.buildSubschema(item, itemLoc, b.currentBase, b.currentResource, false)
+				sub, err := b.buildSubschemaFrame(f, item, itemLoc, f.base, f.resource)
 				if err != nil {
 					return nil, err
 				}
@@ -797,26 +752,26 @@ func init() {
 			}
 			return &itemsEval{loc: loc, isPrefix: true, subs: subs}, nil
 		}
-		sub, err := b.buildSubschema(raw, loc, b.currentBase, b.currentResource, false)
+		sub, err := b.buildSubschemaFrame(f, raw, loc, f.base, f.resource)
 		if err != nil {
 			return nil, err
 		}
 		return &itemsEval{loc: loc, sub: sub}, nil
 	})
-	registerEvaluator("additionalItems", func(b *evalBuilder, raw any, loc string) (evaluator, error) {
-		sub, err := b.buildSubschema(raw, loc, b.currentBase, b.currentResource, false)
+	registerEvaluator("additionalItems", func(b *evalBuilder, f *buildFrame, raw any, loc string) (evaluator, error) {
+		sub, err := b.buildSubschemaFrame(f, raw, loc, f.base, f.resource)
 		if err != nil {
 			return nil, err
 		}
-		return &additionalItemsEval{loc: loc, sub: sub, itemsArrayLen: siblingItemsArrayLen(b)}, nil
+		return &additionalItemsEval{loc: loc, sub: sub, itemsArrayLen: siblingItemsArrayLen(f)}, nil
 	})
-	registerEvaluator("contains", func(b *evalBuilder, raw any, loc string) (evaluator, error) {
-		sub, err := b.buildSubschema(raw, loc, b.currentBase, b.currentResource, false)
+	registerEvaluator("contains", func(b *evalBuilder, f *buildFrame, raw any, loc string) (evaluator, error) {
+		sub, err := b.buildSubschemaFrame(f, raw, loc, f.base, f.resource)
 		if err != nil {
 			return nil, err
 		}
 		ev := &containsEval{loc: loc, sub: sub}
-		if parent, ok := b.currentParent.(map[string]any); ok {
+		if parent, ok := f.parent.(map[string]any); ok {
 			if v, ok := parent["maxContains"]; ok {
 				if n, ok := toInt(v); ok {
 					ev.maxContains = n
@@ -832,12 +787,12 @@ func init() {
 		}
 		return ev, nil
 	})
-	// maxContains / minContains are folded into containsEval; register
-	// no-op handlers so the dispatcher doesn't fail on standalone usage.
-	registerEvaluator("maxContains", func(_ *evalBuilder, _ any, _ string) (evaluator, error) {
+	// maxContains / minContains are folded into containsEval; the
+	// dispatcher needs no-ops to handle them as standalone keys.
+	registerEvaluator("maxContains", func(_ *evalBuilder, _ *buildFrame, _ any, _ string) (evaluator, error) {
 		return &noopEval{name: "maxContains"}, nil
 	})
-	registerEvaluator("minContains", func(_ *evalBuilder, _ any, _ string) (evaluator, error) {
+	registerEvaluator("minContains", func(_ *evalBuilder, _ *buildFrame, _ any, _ string) (evaluator, error) {
 		return &noopEval{name: "minContains"}, nil
 	})
 }

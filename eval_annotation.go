@@ -1,7 +1,6 @@
 package jsonschema
 
 import (
-	"log"
 	"strconv"
 )
 
@@ -49,65 +48,56 @@ func (e *formatEval) eval(ctx *runCtx, instance any) {
 	if !ok {
 		switch ctx.opts.unknownFormatPolicy {
 		case UnknownFormatWarn:
-			if ctx.formatWarned == nil {
-				ctx.formatWarned = map[string]struct{}{}
-			}
-			if _, seen := ctx.formatWarned[e.format]; !seen {
-				ctx.formatWarned[e.format] = struct{}{}
-				log.Printf("jsonschema: unknown format %q (assertion mode)", e.format)
-			}
+			// Annotation already emitted; warn-mode is otherwise silent
+			// so the package never writes to stderr.
 		case UnknownFormatError:
-			ctx.addError(e.loc, "format", "format",
-				"unknown format: "+e.format)
+			ctx.addErrorWithCause(e.loc, "format", "format",
+				"unknown format: "+e.format,
+				&FormatError{Format: e.format, Value: s, Cause: ErrUnknownFormat})
 		}
 		return
 	}
 	if err := fn(s); err != nil {
-		ctx.addError(e.loc, "format", "format",
-			"value does not match format "+strconv.Quote(e.format)+": "+err.Error())
+		ctx.addErrorWithCause(e.loc, "format", "format",
+			"value does not match format "+strconv.Quote(e.format)+": "+err.Error(),
+			&FormatError{Format: e.format, Value: s, Cause: err})
 	}
 }
 
 //nolint:gochecknoinits // evaluator registry is built at package init by design.
 func init() {
-	// format: emits an annotation always, asserts under WithFormatAssertion.
-	registerEvaluator("format", func(_ *evalBuilder, raw any, loc string) (evaluator, error) {
+	registerEvaluator("format", func(_ *evalBuilder, _ *buildFrame, raw any, loc string) (evaluator, error) {
 		s, ok := raw.(string)
 		if !ok {
 			return nil, &CompileError{KeywordLocation: loc, Message: "format must be a string"}
 		}
 		return &formatEval{loc: loc, format: s}, nil
 	})
-	// contentEncoding: assertion-aware evaluator.
-	registerEvaluator("contentEncoding", func(_ *evalBuilder, raw any, loc string) (evaluator, error) {
+	registerEvaluator("contentEncoding", func(_ *evalBuilder, _ *buildFrame, raw any, loc string) (evaluator, error) {
 		s, ok := raw.(string)
 		if !ok {
 			return nil, &CompileError{KeywordLocation: loc, Message: "contentEncoding must be a string"}
 		}
 		return &contentEncodingEval{loc: loc, encoding: s}, nil
 	})
-	// contentMediaType: assertion-aware evaluator.
-	registerEvaluator("contentMediaType", func(_ *evalBuilder, raw any, loc string) (evaluator, error) {
+	registerEvaluator("contentMediaType", func(_ *evalBuilder, _ *buildFrame, raw any, loc string) (evaluator, error) {
 		s, ok := raw.(string)
 		if !ok {
 			return nil, &CompileError{KeywordLocation: loc, Message: "contentMediaType must be a string"}
 		}
 		return &contentMediaTypeEval{loc: loc, mediaType: s}, nil
 	})
-	// contentSchema: build the subschema (also surfaces compile-time errors)
-	// and assert against the decoded JSON when assertion mode is on.
-	registerEvaluator("contentSchema", func(b *evalBuilder, raw any, loc string) (evaluator, error) {
-		sub, err := b.buildSubschema(raw, loc, b.currentBase, b.currentResource, false)
+	registerEvaluator("contentSchema", func(b *evalBuilder, f *buildFrame, raw any, loc string) (evaluator, error) {
+		sub, err := b.buildSubschemaFrame(f, raw, loc, f.base, f.resource)
 		if err != nil {
 			return nil, err
 		}
 		return &contentSchemaEval{loc: loc, sub: sub}, nil
 	})
-	// Meta-data vocabulary: pure annotations. Always emit.
 	for _, n := range []string{"title", "description", "default", "deprecated",
 		"readOnly", "writeOnly", "examples"} {
 		name := n
-		registerEvaluator(name, func(_ *evalBuilder, raw any, loc string) (evaluator, error) {
+		registerEvaluator(name, func(_ *evalBuilder, _ *buildFrame, raw any, loc string) (evaluator, error) {
 			return &annotationEval{loc: loc, kw: name, value: raw}, nil
 		})
 	}

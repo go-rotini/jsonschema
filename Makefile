@@ -1,15 +1,21 @@
 TEST_SUITE_DIR  := testdata/JSON-Schema-Test-Suite
+# JSON Schema Test Suite uses 'main' as canonical; upstream does not tag releases.
 TEST_SUITE_REPO := https://github.com/json-schema-org/JSON-Schema-Test-Suite.git
 
-.PHONY: all clean clone-test-suite lint test test-acceptance test-bench \
+.PHONY: all clean clean-suite clean-all clone-test-suite lint test test-acceptance test-bench \
         test-conformance test-fuzz test-mutation test-race \
         refresh-acceptance-fixtures
 
-all: clean clone-test-suite lint test test-acceptance test-bench \
+all: clean-all clone-test-suite lint test test-acceptance test-bench \
      test-conformance test-fuzz test-mutation test-race
 
 clean:
-	@rm -rf $(TEST_SUITE_DIR) *.out test_mutation.json
+	@rm -f *.out test_mutation.json cov.out
+
+clean-suite:
+	@rm -rf $(TEST_SUITE_DIR)
+
+clean-all: clean clean-suite
 
 clone-test-suite: $(TEST_SUITE_DIR)
 

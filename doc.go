@@ -118,11 +118,11 @@
 // [ErrLoader], [ErrFormat]) match instances of their concrete error type
 // via [errors.Is]. Specific failure conditions are surfaced via the
 // package-level sentinels in [errors.go]: [ErrUnknownDraft],
-// [ErrUnknownKeyword], [ErrUnknownVocabulary], [ErrUnknownFormat],
-// [ErrRefCycle], [ErrMaxRefDepth], [ErrMaxValidationDepth],
-// [ErrInstanceTooLarge], [ErrLoaderRejected], [ErrSchemaNotCompiled],
-// [ErrValidationFailed], [ErrNilReader], [ErrUnsupportedSchemaShape].
-// Multi-format adapters add [ErrInvalidYAML] and [ErrInvalidTOML].
+// [ErrUnknownKeyword], [ErrUnknownFormat], [ErrRefCycle], [ErrMaxRefDepth],
+// [ErrMaxValidationDepth], [ErrInstanceTooLarge], [ErrLoaderRejected],
+// [ErrSchemaNotCompiled], [ErrValidationFailed], [ErrNilReader],
+// [ErrUnsupportedSchemaShape]. Multi-format adapters add [ErrInvalidYAML]
+// and [ErrInvalidTOML].
 //
 // [RenderError] produces a human-readable error string with the (forward-
 // looking) signature for source-line-pointer formatting.
@@ -170,10 +170,11 @@
 //
 // The package ships with four independent guards against adversarial input:
 // [WithMaxRefDepth] (default 100) caps $ref hop depth per keyword;
-// [WithMaxValidationDepth] (default 1000) caps recursion into nested
-// instances; [WithMaxInstanceSize] caps instance bytes before parsing;
-// the compiler detects ref cycles at compile time and turns them into
-// lazy edges so they cannot stack-overflow the validator.
+// [WithMaxValidationDepth] (alias [WithMaxDepth], default 1000) caps recursion
+// into nested instances; [WithMaxInstanceSize] (alias [WithMaxDocumentSize])
+// caps instance bytes before parsing; the compiler detects ref cycles at
+// compile time and turns them into lazy edges so they cannot stack-overflow
+// the validator.
 //
 // [JSON Schema]: https://json-schema.org/
 // [Draft 2020-12]: https://json-schema.org/draft/2020-12/schema

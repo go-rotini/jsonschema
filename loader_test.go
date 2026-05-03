@@ -187,26 +187,38 @@ func TestHTTPLoaderCacheHit(t *testing.T) {
 }
 
 func TestHTTPLoaderSingleFlight(t *testing.T) {
-	var hits atomic.Int64
+	const N = 10
+	var (
+		hits    atomic.Int64
+		arrived sync.WaitGroup
+		release = make(chan struct{})
+	)
+	arrived.Add(N)
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		hits.Add(1)
-		// Sleep so concurrent goroutines have time to coalesce.
-		time.Sleep(50 * time.Millisecond)
+		// Block until every goroutine has signaled it is about to call
+		// Load; by then the followers have queued behind the in-flight
+		// slot. Then close the gate to release the response. This
+		// replaces a 50ms time.Sleep with deterministic synchronization.
+		arrived.Wait()
+		<-release
 		_, _ = w.Write([]byte(`{"ok":true}`))
 	}))
 	t.Cleanup(srv.Close)
 	l := &HTTPLoader{AllowHTTP: true}
-	const N = 10
 	var wg sync.WaitGroup
 	wg.Add(N)
 	for i := 0; i < N; i++ {
 		go func() {
 			defer wg.Done()
+			arrived.Done()
 			if _, err := l.Load(srv.URL + "/a"); err != nil {
 				t.Errorf("Load: %v", err)
 			}
 		}()
 	}
+	arrived.Wait()
+	close(release)
 	wg.Wait()
 	if hits.Load() != 1 {
 		t.Errorf("hits = %d, want 1 (single-flight should coalesce concurrent requests)", hits.Load())
@@ -349,5 +361,103 @@ func TestEmbedLoaderMissingFile(t *testing.T) {
 	_, err := l.Load("embed://meta/does-not-exist.json")
 	if err == nil {
 		t.Error("expected error on missing file")
+	}
+}
+
+// TestHTTPLoaderRedirectScrubsDecoratorHeaders confirms that headers added
+// by the [HTTPLoader.RequestDecorator] hook are stripped before crossing to a
+// different host on a 302 redirect — preventing a leak of bearer tokens to
+// servers the caller never explicitly trusted.
+func TestHTTPLoaderRedirectScrubsDecoratorHeaders(t *testing.T) {
+	// Server B receives the redirected request and records what header it saw.
+	var seenAtB string
+	srvB := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		seenAtB = r.Header.Get("X-Api-Key")
+		_, _ = w.Write([]byte(`{}`))
+	}))
+	t.Cleanup(srvB.Close)
+	// Server A sends a 302 to server B (different host).
+	srvA := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.Redirect(w, r, srvB.URL+"/follow", http.StatusFound)
+	}))
+	t.Cleanup(srvA.Close)
+	l := &HTTPLoader{
+		AllowHTTP: true,
+		RequestDecorator: func(r *http.Request) {
+			r.Header.Set("X-Api-Key", "secret")
+		},
+	}
+	if _, err := l.Load(srvA.URL + "/start"); err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if seenAtB != "" {
+		t.Errorf("redirect leaked X-Api-Key to second host: %q", seenAtB)
+	}
+}
+
+// TestHTTPLoaderRedirectScrubKeepsHeaderOnSameHost confirms the scrubber is
+// scoped: same-host redirects (e.g. /a → /b on the same host) keep the
+// decorator-supplied headers intact.
+func TestHTTPLoaderRedirectScrubKeepsHeaderOnSameHost(t *testing.T) {
+	var (
+		mu   sync.Mutex
+		seen string
+		hitB atomic.Int64
+	)
+	mux := http.NewServeMux()
+	mux.HandleFunc("/start", func(w http.ResponseWriter, r *http.Request) {
+		http.Redirect(w, r, "/follow", http.StatusFound)
+	})
+	mux.HandleFunc("/follow", func(w http.ResponseWriter, r *http.Request) {
+		mu.Lock()
+		seen = r.Header.Get("X-Api-Key")
+		mu.Unlock()
+		hitB.Add(1)
+		_, _ = w.Write([]byte(`{}`))
+	})
+	srv := httptest.NewServer(mux)
+	t.Cleanup(srv.Close)
+	l := &HTTPLoader{
+		AllowHTTP: true,
+		RequestDecorator: func(r *http.Request) {
+			r.Header.Set("X-Api-Key", "secret")
+		},
+	}
+	if _, err := l.Load(srv.URL + "/start"); err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if hitB.Load() != 1 {
+		t.Fatalf("/follow hit %d times, want 1", hitB.Load())
+	}
+	mu.Lock()
+	defer mu.Unlock()
+	if seen != "secret" {
+		t.Errorf("same-host redirect dropped header (saw %q)", seen)
+	}
+}
+
+// TestHTTPLoaderRedirectCap exercises the bounded redirect chain: a server
+// that issues an unbounded redirect loop must terminate the loader with a
+// non-nil error before exhausting goroutines.
+func TestHTTPLoaderRedirectCap(t *testing.T) {
+	var hits atomic.Int64
+	var srv *httptest.Server
+	srv = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		hits.Add(1)
+		// Always redirect to ourselves — the redirect cap should fire well
+		// before this loops indefinitely.
+		http.Redirect(w, r, srv.URL+r.URL.Path, http.StatusFound)
+	}))
+	t.Cleanup(srv.Close)
+	l := &HTTPLoader{AllowHTTP: true}
+	_, err := l.Load(srv.URL + "/loop")
+	if err == nil {
+		t.Fatal("expected error on redirect loop")
+	}
+	// We don't pin the exact hit count: the stdlib client surfaces the
+	// CheckRedirect error a few hops in, and the exact count is an
+	// implementation detail. We just verify it didn't run away.
+	if hits.Load() > 20 {
+		t.Errorf("too many redirects followed: %d", hits.Load())
 	}
 }

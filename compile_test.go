@@ -2,9 +2,12 @@ package jsonschema
 
 import (
 	"errors"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync"
+	"sync/atomic"
 	"testing"
 )
 
@@ -99,12 +102,24 @@ func TestCompileNegativeMinLength(t *testing.T) {
 	if err == nil {
 		t.Fatal("expected error")
 	}
+	var ce *CompileError
+	if !errors.As(err, &ce) {
+		t.Errorf("err type = %T, want *CompileError", err)
+	} else if ce.KeywordLocation == "" {
+		t.Errorf("CompileError.KeywordLocation empty: %+v", ce)
+	}
 }
 
 func TestCompileTypeMustBeStringOrArray(t *testing.T) {
 	_, err := Compile([]byte(`{"type":123}`))
 	if err == nil {
 		t.Fatal("expected error for numeric type")
+	}
+	var ce *CompileError
+	if !errors.As(err, &ce) {
+		t.Errorf("err type = %T, want *CompileError", err)
+	} else if ce.KeywordLocation == "" {
+		t.Errorf("CompileError.KeywordLocation empty: %+v", ce)
 	}
 }
 
@@ -113,6 +128,12 @@ func TestCompileRequiredMustBeStrings(t *testing.T) {
 	if err == nil {
 		t.Fatal("expected error")
 	}
+	var ce *CompileError
+	if !errors.As(err, &ce) {
+		t.Errorf("err type = %T, want *CompileError", err)
+	} else if ce.KeywordLocation == "" {
+		t.Errorf("CompileError.KeywordLocation empty: %+v", ce)
+	}
 }
 
 func TestCompileEmptyAllOf(t *testing.T) {
@@ -120,12 +141,25 @@ func TestCompileEmptyAllOf(t *testing.T) {
 	if err == nil {
 		t.Fatal("expected error for empty allOf")
 	}
+	var ce *CompileError
+	if !errors.As(err, &ce) {
+		t.Errorf("err type = %T, want *CompileError", err)
+	} else if ce.KeywordLocation == "" {
+		t.Errorf("CompileError.KeywordLocation empty: %+v", ce)
+	}
 }
 
 func TestCompileTrailingContent(t *testing.T) {
 	_, err := Compile([]byte(`{} {}`))
 	if err == nil {
 		t.Fatal("expected error for trailing content")
+	}
+	var ce *CompileError
+	if !errors.As(err, &ce) {
+		t.Errorf("err type = %T, want *CompileError", err)
+	}
+	if !errors.Is(err, errTrailingContent) {
+		t.Errorf("errors.Is(err, errTrailingContent) = false; err = %v", err)
 	}
 }
 
@@ -330,6 +364,38 @@ func TestCompileURLViaHTTP(t *testing.T) {
 	}
 }
 
+// TestCompileExternalRefViaHTTPLoader exercises an end-to-end remote $ref:
+// the root schema $refs an external document served by an HTTP loader, and
+// the validator correctly resolves the reference at compile time.
+func TestCompileExternalRefViaHTTPLoader(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = w.Write([]byte(`{
+			"$id":"http://example.invalid/types",
+			"$defs":{"name":{"type":"string","minLength":1}}
+		}`))
+	}))
+	t.Cleanup(srv.Close)
+	src := []byte(`{"$ref":"` + srv.URL + `/types#/$defs/name"}`)
+	s, err := Compile(src, WithLoader(&HTTPLoader{AllowHTTP: true}))
+	if err != nil {
+		t.Fatalf("Compile remote $ref: %v", err)
+	}
+	res, err := s.Validate([]byte(`"alice"`))
+	if err != nil {
+		t.Fatalf("Validate: %v", err)
+	}
+	if !res.Valid {
+		t.Errorf("expected valid; errors=%v", res.Errors)
+	}
+	res, err = s.Validate([]byte(`""`))
+	if err != nil {
+		t.Fatalf("Validate empty: %v", err)
+	}
+	if res.Valid {
+		t.Errorf("expected invalid for empty string")
+	}
+}
+
 func TestCompileExternalRefViaMapLoader(t *testing.T) {
 	loader := MapLoader{
 		"https://example.com/types": []byte(`{"$id":"https://example.com/types","$defs":{"name":{"type":"string"}}}`),
@@ -492,4 +558,110 @@ func TestCompilerMustCompile(t *testing.T) {
 		}
 	}()
 	_ = c.MustCompile([]byte(`{not json}`))
+}
+
+// TestCompileEmptyInput exercises Compile([]byte("")) and Compile(nil) — both
+// should fail with a *CompileError wrapping io.EOF (the underlying decoder
+// signal for "no document").
+func TestCompileEmptyInput(t *testing.T) {
+	cases := []struct {
+		name  string
+		input []byte
+	}{
+		{"empty", []byte("")},
+		{"nil", nil},
+		{"whitespace", []byte("   \n\t")},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			_, err := Compile(tc.input)
+			if err == nil {
+				t.Fatalf("Compile(%q): expected error", tc.input)
+			}
+			var ce *CompileError
+			if !errors.As(err, &ce) {
+				t.Errorf("Compile(%q): err type = %T, want *CompileError", tc.input, err)
+			}
+			if !errors.Is(err, io.EOF) {
+				t.Errorf("Compile(%q): errors.Is(err, io.EOF) = false; err = %v", tc.input, err)
+			}
+		})
+	}
+}
+
+// TestCompilerConcurrentCompile drives the same *Compiler from many
+// goroutines. The body is compile-only — the test exercises the Compiler's
+// internal locking around its caches, not the validator. Re-run with -race
+// to surface any data race in the compile pipeline.
+func TestCompilerConcurrentCompile(t *testing.T) {
+	c := NewCompiler()
+	schema := []byte(`{"type":"string"}`)
+	const N = 32
+	var wg sync.WaitGroup
+	wg.Add(N)
+	for i := 0; i < N; i++ {
+		go func() {
+			defer wg.Done()
+			if _, err := c.Compile(schema); err != nil {
+				t.Errorf("Compile: %v", err)
+			}
+		}()
+	}
+	wg.Wait()
+}
+
+// TestCompilerCompileURLSingleFlight verifies that concurrent CompileURL
+// calls for the same URI share a single fetch+compile pipeline. The Loader
+// records calls with an atomic counter; with N concurrent callers we expect
+// exactly one fetch. The handler holds its response until every caller has
+// committed to its CompileURL invocation, so the followers are guaranteed
+// to find the in-flight slot.
+func TestCompilerCompileURLSingleFlight(t *testing.T) {
+	const N = 16
+	var (
+		hits    atomic.Int64
+		arrived sync.WaitGroup
+		release = make(chan struct{})
+	)
+	arrived.Add(N)
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		hits.Add(1)
+		// Block until every test goroutine has signaled it is about to call
+		// CompileURL — by that point the followers have either won (no) or
+		// queued behind the in-flight slot. Then close `release` to gate the
+		// response.
+		arrived.Wait()
+		<-release
+		_, _ = w.Write([]byte(`{"type":"string"}`))
+	}))
+	t.Cleanup(srv.Close)
+
+	// Use a per-test compiler with an HTTP loader; cache state is isolated
+	// from any other test running in parallel.
+	c := NewCompiler(WithLoader(&HTTPLoader{AllowHTTP: true}))
+	uri := srv.URL + "/schema.json"
+
+	var wg sync.WaitGroup
+	wg.Add(N)
+	for i := 0; i < N; i++ {
+		go func() {
+			defer wg.Done()
+			// Mark this goroutine as committed to its CompileURL call
+			// before invoking it; the gap between Done() and entering
+			// CompileURL is a single function call, so under contention
+			// followers reliably find the in-flight slot.
+			arrived.Done()
+			if _, err := c.CompileURL(uri); err != nil {
+				t.Errorf("CompileURL: %v", err)
+			}
+		}()
+	}
+	// Once every goroutine has signaled arrival the handler has unblocked;
+	// release it so the first fetch can complete.
+	arrived.Wait()
+	close(release)
+	wg.Wait()
+	if got := hits.Load(); got != 1 {
+		t.Errorf("CompileURL fetched %d times, want 1 (single-flight broken)", got)
+	}
 }

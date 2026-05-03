@@ -78,10 +78,8 @@ func defaultGenerateOptions() *generateOptions {
 	return &generateOptions{}
 }
 
-// resolveGenerateDefaults applies the documented defaults to options the
-// caller did not explicitly set. The `*Set` flags on [generateOptions] are
-// the source of truth for "was this set?" — bool fields alone cannot tell
-// the zero-value-by-default case from "user passed false".
+// resolveGenerateDefaults applies documented defaults to unset options.
+// The *Set flags distinguish "default" from "user passed false".
 func resolveGenerateDefaults(o *generateOptions) {
 	if !o.draftSet {
 		o.draft = DraftDefault
@@ -99,6 +97,9 @@ func resolveGenerateDefaults(o *generateOptions) {
 
 // Generate generates the schema for the runtime type of v.
 func (g *Generator) Generate(v any) (*Schema, error) {
+	if g == nil {
+		return nil, ErrSchemaNotCompiled
+	}
 	if v == nil {
 		return nil, &CompileError{Message: "Generate: nil value"}
 	}
@@ -116,6 +117,9 @@ func (g *Generator) MustGenerate(v any) *Schema {
 
 // GenerateBytes returns the JSON-encoded schema for the runtime type of v.
 func (g *Generator) GenerateBytes(v any) ([]byte, error) {
+	if g == nil {
+		return nil, ErrSchemaNotCompiled
+	}
 	if v == nil {
 		return nil, &CompileError{Message: "GenerateBytes: nil value"}
 	}
@@ -124,6 +128,9 @@ func (g *Generator) GenerateBytes(v any) ([]byte, error) {
 
 // FromType generates the schema for the named [reflect.Type].
 func (g *Generator) FromType(t reflect.Type) (*Schema, error) {
+	if g == nil {
+		return nil, ErrSchemaNotCompiled
+	}
 	data, err := g.bytesFromType(t)
 	if err != nil {
 		return nil, err
@@ -135,8 +142,8 @@ func (g *Generator) FromType(t reflect.Type) (*Schema, error) {
 	return s, nil
 }
 
-// bytesFromType is the inner workhorse; both Generate (via FromType) and
-// GenerateBytes funnel through it.
+// bytesFromType is the inner entry point shared by every public Generate
+// variant.
 func (g *Generator) bytesFromType(t reflect.Type) ([]byte, error) {
 	if t == nil {
 		return nil, &CompileError{Message: "Generate: nil reflect.Type"}
@@ -148,10 +155,8 @@ func (g *Generator) bytesFromType(t reflect.Type) ([]byte, error) {
 	}
 	rootMap, _ := root.(*orderedMap)
 	if rootMap == nil {
-		// Defensive: schemaForType always returns an *orderedMap for a
-		// type input (boolean schemas are never the top-level result),
-		// but if a custom emitter inlines `true`/`false` we promote to
-		// an empty object so the root keywords ($schema, $id) attach.
+		// Defensive: a custom emitter may inline a boolean schema at the
+		// root; promote to an empty object so $schema / $id can attach.
 		rootMap = newOrderedMap()
 	}
 	if g.opts.emitSchemaDeclaration {
@@ -171,20 +176,14 @@ func (g *Generator) bytesFromType(t reflect.Type) ([]byte, error) {
 	return marshalAny(rootMap)
 }
 
-// genCtx carries the per-walk state. The seen map prevents infinite recursion
-// for self-referential types and drives the $defs / $ref strategy when
-// expandedRefs is off.
+// genCtx is the per-walk state. seenName drives the $defs/$ref strategy
+// (its presence on a type means "next visit emits a $ref"); stack tracks
+// the active descent path so direct self-cycles are detected even when
+// expandedRefs forces inlining.
 type genCtx struct {
-	g *Generator
-	// seenName maps a previously-visited type to its $defs entry name; an
-	// entry exists once a $ref has been emitted (or is about to be) for
-	// the type. The presence of an entry indicates "use $ref next time".
-	seenName map[reflect.Type]string
-	// stack tracks the active descent path so direct self-cycles can be
-	// detected when expandedRefs forces inlining.
-	stack map[reflect.Type]struct{}
-	// defs is the collected $defs map; defsOrder preserves insertion
-	// order so the emitted JSON is stable.
+	g         *Generator
+	seenName  map[reflect.Type]string
+	stack     map[reflect.Type]struct{}
 	defs      map[string]any
 	defsOrder []string
 }
@@ -211,18 +210,12 @@ var (
 	jsonMarshalerType = reflect.TypeFor[json.Marshaler]()
 )
 
-// errInternalGenerator is the static sentinel returned for internal-decoder
-// failures inside the generator. Wrapped with context via fmt.Errorf so
-// callers see the exact location plus this stable sentinel.
 var errInternalGenerator = errors.New("jsonschema: internal generator error")
 
-// schemaForType is the recursive worker. It returns the schema as an *any*
-// (either a *orderedMap or, for boolean schemas, a bool). path identifies
-// the current reflection location, used for error messages.
-//
-// The function is split into single-purpose helpers (per-stage early
-// returns) so the cyclomatic complexity stays bounded; each helper returns
-// (result, hit, err) where hit signals "this stage produced the answer".
+// schemaForType returns the schema for t as an any (either an
+// *orderedMap, or — for boolean schemas — a bool). path is the reflection
+// location used in error messages. Each tryX helper returns (value, hit,
+// err) where hit signals that the helper produced the answer.
 func (c *genCtx) schemaForType(t reflect.Type, path string) (any, error) {
 	if t == nil {
 		return newOrderedMap(), nil
@@ -403,10 +396,8 @@ func (c *genCtx) dispatchKind(t reflect.Type, path string) (any, error) {
 	}
 }
 
-// integerSchemaForKind returns `{"type":"integer"}` plus a width-based
-// minimum / maximum when the kind has a fixed range. Aim is documentation,
-// not strict overflow validation: the bounds match Go's value range so a
-// JSON number that fits the field will validate.
+// integerSchemaForKind returns {"type":"integer"} with width-based
+// minimum / maximum so a JSON number fitting the Go field validates.
 func integerSchemaForKind(k reflect.Kind) *orderedMap {
 	m := newOrderedMap()
 	m.set("type", "integer")
@@ -431,9 +422,6 @@ func integerSchemaForKind(k reflect.Kind) *orderedMap {
 		m.set("maximum", int64(math.MaxUint32))
 	case reflect.Uint, reflect.Uint64:
 		m.set("minimum", int64(0))
-		// uint64 values up to MaxUint64 don't fit in JSON integer
-		// precision, but encoding/json marshals them as numbers; the
-		// schema's "integer" type accepts the wire form regardless.
 	}
 	return m
 }
@@ -495,7 +483,17 @@ func (c *genCtx) schemaForStruct(t reflect.Type, path string) (any, error) {
 	m := newOrderedMap()
 	m.set("type", "object")
 	if props.len() > 0 {
-		m.set("properties", props)
+		// orderedProperties=false drops the ordered map so encoders see
+		// unspecified key order (the caller's explicit request).
+		if c.g.opts.orderedPropertiesSet && !c.g.opts.orderedProperties {
+			plain := make(map[string]any, props.len())
+			for _, k := range props.keys {
+				plain[k] = props.vals[k]
+			}
+			m.set("properties", plain)
+		} else {
+			m.set("properties", props)
+		}
 	}
 	if len(required) > 0 {
 		m.set(kwRequired, required)
@@ -504,9 +502,8 @@ func (c *genCtx) schemaForStruct(t reflect.Type, path string) (any, error) {
 		m.set("additionalProperties", false)
 	}
 
-	// If a recursive descent allocated a $defs entry for this type
-	// (cycle detection) install the materialized schema and return a
-	// $ref to it. Otherwise inline the schema directly.
+	// If recursive descent allocated a $defs entry for t, install the
+	// materialized schema there and return a $ref to it.
 	if !c.g.opts.expandedRefs && t.Name() != "" && t.PkgPath() != "" {
 		if name, ok := c.seenName[t]; ok {
 			c.defs[name] = m
@@ -529,11 +526,8 @@ func (c *genCtx) collectStructFields(t reflect.Type, path string, props *ordered
 			continue
 		}
 
-		// Embedded anonymous struct: inline its fields at our level
-		// (matches encoding/json + the jsonschema spec for "extends"-
-		// style composition). Only when the embedded field has no
-		// explicit name — a `json:"foo"` tag means the user wants it
-		// treated as a normal property.
+		// Embedded anonymous struct without an explicit json name: inline
+		// its fields (matches encoding/json semantics).
 		if f.Anonymous && jsonName == "" {
 			ft := f.Type
 			for ft.Kind() == reflect.Ptr {
@@ -574,7 +568,6 @@ func (c *genCtx) collectStructFields(t reflect.Type, path string, props *ordered
 
 		props.set(name, fieldSchema)
 
-		// required-array bookkeeping.
 		omitempty := hasJSONTagOption(jsonOpts, "omitempty")
 		if spec.hasReq && !omitempty && !requiredSeen[name] {
 			requiredSeen[name] = true
@@ -584,20 +577,15 @@ func (c *genCtx) collectStructFields(t reflect.Type, path string, props *ordered
 	return nil
 }
 
-// applyTagSpecToSchema mutates fieldSchema (an *orderedMap, when present)
-// in-place to fold in the parsed tag spec. Returns the updated schema —
-// callers should reassign because $ref schemas are atomic and the spec's
-// title / description / etc. wrap the $ref via allOf if needed.
+// applyTagSpecToSchema folds the parsed tag spec into fieldSchema and
+// returns the updated schema; callers must reassign because boolean
+// schemas are promoted to objects when the tag adds keywords.
 //
-// For simplicity v0.1 attaches metadata directly even on $ref schemas. JSON
-// Schema 2019-09+ allows sibling keywords next to $ref; older drafts do not,
-// but the package's $ref shape is broadly tolerated by validators in practice.
+// v0.1 attaches metadata as siblings to $ref. 2019-09+ allows this; older
+// drafts forbid it but most validators accept it in practice.
 func (c *genCtx) applyTagSpecToSchema(fieldSchema any, spec *tagSpec, owner reflect.Type, sf reflect.StructField, fieldPath string) any {
 	m, ok := fieldSchema.(*orderedMap)
 	if !ok {
-		// boolean schema: wrap in an object so we have somewhere to put
-		// metadata. Empty-schema case rarely needs constraints, so we
-		// only do this when the spec actually has something to add.
 		if !spec.hasAny() {
 			return fieldSchema
 		}
@@ -720,8 +708,7 @@ func applyTagLengths(m *orderedMap, spec *tagSpec) {
 	}
 }
 
-// hasAny reports whether the tagSpec carries any non-zero option. Split
-// into smaller groupings to keep the cyclomatic complexity in check.
+// hasAny reports whether the tagSpec carries any non-zero option.
 func (s *tagSpec) hasAny() bool {
 	return s.hasMetadata() || s.hasAssertion()
 }
@@ -746,9 +733,8 @@ func (s *tagSpec) hasAssertion() bool {
 		s.hasMinProperties || s.hasMaxProperties || s.hasAdditionalPropertiesFalse
 }
 
-// allocateDefName chooses a stable name for a type's $defs entry. Uses the
-// type's bare Name() and disambiguates with a numeric suffix on collision —
-// two distinct types in different packages could share a name.
+// allocateDefName picks a stable $defs name for t, disambiguating
+// cross-package name collisions with a numeric suffix.
 func (c *genCtx) allocateDefName(t reflect.Type) string {
 	base := t.Name()
 	if base == "" {
@@ -789,10 +775,8 @@ func (c *genCtx) refToDef(name string) *orderedMap {
 	return m
 }
 
-// customEmitterToValue converts a *Schema produced by a custom emitter into
-// the in-memory shape the generator passes around (an `any` that marshals to
-// the expected JSON). The conversion uses an order-preserving decoder so
-// objects keep their declaration order through to the final emit.
+// customEmitterToValue converts a *Schema returned by a custom emitter
+// into the generator's internal value shape, preserving object key order.
 func customEmitterToValue(s *Schema) (any, error) {
 	if s == nil {
 		return newOrderedMap(), nil
@@ -807,10 +791,9 @@ func customEmitterToValue(s *Schema) (any, error) {
 	return decodeOrdered(data)
 }
 
-// decodeOrdered parses a JSON document into the generator's internal value
-// shape: *orderedMap for objects, []any for arrays, primitives otherwise.
-// The decoder uses encoding/json's token stream so object key order is
-// preserved.
+// decodeOrdered parses a JSON document into the generator's internal
+// value shape (*orderedMap for objects, []any for arrays). Uses the
+// encoding/json token stream to preserve object key order.
 func decodeOrdered(data []byte) (any, error) {
 	dec := json.NewDecoder(bytes.NewReader(data))
 	dec.UseNumber()
@@ -877,13 +860,8 @@ func decodeOrderedFromToken(dec *json.Decoder, tok json.Token) (any, error) {
 	}
 }
 
-// orderedMap is a property-order-preserving map used by the generator to
-// build schema documents. It carries an ordered list of keys plus a backing
-// map for O(1) overwrite. The marshal path emits keys in insertion order.
-//
-// orderedMap satisfies [json.Marshaler] so the generator can hand the result
-// straight to encoding/json (or to the package's own marshaler) and get
-// stable output.
+// orderedMap is the generator's insertion-ordered map: ordered keys plus
+// an O(1) overwrite map. Satisfies [json.Marshaler].
 type orderedMap struct {
 	keys []string
 	vals map[string]any
@@ -893,8 +871,8 @@ func newOrderedMap() *orderedMap {
 	return &orderedMap{vals: make(map[string]any)}
 }
 
-// orderedFromKV is a one-line constructor for the common "build a small
-// ordered map literal" pattern.
+// orderedFromKV builds a small orderedMap literal from alternating
+// key / value arguments.
 func orderedFromKV(kv ...any) *orderedMap {
 	m := newOrderedMap()
 	for i := 0; i+1 < len(kv); i += 2 {
@@ -907,8 +885,7 @@ func orderedFromKV(kv ...any) *orderedMap {
 	return m
 }
 
-// set appends the (key, val) pair to the ordered map. If key already exists,
-// its value is overwritten in place (the original position is preserved).
+// set appends (key, val); on overwrite the original position is kept.
 func (m *orderedMap) set(key string, val any) {
 	if _, ok := m.vals[key]; !ok {
 		m.keys = append(m.keys, key)
@@ -916,11 +893,10 @@ func (m *orderedMap) set(key string, val any) {
 	m.vals[key] = val
 }
 
-// setHead is like set but moves the key to the front of the order. Used for
-// root-level $schema / $id so they appear first in the emitted JSON.
+// setHead is like set but moves the key to the front of the order, so
+// root-level $schema / $id can appear first in the emitted JSON.
 func (m *orderedMap) setHead(key string, val any) {
 	if _, ok := m.vals[key]; ok {
-		// remove existing position.
 		for i, k := range m.keys {
 			if k == key {
 				m.keys = append(m.keys[:i], m.keys[i+1:]...)
@@ -962,11 +938,9 @@ func (m *orderedMap) MarshalJSON() ([]byte, error) {
 	return buf.Bytes(), nil
 }
 
-// marshalAny is the generator's value-marshaling entry point. It honors the
-// orderedMap shape (recursive in slices and maps) and falls back to
-// encoding/json for everything else. The function exists so the orderedMap
-// MarshalJSON method can recurse without bouncing through the standard
-// library's own Marshaler dispatch (which would re-allocate on every call).
+// marshalAny marshals v while honoring *orderedMap (recursive into slices
+// and orderedMap children) and defers to encoding/json for everything
+// else. Avoids re-entering the stdlib Marshaler dispatch on each recursion.
 func marshalAny(v any) ([]byte, error) {
 	switch t := v.(type) {
 	case nil:

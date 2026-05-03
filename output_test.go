@@ -306,10 +306,53 @@ func TestStopOnFirstErrorOneError(t *testing.T) {
 		t.Errorf("WithStopOnFirstError: got %d errors, want exactly 1\nerrors: %+v",
 			len(res.Errors), res.Errors)
 	}
+	// Pin the keyword: the first error in deterministic schema-walk order
+	// for this fixture is the "minimum" violation on /x. If a future
+	// applicator refactor changes the walk order, update this expectation
+	// in lockstep with the documented order.
+	if len(res.Errors) > 0 && res.Errors[0].Keyword != "minimum" {
+		t.Errorf("WithStopOnFirstError: first-error keyword = %q, want %q",
+			res.Errors[0].Keyword, "minimum")
+	}
 	// Annotations should be skipped in stop-on-first-error mode.
 	if len(res.Annotations) != 0 {
 		t.Errorf("WithStopOnFirstError: annotations present (%d), want 0",
 			len(res.Annotations))
+	}
+}
+
+// TestOutputVerbosePassingShape exercises the verbose tree on a successful
+// validation: the top-level "valid" must be true and the tree must have
+// at least one body node so callers can introspect annotations from passing
+// keywords.
+func TestOutputVerbosePassingShape(t *testing.T) {
+	s := mustCompile(t, outputTestSchema)
+	res, err := s.Validate(outputTestValidInstance)
+	if err != nil {
+		t.Fatal(err)
+	}
+	out := res.Output(OutputVerbose)
+	var doc map[string]any
+	if err := json.Unmarshal(out, &doc); err != nil {
+		t.Fatalf("verbose(passing) parse: %v\n%s", err, out)
+	}
+	if doc["valid"] != true {
+		t.Errorf("verbose(passing).valid = %v, want true", doc["valid"])
+	}
+	// Verbose must contain a non-trivial tree even on success — at
+	// minimum the keywordLocation/instanceLocation slots are present, and
+	// the body has either annotations or nested groups. Detect by
+	// confirming at least one of those sentinel keys exists.
+	bodyKeys := []string{"annotations", "errors", "keywordLocation", "instanceLocation"}
+	hit := false
+	for _, k := range bodyKeys {
+		if _, ok := doc[k]; ok {
+			hit = true
+			break
+		}
+	}
+	if !hit {
+		t.Errorf("verbose(passing) tree missing body keys; doc=%v", doc)
 	}
 }
 

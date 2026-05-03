@@ -590,3 +590,33 @@ func TestGenerateRefOverridesGeneration(t *testing.T) {
 		t.Errorf("expected $ref to override default type: %s", data)
 	}
 }
+
+// TestGenerateStructWithNoExportedFields confirms a struct whose entire
+// field set is unexported still produces a valid {"type":"object"} schema —
+// without panicking and without raising an error. The exact shape (whether
+// `properties` and `required` slots are present and empty) is an
+// implementation detail; the test asserts only the high-level invariant.
+func TestGenerateStructWithNoExportedFields(t *testing.T) {
+	type unexported struct {
+		name string //nolint:unused // intentionally unexported for this test
+		age  int    //nolint:unused // intentionally unexported for this test
+	}
+	schema, err := Generate(unexported{})
+	if err != nil {
+		t.Fatalf("Generate: %v", err)
+	}
+	if schema == nil {
+		t.Fatal("nil schema")
+	}
+	data, err := schema.MarshalJSON()
+	if err != nil {
+		t.Fatalf("MarshalJSON: %v", err)
+	}
+	var doc map[string]any
+	if err := json.Unmarshal(data, &doc); err != nil {
+		t.Fatalf("Unmarshal: %v\n%s", err, data)
+	}
+	if doc["type"] != "object" {
+		t.Errorf("expected type=object, got %v (full=%s)", doc["type"], data)
+	}
+}

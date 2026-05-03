@@ -137,7 +137,6 @@ func TestSentinelErrors(t *testing.T) {
 	textSentinels := []error{
 		ErrUnknownDraft,
 		ErrUnknownKeyword,
-		ErrUnknownVocabulary,
 		ErrUnknownFormat,
 		ErrRefCycle,
 		ErrMaxRefDepth,
@@ -165,7 +164,6 @@ func TestSentinelMessages(t *testing.T) {
 	for _, e := range []error{
 		ErrUnknownDraft,
 		ErrUnknownKeyword,
-		ErrUnknownVocabulary,
 		ErrUnknownFormat,
 		ErrRefCycle,
 		ErrMaxRefDepth,

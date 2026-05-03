@@ -3,6 +3,7 @@ package jsonschema
 import (
 	"sort"
 	"strings"
+	"sync"
 )
 
 // subschema is the runtime representation of a single schema location: the
@@ -51,71 +52,157 @@ type evaluator interface {
 	eval(ctx *runCtx, instance any)
 }
 
-// builderFn constructs an evaluator for keyword name from raw keyword value.
-// keywordBuilders maps every supported keyword to its builder.
-type builderFn func(b *evalBuilder, raw any, loc string) (evaluator, error)
+// builderFn constructs the evaluator for one keyword binding. The frame
+// carries per-call build state (parent map, location, base URI, resource
+// URI, active draft) so concurrent lazy-ref builds do not share scratch
+// state on evalBuilder.
+type builderFn func(b *evalBuilder, f *buildFrame, raw any, loc string) (evaluator, error)
 
 var keywordBuilders = map[string]builderFn{}
 
-// registerEvaluator wires builder b under keyword name. Called from per-file
-// init blocks to avoid one giant switch table here.
+// registerEvaluator wires builder b under keyword name. Called from
+// per-file init blocks to keep the keyword table distributed.
 func registerEvaluator(name string, b builderFn) {
 	keywordBuilders[name] = b
 }
 
-// evalBuilder is the per-compile context that subschema constructors share
-// while building the evaluator graph.
+// buildFrame is the per-call build context threaded through buildSubschema
+// and the keyword builders. Builders that consult sibling keywords (if /
+// then / else, contains / max-min-Contains, etc.) read from parent.
+type buildFrame struct {
+	parent   any
+	loc      string
+	base     string
+	resource string
+	draft    Draft
+	// ours is the chain's set of in-flight build keys. Cycles within the
+	// same chain return the partially-built *subschema; foreign goroutines
+	// wait for the build to finish.
+	ours map[string]struct{}
+}
+
+// evalBuilder is the shared context for assembling the evaluator graph.
+// Per-call scratch state lives on a [buildFrame]; cache and inFlight are
+// guarded by cacheMu so concurrent validators materializing lazy refs
+// share the same subschema map without exposing partial entries.
 type evalBuilder struct {
 	schema *Schema
 	rm     *resourceMap
 	loader Loader
-	draft  Draft
-	cache  map[string]*subschema // location → subschema, for cycle-breaking
-	// currentParent is the raw map[string]any of the schema location
-	// currently being constructed. Builders for keywords with sibling
-	// dependencies (if/then/else, contains/maxContains/minContains) read
-	// from it.
-	currentParent any
-	// currentLoc is the JSON Pointer of currentParent.
-	currentLoc string
-	// currentBase is the base URI in effect at the current build position
-	// (after applying any nested $id along the path). Used by ref builders
-	// so nested $refs resolve against the correct base.
-	currentBase string
-	// currentResource is the absolute URI of the resource owning the
-	// current build position.
-	currentResource string
+	// draft is the root draft for this compile. Per-position drafts flow
+	// via buildFrame.draft; this field is the fallback dialect used when
+	// runtime ref resolution loads a fresh resource.
+	draft Draft
+	// cache maps a location key (or synthesized "dyn:..." / "rec:..." key)
+	// to its fully built *subschema. cacheMu guards reads and writes.
+	cache map[string]*subschema
+	// inFlight tracks builds whose evaluator slice has not yet been
+	// populated. The pending *subschema pointer is the same instance that
+	// eventually lands in cache; done is closed when the build completes.
+	inFlight map[string]*pendingSubschema
+	cacheMu  sync.Mutex
 }
 
-// buildSubschema produces (or returns from cache) the subschema rooted at
-// node, located at loc within the schema, with the given base + resource URI.
-func (b *evalBuilder) buildSubschema(node any, loc, baseURI, resourceURI string, crosses bool) (*subschema, error) {
-	if existing, ok := b.cache[loc]; ok {
-		return existing, nil
-	}
-	// b.cache[loc] is set below before the keyword loop recurses, so the
-	// shared pointer covers cycle re-entry transparently — every recursive
-	// build of the same loc returns the same (partially built) *subschema
-	// that becomes fully populated once the outer call returns.
+// pendingSubschema is the inFlight value: the *subschema currently being
+// built plus a channel that closes once the build promotes it into cache.
+type pendingSubschema struct {
+	sub  *subschema
+	done chan struct{}
+}
 
-	sub := &subschema{
-		raw:             node,
-		location:        loc,
-		baseURI:         baseURI,
-		resourceURI:     resourceURI,
-		crossesResource: crosses,
-		schema:          b.schema,
-		keywords:        map[string]struct{}{},
-	}
-	b.cache[loc] = sub
+// buildSubschema enters a fresh resource ($id-bounded) scope: the
+// compile-time root entry and the runtime $ref / $dynamicRef /
+// $recursiveRef materialization paths.
+func (b *evalBuilder) buildSubschema(node any, loc, baseURI, resourceURI string) (*subschema, error) {
+	return b.buildSubschemaIn(node, loc, baseURI, resourceURI, true, nil)
+}
 
+// buildSubschemaFrame is the entry point for keyword builders descending
+// inside a parent schema. The keyword descent never crosses an $id
+// boundary on its own; only a nested $id flips crossesResource (handled
+// by populateSubschema). The chain's ours set is threaded through so
+// cycles within the chain resolve to the same partial *subschema.
+func (b *evalBuilder) buildSubschemaFrame(f *buildFrame, node any, loc, baseURI, resourceURI string) (*subschema, error) {
+	return b.buildSubschemaIn(node, loc, baseURI, resourceURI, false, f.ours)
+}
+
+// buildSubschemaIn does the actual work. ours holds the loc keys whose
+// builds are owned by this call chain. On re-entry:
+//   - ours[loc] set: cycle within this chain — return the partially-built
+//     *subschema (it becomes complete when the outer call returns).
+//   - another goroutine owns loc: wait on done, then read from cache.
+//
+// Foreign goroutines never observe a partially-populated *subschema.
+func (b *evalBuilder) buildSubschemaIn(node any, loc, baseURI, resourceURI string, crosses bool, ours map[string]struct{}) (*subschema, error) {
+	for {
+		b.cacheMu.Lock()
+		if existing, ok := b.cache[loc]; ok {
+			b.cacheMu.Unlock()
+			return existing, nil
+		}
+		if pending, ok := b.inFlight[loc]; ok {
+			if _, mine := ours[loc]; mine {
+				b.cacheMu.Unlock()
+				return pending.sub, nil
+			}
+			done := pending.done
+			b.cacheMu.Unlock()
+			<-done
+			continue
+		}
+
+		sub := &subschema{
+			raw:             node,
+			location:        loc,
+			baseURI:         baseURI,
+			resourceURI:     resourceURI,
+			crossesResource: crosses,
+			schema:          b.schema,
+			keywords:        map[string]struct{}{},
+		}
+		pending := &pendingSubschema{sub: sub, done: make(chan struct{})}
+		if b.inFlight == nil {
+			b.inFlight = map[string]*pendingSubschema{}
+		}
+		b.inFlight[loc] = pending
+		b.cacheMu.Unlock()
+
+		// Mark loc as ours so cycles re-entering from our keyword loop
+		// recognize the in-flight build as their own.
+		if ours == nil {
+			ours = map[string]struct{}{}
+		}
+		ours[loc] = struct{}{}
+		err := b.populateSubschema(sub, node, baseURI, resourceURI, ours)
+		delete(ours, loc)
+
+		// Promote into cache and remove from inFlight under the same
+		// lock acquisition, then signal waiters.
+		b.cacheMu.Lock()
+		if err == nil {
+			b.cache[loc] = sub
+		}
+		delete(b.inFlight, loc)
+		b.cacheMu.Unlock()
+		close(pending.done)
+		if err != nil {
+			return nil, err
+		}
+		return sub, nil
+	}
+}
+
+// populateSubschema fills in sub's evaluator slice by walking node's
+// keywords. The caller has already published sub into inFlight; ours is
+// the chain's set of in-flight keys, threaded through nested builds via
+// the buildFrame.
+func (b *evalBuilder) populateSubschema(sub *subschema, node any, baseURI, resourceURI string, ours map[string]struct{}) error {
 	switch t := node.(type) {
 	case bool:
 		v := t
 		sub.boolValue = &v
-		return sub, nil
+		return nil
 	case map[string]any:
-		// per-resource $schema override
 		subDraft := b.draft
 		idKey := subDraft.IDKeyword()
 		if v, ok := t["$schema"]; ok {
@@ -126,7 +213,6 @@ func (b *evalBuilder) buildSubschema(node any, loc, baseURI, resourceURI string,
 				}
 			}
 		}
-		// Update base URI if $id is set.
 		if rawID, ok := t[idKey]; ok {
 			if s, ok := rawID.(string); ok && s != "" {
 				if abs, err := resolveURI(baseURI, s); err == nil {
@@ -140,25 +226,15 @@ func (b *evalBuilder) buildSubschema(node any, loc, baseURI, resourceURI string,
 			}
 		}
 
-		savedDraft := b.draft
-		b.draft = subDraft
-		savedParent := b.currentParent
-		savedLoc := b.currentLoc
-		savedBase := b.currentBase
-		savedRes := b.currentResource
-		b.currentParent = t
-		b.currentLoc = loc
-		b.currentBase = baseURI
-		b.currentResource = resourceURI
-		defer func() {
-			b.draft = savedDraft
-			b.currentParent = savedParent
-			b.currentLoc = savedLoc
-			b.currentBase = savedBase
-			b.currentResource = savedRes
-		}()
+		frame := &buildFrame{
+			parent:   t,
+			loc:      sub.location,
+			base:     baseURI,
+			resource: resourceURI,
+			draft:    subDraft,
+			ours:     ours,
+		}
 
-		// Collect & order keys: applicator/ref keys first, unevaluated last.
 		keys := orderKeys(t)
 		for _, key := range keys {
 			if _, known := LookupKeyword(key, subDraft); !known {
@@ -169,31 +245,31 @@ func (b *evalBuilder) buildSubschema(node any, loc, baseURI, resourceURI string,
 			if !ok {
 				continue
 			}
-			ev, err := builder(b, t[key], loc+"/"+escapePointerToken(key))
+			ev, err := builder(b, frame, t[key], sub.location+"/"+escapePointerToken(key))
 			if err != nil {
-				return nil, err
+				return err
 			}
 			if ev != nil {
 				sub.evaluators = append(sub.evaluators, ev)
 			}
 		}
-		// Stable sort: applicators/refs before unevaluated*; format/metadata
-		// last; everything else preserves builder order.
+		// Stable sort: applicators / refs first, unevaluated* last,
+		// format / metadata at the tail.
 		sort.SliceStable(sub.evaluators, func(i, j int) bool {
 			return evalPriority(sub.evaluators[i].keyword()) <
 				evalPriority(sub.evaluators[j].keyword())
 		})
-		return sub, nil
+		return nil
 	default:
 		// Unknown shape — treat as the always-pass schema.
 		passing := true
 		sub.boolValue = &passing
-		return sub, nil
+		return nil
 	}
 }
 
-// orderKeys returns the keys of m in a deterministic, stable order. The order
-// is alphabetical so the evaluator graph is reproducible.
+// orderKeys returns m's keys in alphabetical order so the evaluator graph
+// is deterministic across builds.
 func orderKeys(m map[string]any) []string {
 	keys := make([]string, 0, len(m))
 	for k := range m {
@@ -211,9 +287,8 @@ func evalPriority(name string) int {
 		return 0
 	case "type", "enum", "const":
 		return 5
-	// `properties` and `patternProperties` MUST run before
-	// `additionalProperties` (per §12.12) so additionalProperties can see
-	// their evaluated-keys annotations.
+	// properties / patternProperties must run before additionalProperties
+	// (§12.12) so the latter can read their evaluated-keys annotations.
 	case "properties", "patternProperties":
 		return 8
 	case "prefixItems":
@@ -236,7 +311,6 @@ func evalPriority(name string) int {
 	case "unevaluatedItems", "unevaluatedProperties":
 		return 20
 	default:
-		// title / description / default / format / etc — annotation tail.
 		return 30
 	}
 }
@@ -262,24 +336,19 @@ type runCtx struct {
 	annoEntries     []annotationEntry         // ordered annotation log for output
 	refDepth        int
 	validationDepth int
-	// stopFired is set when stopOnFirstError sees its first error so that
-	// nested branches (which capture errors into a fresh slice via
-	// evaluateBranch) still short-circuit at the outer-most level.
+	// stopFired propagates stop-on-first-error across evaluateBranch so
+	// the outer walk short-circuits even when a branch's failure is
+	// captured into an isolated slice.
 	stopFired bool
-	// contentDecoded carries decoded bytes from contentEncoding to a sibling
-	// contentMediaType evaluator at the same instance location. Lazily
-	// allocated; only populated when content assertion is enabled.
+	// contentDecoded / contentParsed pass intermediate values from
+	// contentEncoding → contentMediaType → contentSchema at the same
+	// instance location. Lazily allocated.
 	contentDecoded map[string][]byte
-	// contentParsed carries parsed JSON values from contentMediaType to a
-	// sibling contentSchema evaluator. Lazily allocated.
-	contentParsed map[string]any
-	// formatWarned records format names already warned-about under
-	// UnknownFormatWarn so we don't spam logs on big schemas.
-	formatWarned map[string]struct{}
+	contentParsed  map[string]any
 }
 
-// annotationEntry is the internal record of one annotation. We keep the
-// instance location and keyword so unevaluated* keywords can read the graph.
+// annotationEntry is the internal record of one annotation. unevaluated*
+// keywords scan this log to discover sibling-applicator coverage.
 type annotationEntry struct {
 	keywordLoc  string
 	instanceLoc string
@@ -298,13 +367,16 @@ func (ctx *runCtx) evaluate(sub *subschema, instance any) {
 		}
 		return
 	}
-	// Push dynamic scope when entering a new resource.
 	if sub.crossesResource && sub.resourceURI != "" {
 		ctx.pushDynamicScope(sub.resourceURI)
 		defer ctx.popDynamicScope()
 	}
 	if ctx.validationDepth > ctx.opts.maxValidationDepth {
-		ctx.addError(sub.location, "", "", ErrMaxValidationDepth.Error())
+		// "$maxValidationDepth" is a reserved keyword identifier so
+		// callers can switch on ValidationError.Keyword instead of
+		// parsing the message.
+		ctx.addErrorWithCause(sub.location, "$maxValidationDepth", "",
+			ErrMaxValidationDepth.Error(), ErrMaxValidationDepth)
 		return
 	}
 	ctx.validationDepth++
@@ -327,14 +399,10 @@ func (ctx *runCtx) evaluateChild(sub *subschema, instance any, instanceTok, sche
 	ctx.evaluate(sub, instance)
 }
 
-// evaluateBranch evaluates sub against instance using a fresh, isolated
-// error/annotation buffer. Used by oneOf/anyOf/if/not so each branch's
-// failures do not contaminate the outer context. Returns the captured
-// errors+annotations for the caller to merge.
-//
-// The outer-context stopFired flag is preserved across the call so that
-// stop-on-first-error short-circuits the parent walk even when a branch
-// produces an isolated error.
+// evaluateBranch evaluates sub with a fresh error/annotation buffer so
+// branch failures (oneOf / anyOf / if / not) do not contaminate the outer
+// context. The captured errors and annotations are returned for the
+// caller to merge. The outer stopFired flag is preserved across the call.
 func (ctx *runCtx) evaluateBranch(sub *subschema, instance any) ([]ValidationError, []annotationEntry) {
 	saved := ctx.errors
 	savedAnno := ctx.annoEntries
@@ -343,8 +411,7 @@ func (ctx *runCtx) evaluateBranch(sub *subschema, instance any) ([]ValidationErr
 	ctx.errors = nil
 	ctx.annoEntries = nil
 	ctx.annotations = make(map[string]map[string]any)
-	// branches are speculative — they collect their own errors but should
-	// not propagate stopFired to siblings; we restore the saved flag below.
+	// Branches are speculative; their stopFired must not affect siblings.
 	ctx.stopFired = false
 	ctx.evaluate(sub, instance)
 	br := ctx.errors
@@ -356,8 +423,6 @@ func (ctx *runCtx) evaluateBranch(sub *subschema, instance any) ([]ValidationErr
 	return br, annos
 }
 
-// failure helpers ---------------------------------------------------------.
-
 // addError appends a ValidationError at the current instance/schema location.
 func (ctx *runCtx) addError(keywordLoc, keyword, _, msg string) {
 	if ctx.opts.maxErrors > 0 && len(ctx.errors) >= ctx.opts.maxErrors {
@@ -368,6 +433,25 @@ func (ctx *runCtx) addError(keywordLoc, keyword, _, msg string) {
 		InstanceLocation: ctx.instanceLocation(),
 		Keyword:          keyword,
 		Message:          msg,
+	})
+	if ctx.opts.stopOnFirstError {
+		ctx.stopFired = true
+	}
+}
+
+// addErrorWithCause is like addError but attaches a typed [Cause] so
+// callers can use [errors.As] to extract the underlying error
+// (e.g. *FormatError) from a [*ValidationError].
+func (ctx *runCtx) addErrorWithCause(keywordLoc, keyword, _, msg string, cause error) {
+	if ctx.opts.maxErrors > 0 && len(ctx.errors) >= ctx.opts.maxErrors {
+		return
+	}
+	ctx.errors = append(ctx.errors, ValidationError{
+		KeywordLocation:  keywordLoc,
+		InstanceLocation: ctx.instanceLocation(),
+		Keyword:          keyword,
+		Message:          msg,
+		Cause:            cause,
 	})
 	if ctx.opts.stopOnFirstError {
 		ctx.stopFired = true
@@ -455,14 +539,13 @@ func newRunCtx(schema *Schema, ro *runOptions) *runCtx {
 	return ctx
 }
 
-// release lets the ctx be returned to a pool. Currently no pooling — the
-// method exists so we can plug a sync.Pool later without a public-API churn.
+// release is a sync.Pool placeholder so future pooling can be added
+// without a public-API churn.
 func (ctx *runCtx) release() {}
 
-// addAnnotation records an annotation for the keyword at the current
-// instance location. The collectAnnotations option only gates the public
-// surface (publicAnnotations), not the internal record — unevaluated* and
-// branch-merging both consult ctx.annoEntries / ctx.annotations regardless.
+// addAnnotation records an annotation at the current instance location.
+// The collectAnnotations option only gates the public surface; the
+// internal record always feeds unevaluated* and branch merging.
 func (ctx *runCtx) addAnnotation(keywordLoc, keyword string, value any) {
 	loc := ctx.instanceLocation()
 	if ctx.annotations[loc] == nil {
@@ -477,8 +560,7 @@ func (ctx *runCtx) addAnnotation(keywordLoc, keyword string, value any) {
 	})
 }
 
-// publicAnnotations converts the internal entry log into the public-Result
-// shape, filtering out internal-only entries.
+// publicAnnotations converts the internal entry log into Result.Annotations.
 func (ctx *runCtx) publicAnnotations() []Annotation {
 	out := make([]Annotation, 0, len(ctx.annoEntries))
 	for _, e := range ctx.annoEntries {
@@ -511,8 +593,7 @@ func (ctx *runCtx) addBranchAnnotations(annos []annotationEntry) {
 		if ctx.annotations[e.instanceLoc] == nil {
 			ctx.annotations[e.instanceLoc] = map[string]any{}
 		}
-		// Merge: arrays/sets are unioned where applicable; otherwise the
-		// last-write-wins for scalars.
+		// Sets union; scalars last-write-wins.
 		if existing, ok := ctx.annotations[e.instanceLoc][e.keyword]; ok {
 			ctx.annotations[e.instanceLoc][e.keyword] = mergeAnnotation(existing, e.value)
 		} else {

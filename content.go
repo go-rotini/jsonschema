@@ -13,11 +13,9 @@ import (
 	"strings"
 )
 
-// contentEncodingEval is the evaluator for the contentEncoding keyword. In
-// annotation mode it just records the keyword. In assertion mode it attempts
-// to decode the string and (on success) stashes the decoded bytes on
-// runCtx.contentDecoded so a sibling contentMediaType / contentSchema can
-// pick them up.
+// contentEncodingEval emits an annotation; under content assertion it
+// also decodes the string and stashes the bytes on runCtx so a sibling
+// contentMediaType / contentSchema can pick them up.
 type contentEncodingEval struct {
 	loc      string
 	encoding string
@@ -47,8 +45,8 @@ func (e *contentEncodingEval) eval(ctx *runCtx, instance any) {
 	ctx.stashContent(decoded)
 }
 
-// contentMediaTypeEval annotates the keyword and (in assertion mode + when
-// the type is a JSON variant) parses the decoded payload.
+// contentMediaTypeEval emits an annotation; under content assertion (and
+// for JSON variants) it parses the decoded payload.
 type contentMediaTypeEval struct {
 	loc       string
 	mediaType string
@@ -68,8 +66,7 @@ func (e *contentMediaTypeEval) eval(ctx *runCtx, instance any) {
 	if !isJSONMediaType(e.mediaType) {
 		return
 	}
-	// Bytes to parse: prefer the decoded form a sibling contentEncoding may
-	// have stashed; fall back to the raw string.
+	// Prefer the bytes a sibling contentEncoding may have stashed.
 	bytes := ctx.takeContent()
 	if bytes == nil {
 		bytes = []byte(s)
@@ -83,8 +80,9 @@ func (e *contentMediaTypeEval) eval(ctx *runCtx, instance any) {
 	ctx.stashContentParsed(v)
 }
 
-// contentSchemaEval validates the parsed JSON content (when assertion is on
-// and a sibling contentMediaType has identified JSON) against the subschema.
+// contentSchemaEval validates the parsed JSON payload (under content
+// assertion, when a sibling contentMediaType identified JSON) against
+// the subschema.
 type contentSchemaEval struct {
 	loc string
 	sub *subschema
@@ -103,8 +101,8 @@ func (e *contentSchemaEval) eval(ctx *runCtx, instance any) {
 	}
 	parsed, ok := ctx.takeContentParsed()
 	if !ok {
-		// Without a sibling contentMediaType resolving to JSON we have
-		// nothing decoded to validate against — silent pass.
+		// Silent pass: no sibling contentMediaType identified JSON, so
+		// there is nothing decoded to validate against.
 		_ = s
 		return
 	}
@@ -117,8 +115,8 @@ func (e *contentSchemaEval) eval(ctx *runCtx, instance any) {
 	ctx.addBranchAnnotations(annos)
 }
 
-// errUnknownEncoding sentinels an unknown contentEncoding name; the
-// evaluator treats it as a silent pass per spec.
+// errUnknownEncoding signals that contentEncoding named an unrecognized
+// value; the evaluator treats this as a silent pass per spec.
 var errUnknownEncoding = errors.New("unknown content encoding")
 
 // decodeContent decodes s using encoding. Recognized encodings are base64,
@@ -158,13 +156,12 @@ func decodeContent(encoding, s string) ([]byte, error) {
 	}
 }
 
-// isJSONMediaType reports whether mt is JSON-flavored: application/json or
-// any */*+json subtype (with optional ;parameters).
+// isJSONMediaType reports whether mt is application/json, text/json, or a
+// */*+json subtype.
 func isJSONMediaType(mt string) bool {
 	main, _, err := mime.ParseMediaType(mt)
 	if err != nil {
-		// Fall back to a string compare; some test inputs lack a strict mime
-		// shape.
+		// Tolerate inputs that aren't strictly mime-shaped.
 		main = strings.TrimSpace(strings.ToLower(strings.SplitN(mt, ";", 2)[0]))
 	}
 	main = strings.ToLower(main)

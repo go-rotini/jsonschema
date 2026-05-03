@@ -187,6 +187,8 @@ func TestContentConcurrencySmoke(t *testing.T) {
 				data = bad
 			}
 			for range 30 {
+				// Smoke test: the race detector catches data races; we
+				// don't validate per-call output here.
 				_, _ = s.Validate(data, WithContentAssertion(true))
 			}
 		}()

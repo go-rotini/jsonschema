@@ -13,7 +13,6 @@ This package is used as the default JSON Schema support package for [rotini](htt
 - Schema generation from Go types via reflection (`Generate`, `GenerateBytes`, `FromType`)
 - Multi-format instance and schema input (JSONC, YAML, TOML) via `LoadJSONC` / `LoadYAML` / `LoadTOML` and their `Validate*` counterparts
 - `$ref`, `$dynamicRef`, `$recursiveRef`, plain-name anchors, and pluggable `Loader` (HTTPS-only by default; opt-in HTTP / file)
-- Custom keywords and vocabularies via `WithVocabulary`
 - Built-in format validators: `date-time`, `date`, `time`, `duration`, `email`, `idn-email`, `hostname`, `idn-hostname`, `ipv4`, `ipv6`, `uri`, `uri-reference`, `iri`, `iri-reference`, `uri-template`, `json-pointer`, `relative-json-pointer`, `uuid`, `regex`
 - Content vocabulary: `contentEncoding`, `contentMediaType`, `contentSchema` (annotation-only by default)
 - Two strict modes: `WithMetaSchemaValidation` (compile-time meta-schema check) and `WithFormatAssertion` (runtime format assertion)
@@ -29,7 +28,7 @@ This package is used as the default JSON Schema support package for [rotini](htt
 go get github.com/go-rotini/jsonschema
 ```
 
-Requires Go 1.23 or later.
+Requires Go 1.26 or later.
 
 ## Quick Start
 

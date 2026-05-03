@@ -8,22 +8,15 @@ import (
 	"strings"
 )
 
-// kwFormat / kwRequired / kwMultipleOf are JSON Schema keyword names
-// extracted as constants so the goconst linter doesn't complain about the
-// repeated string literals.
 const (
 	kwFormat     = "format"
 	kwRequired   = "required"
 	kwMultipleOf = "multipleOf"
+	kwMinimum    = "minimum"
 )
 
-// tagSpec is the parsed result of one struct field's `jsonschema:"..."` tag.
-// Each field is set only when the corresponding option was present; the
-// generator uses the zero value to mean "no constraint".
-//
-// The struct mirrors §6.2 of the requirements doc one-to-one. Field types
-// hold the coerced JSON value (per the host Go field's kind) so the
-// generator can hand them straight to its output map.
+// tagSpec is the parsed result of one struct field's `jsonschema:"..."`
+// tag. Each option's hasX flag distinguishes "set" from "zero default".
 type tagSpec struct {
 	required bool
 	hasReq   bool
@@ -107,10 +100,8 @@ type tagSpec struct {
 	hasRef bool
 }
 
-// parseJSONTag splits a `json:"..."` tag value into its name and option
-// segments. The name segment is the first comma-separated token; the
-// remaining tokens (e.g. "omitempty") are returned as a comma-joined string
-// for cheap substring lookup.
+// parseJSONTag splits a `json:"..."` tag into (name, options). options
+// is the comma-joined remainder for cheap "omitempty"-style lookup.
 func parseJSONTag(tag string) (name, options string) {
 	if before, after, ok := strings.Cut(tag, ","); ok {
 		return before, after
@@ -127,14 +118,10 @@ func hasJSONTagOption(optionsString, opt string) bool {
 	return slices.Contains(strings.Split(optionsString, ","), opt)
 }
 
-// parseJSONSchemaTag tokenizes a `jsonschema:"..."` tag value and returns
-// the per-option result. The host Go field type drives value coercion for
-// numeric / array options (so `minLength` on a non-string field, for
-// instance, is rejected).
-//
-// fieldType may be nil for the recursive map-value path that wants the
-// universal options only (e.g. description on the parent struct emitted by
-// Generate-from-type-only).
+// parseJSONSchemaTag parses a `jsonschema:"..."` tag. The host field
+// type drives value coercion (so `minLength` on a non-string field is
+// rejected). fieldType may be nil for paths that want only universal
+// options like description.
 func parseJSONSchemaTag(tag string, fieldType reflect.Type, fieldPath string) (tagSpec, error) {
 	var spec tagSpec
 	if tag == "" {
@@ -153,9 +140,8 @@ func parseJSONSchemaTag(tag string, fieldType reflect.Type, fieldPath string) (t
 	return spec, nil
 }
 
-// tokenizeJSONSchemaTag splits the tag value on unescaped commas. Backslash
-// escapes (`\,`, `\|`, `\\`) are honored; a literal `=` may appear inside a
-// value because [splitTagOption] only splits on the first unescaped `=`.
+// tokenizeJSONSchemaTag splits a tag value on unescaped commas, honoring
+// the `\,`, `\|`, `\\` escapes from §6.5.
 func tokenizeJSONSchemaTag(tag string) []string {
 	var out []string
 	var cur strings.Builder
@@ -188,9 +174,8 @@ func tokenizeJSONSchemaTag(tag string) []string {
 	return out
 }
 
-// splitTagOption splits one option token at its first unescaped `=` into
-// (name, value, hasValue). The name half is unescape-resolved; the value
-// half is returned with its escape sequences resolved as well.
+// splitTagOption splits an option token at its first unescaped `=` into
+// (name, value, hasValue), unescaping both halves.
 func splitTagOption(tok string) (name, value string, hasValue bool) {
 	for i := 0; i < len(tok); i++ {
 		if tok[i] == '\\' {
@@ -206,10 +191,8 @@ func splitTagOption(tok string) (name, value string, hasValue bool) {
 	return strings.TrimSpace(unescapeTagValue(tok)), "", false
 }
 
-// unescapeTagValue resolves the `\,`, `\|`, `\\` escape sequences defined in
-// §6.5. Any other `\x` sequence is left as the literal `x` (consistent with
-// "the parser ignores unknown escapes but consumes the backslash"); this
-// keeps `\n` style writes harmless.
+// unescapeTagValue resolves the `\,`, `\|`, `\\` escapes from §6.5.
+// Unknown `\x` sequences collapse to the literal x.
 func unescapeTagValue(s string) string {
 	if !strings.ContainsRune(s, '\\') {
 		return s
@@ -227,9 +210,8 @@ func unescapeTagValue(s string) string {
 	return out.String()
 }
 
-// splitTagList splits a tag value (an enum / examples list) on unescaped `|`
-// pipes. The escape rules mirror [tokenizeJSONSchemaTag] but at the value
-// level — the items have already had outer commas removed by the tokenizer.
+// splitTagList splits an enum / examples value on unescaped `|`, using
+// the same escape rules as [tokenizeJSONSchemaTag].
 func splitTagList(value string) []string {
 	var out []string
 	var cur strings.Builder
@@ -256,11 +238,9 @@ func splitTagList(value string) []string {
 	return out
 }
 
-// applyTagOption dispatches one parsed (name, value) option to the matching
-// field of spec, performing per-field-type coercion. The body is split into
-// per-category helpers so each handler stays small enough to read at a
-// glance. Each helper returns (handled, err): handled=true means the option
-// was recognized regardless of err.
+// applyTagOption dispatches a parsed (name, value) pair to the matching
+// helper. Each helper returns (handled, err): handled=true means the
+// option was recognized (success or failure).
 func applyTagOption(spec *tagSpec, name, value string, hasValue bool, ft reflect.Type, fieldPath string) error {
 	if handled, err := applyTagFlagOption(spec, name, hasValue, fieldPath); handled {
 		return err
@@ -291,9 +271,8 @@ func applyTagOption(spec *tagSpec, name, value string, hasValue bool, ft reflect
 	return tagErr(fieldPath, fmt.Sprintf("unknown jsonschema tag option %q", name))
 }
 
-// applyTagFlagOption handles the boolean-presence options (required,
-// deprecated, readOnly, writeOnly, uniqueItems). Returns handled=true when
-// name matches.
+// applyTagFlagOption handles boolean-presence options (required,
+// deprecated, readOnly, writeOnly, uniqueItems).
 func applyTagFlagOption(spec *tagSpec, name string, hasValue bool, path string) (bool, error) {
 	switch name {
 	case kwRequired:
@@ -433,7 +412,7 @@ func applyTagListOption(spec *tagSpec, name, value string, hasValue bool, ft ref
 // exclusiveMinimum, exclusiveMaximum, multipleOf).
 func applyTagNumericOption(spec *tagSpec, name, value string, hasValue bool, ft reflect.Type, path string) (bool, error) {
 	switch name {
-	case "minimum", "maximum", "exclusiveMinimum", "exclusiveMaximum", kwMultipleOf:
+	case kwMinimum, "maximum", "exclusiveMinimum", "exclusiveMaximum", kwMultipleOf:
 	default:
 		return false, nil
 	}
@@ -442,7 +421,7 @@ func applyTagNumericOption(spec *tagSpec, name, value string, hasValue bool, ft 
 		return true, err
 	}
 	switch name {
-	case "minimum":
+	case kwMinimum:
 		spec.minimum = v
 		spec.hasMinimum = true
 	case "maximum":
@@ -507,8 +486,7 @@ func applyTagLengthOption(spec *tagSpec, name, value string, ft reflect.Type, pa
 	return true, nil
 }
 
-// tagErr is a small helper that constructs a [*CompileError] with a stable
-// "Tag" prefix in the message and the field path in the keyword location.
+// tagErr returns a [*CompileError] tagged with "Tag" plus the field path.
 func tagErr(fieldPath, msg string) error {
 	return &CompileError{
 		KeywordLocation: fieldPath,
@@ -516,10 +494,9 @@ func tagErr(fieldPath, msg string) error {
 	}
 }
 
-// elemTypeForList returns the element type for a list-emitting tag option
-// (enum / examples). For slice/array fields, the element type is the host's
-// element type so that `enum=a|b|c` on `[]string` coerces each entry as a
-// string. For scalars, the host type is used directly.
+// elemTypeForList returns the per-item Go type for enum / examples on a
+// host field: slices and arrays use their element type; scalars use the
+// host type directly.
 func elemTypeForList(ft reflect.Type) reflect.Type {
 	if ft == nil {
 		return nil

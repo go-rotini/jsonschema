@@ -37,17 +37,6 @@ func TestUnknownFormatPolicyString(t *testing.T) {
 	}
 }
 
-func TestUnknownFormatAliases(t *testing.T) {
-	// FormatIgnore / FormatWarn are documented aliases for the explicit
-	// UnknownFormat* names.
-	if FormatIgnore != UnknownFormatIgnore {
-		t.Errorf("FormatIgnore != UnknownFormatIgnore")
-	}
-	if FormatWarn != UnknownFormatWarn {
-		t.Errorf("FormatWarn != UnknownFormatWarn")
-	}
-}
-
 func TestRefCollisionPolicyString(t *testing.T) {
 	cases := map[RefCollisionPolicy]string{
 		RefCollisionError:      "error",

@@ -12,10 +12,6 @@ import (
 	"unicode/utf8"
 )
 
-// =====================================================================
-// type
-// =====================================================================.
-
 type typeEval struct {
 	loc     string
 	allowed []string
@@ -75,9 +71,7 @@ func isJSONInteger(v any) bool {
 	switch n := v.(type) {
 	case json.Number:
 		s := string(n)
-		// Integers per spec: numbers with no fractional or exponent part
-		// (or with a fractional part of zeros, e.g. 1.0).
-		// Use big.Rat to check if value is an exact integer.
+		// Integer = number with no fractional part (1.0 counts).
 		r := new(big.Rat)
 		if _, ok := r.SetString(s); !ok {
 			return false
@@ -96,7 +90,7 @@ func init() {
 	registerEvaluator("type", buildType)
 }
 
-func buildType(_ *evalBuilder, raw any, loc string) (evaluator, error) {
+func buildType(_ *evalBuilder, _ *buildFrame, raw any, loc string) (evaluator, error) {
 	var allowed []string
 	switch t := raw.(type) {
 	case string:
@@ -112,10 +106,6 @@ func buildType(_ *evalBuilder, raw any, loc string) (evaluator, error) {
 	}
 	return &typeEval{loc: loc, allowed: allowed}, nil
 }
-
-// =====================================================================
-// enum / const
-// =====================================================================.
 
 type enumEval struct {
 	loc  string
@@ -148,21 +138,21 @@ func (e *constEval) eval(ctx *runCtx, instance any) {
 
 //nolint:gochecknoinits // evaluator registry is built at package init by design.
 func init() {
-	registerEvaluator("enum", func(_ *evalBuilder, raw any, loc string) (evaluator, error) {
+	registerEvaluator("enum", func(_ *evalBuilder, _ *buildFrame, raw any, loc string) (evaluator, error) {
 		arr, ok := raw.([]any)
 		if !ok {
 			return nil, &CompileError{KeywordLocation: loc, Message: "enum must be an array"}
 		}
 		return &enumEval{loc: loc, vals: arr}, nil
 	})
-	registerEvaluator("const", func(_ *evalBuilder, raw any, loc string) (evaluator, error) {
+	registerEvaluator("const", func(_ *evalBuilder, _ *buildFrame, raw any, loc string) (evaluator, error) {
 		return &constEval{loc: loc, val: raw}, nil
 	})
 }
 
 // canonicalEqual reports whether a and b represent the same JSON value.
+// Numbers compare by big.Rat so 1 == 1.0 == "1.0".
 func canonicalEqual(a, b any) bool {
-	// Numbers (json.Number / float64) compare by big.Rat value.
 	if isJSONNumber(a) && isJSONNumber(b) {
 		ra, oka := numberToRat(a)
 		rb, okb := numberToRat(b)
@@ -170,7 +160,6 @@ func canonicalEqual(a, b any) bool {
 			return ra.Cmp(rb) == 0
 		}
 	}
-	// Both nil
 	if a == nil && b == nil {
 		return true
 	}
@@ -214,8 +203,7 @@ func canonicalEqual(a, b any) bool {
 	return reflect.DeepEqual(a, b)
 }
 
-// numberToRat converts a JSON-typed number value into a *big.Rat. Returns
-// (nil, false) if v is not a JSON number-shaped value.
+// numberToRat converts a JSON number value into a *big.Rat.
 func numberToRat(v any) (*big.Rat, bool) {
 	switch n := v.(type) {
 	case json.Number:
@@ -223,7 +211,6 @@ func numberToRat(v any) (*big.Rat, bool) {
 		if _, ok := r.SetString(string(n)); ok {
 			return r, true
 		}
-		// Try as int
 		if i, err := n.Int64(); err == nil {
 			return new(big.Rat).SetInt64(i), true
 		}
@@ -249,10 +236,6 @@ func numberToRat(v any) (*big.Rat, bool) {
 	return nil, false
 }
 
-// =====================================================================
-// multipleOf / maximum / minimum / exclusiveMaximum / exclusiveMinimum
-// =====================================================================.
-
 type multipleOfEval struct {
 	loc string
 	val *big.Rat
@@ -268,7 +251,6 @@ func (e *multipleOfEval) eval(ctx *runCtx, instance any) {
 	if !ok {
 		return
 	}
-	// instance / val must be an integer.
 	q := new(big.Rat).Quo(r, e.val)
 	if !q.IsInt() {
 		ctx.addError(e.loc, "multipleOf", "", fmt.Sprintf("value is not a multiple of %s", e.val.RatString()))
@@ -315,7 +297,7 @@ func (e *rangeEval) eval(ctx *runCtx, instance any) {
 
 //nolint:gochecknoinits // evaluator registry is built at package init by design.
 func init() {
-	registerEvaluator("multipleOf", func(_ *evalBuilder, raw any, loc string) (evaluator, error) {
+	registerEvaluator("multipleOf", func(_ *evalBuilder, _ *buildFrame, raw any, loc string) (evaluator, error) {
 		r, ok := numberToRat(raw)
 		if !ok {
 			return nil, &CompileError{KeywordLocation: loc, Message: "multipleOf must be a number"}
@@ -325,28 +307,25 @@ func init() {
 		}
 		return &multipleOfEval{loc: loc, val: r}, nil
 	})
-	registerEvaluator("maximum", func(_ *evalBuilder, raw any, loc string) (evaluator, error) {
+	registerEvaluator("maximum", func(_ *evalBuilder, _ *buildFrame, raw any, loc string) (evaluator, error) {
 		r, ok := numberToRat(raw)
 		if !ok {
 			return nil, &CompileError{KeywordLocation: loc, Message: "maximum must be a number"}
 		}
 		return &rangeEval{loc: loc, kw: "maximum", val: r, upper: true}, nil
 	})
-	registerEvaluator("minimum", func(_ *evalBuilder, raw any, loc string) (evaluator, error) {
+	registerEvaluator("minimum", func(_ *evalBuilder, _ *buildFrame, raw any, loc string) (evaluator, error) {
 		r, ok := numberToRat(raw)
 		if !ok {
 			return nil, &CompileError{KeywordLocation: loc, Message: "minimum must be a number"}
 		}
 		return &rangeEval{loc: loc, kw: "minimum", val: r, upper: false}, nil
 	})
-	registerEvaluator("exclusiveMaximum", func(b *evalBuilder, raw any, loc string) (evaluator, error) {
-		// Draft 4: exclusiveMaximum is a boolean that pairs with maximum.
-		// Draft 6+: exclusiveMaximum is a number on its own.
-		if _, ok := raw.(bool); ok && b.draft <= Draft4 {
-			// In Draft 4, exclusiveMaximum-as-bool flips a sibling maximum;
-			// the sibling check is folded into the maximum evaluator, so
-			// here we leave the keyword as a no-op and let `maximum` carry
-			// the semantics.
+	registerEvaluator("exclusiveMaximum", func(_ *evalBuilder, f *buildFrame, raw any, loc string) (evaluator, error) {
+		// Draft 4 spelled this as a boolean paired with maximum; later
+		// drafts make it a number. The Draft-4 form is folded into the
+		// maximum evaluator, leaving this entry as a no-op.
+		if _, ok := raw.(bool); ok && f.draft <= Draft4 {
 			return &noopEval{name: "exclusiveMaximum"}, nil
 		}
 		r, ok := numberToRat(raw)
@@ -355,8 +334,8 @@ func init() {
 		}
 		return &rangeEval{loc: loc, kw: "exclusiveMaximum", val: r, upper: true, exclusive: true}, nil
 	})
-	registerEvaluator("exclusiveMinimum", func(b *evalBuilder, raw any, loc string) (evaluator, error) {
-		if _, ok := raw.(bool); ok && b.draft <= Draft4 {
+	registerEvaluator("exclusiveMinimum", func(_ *evalBuilder, f *buildFrame, raw any, loc string) (evaluator, error) {
+		if _, ok := raw.(bool); ok && f.draft <= Draft4 {
 			return &noopEval{name: "exclusiveMinimum"}, nil
 		}
 		r, ok := numberToRat(raw)
@@ -366,10 +345,6 @@ func init() {
 		return &rangeEval{loc: loc, kw: "exclusiveMinimum", val: r, upper: false, exclusive: true}, nil
 	})
 }
-
-// =====================================================================
-// maxLength / minLength / pattern
-// =====================================================================.
 
 type lengthEval struct {
 	loc   string
@@ -414,21 +389,21 @@ func (e *patternEval) eval(ctx *runCtx, instance any) {
 
 //nolint:gochecknoinits // evaluator registry is built at package init by design.
 func init() {
-	registerEvaluator("maxLength", func(_ *evalBuilder, raw any, loc string) (evaluator, error) {
+	registerEvaluator("maxLength", func(_ *evalBuilder, _ *buildFrame, raw any, loc string) (evaluator, error) {
 		n, ok := toInt(raw)
 		if !ok || n < 0 {
 			return nil, &CompileError{KeywordLocation: loc, Message: "maxLength must be a non-negative integer"}
 		}
 		return &lengthEval{loc: loc, kw: "maxLength", bound: n, upper: true}, nil
 	})
-	registerEvaluator("minLength", func(_ *evalBuilder, raw any, loc string) (evaluator, error) {
+	registerEvaluator("minLength", func(_ *evalBuilder, _ *buildFrame, raw any, loc string) (evaluator, error) {
 		n, ok := toInt(raw)
 		if !ok || n < 0 {
 			return nil, &CompileError{KeywordLocation: loc, Message: "minLength must be a non-negative integer"}
 		}
 		return &lengthEval{loc: loc, kw: "minLength", bound: n, upper: false}, nil
 	})
-	registerEvaluator("pattern", func(_ *evalBuilder, raw any, loc string) (evaluator, error) {
+	registerEvaluator("pattern", func(_ *evalBuilder, _ *buildFrame, raw any, loc string) (evaluator, error) {
 		s, ok := raw.(string)
 		if !ok {
 			return nil, &CompileError{KeywordLocation: loc, Message: "pattern must be a string"}
@@ -441,11 +416,10 @@ func init() {
 	})
 }
 
-// translateECMA performs minimal ECMA-262 → Go regexp transformations. Most
-// of ECMA-262 maps directly; a handful of escapes / classes need translation.
+// translateECMA maps an ECMA-262 regex source to its Go RE2 equivalent.
+// Most patterns map directly; this is a placeholder for future escapes
+// and character-class translations that need rewriting.
 func translateECMA(p string) string {
-	// Common substitutions: ECMA `\d` is digits 0-9 (matches Go RE2).
-	// Unicode property escapes like \p{...} mostly work.
 	return p
 }
 
@@ -471,10 +445,6 @@ func toInt(raw any) (int, bool) {
 	}
 	return 0, false
 }
-
-// =====================================================================
-// maxItems / minItems / uniqueItems
-// =====================================================================.
 
 type itemsCountEval struct {
 	loc   string
@@ -526,21 +496,21 @@ func (e *uniqueItemsEval) eval(ctx *runCtx, instance any) {
 
 //nolint:gochecknoinits // evaluator registry is built at package init by design.
 func init() {
-	registerEvaluator("maxItems", func(_ *evalBuilder, raw any, loc string) (evaluator, error) {
+	registerEvaluator("maxItems", func(_ *evalBuilder, _ *buildFrame, raw any, loc string) (evaluator, error) {
 		n, ok := toInt(raw)
 		if !ok || n < 0 {
 			return nil, &CompileError{KeywordLocation: loc, Message: "maxItems must be a non-negative integer"}
 		}
 		return &itemsCountEval{loc: loc, kw: "maxItems", bound: n, upper: true}, nil
 	})
-	registerEvaluator("minItems", func(_ *evalBuilder, raw any, loc string) (evaluator, error) {
+	registerEvaluator("minItems", func(_ *evalBuilder, _ *buildFrame, raw any, loc string) (evaluator, error) {
 		n, ok := toInt(raw)
 		if !ok || n < 0 {
 			return nil, &CompileError{KeywordLocation: loc, Message: "minItems must be a non-negative integer"}
 		}
 		return &itemsCountEval{loc: loc, kw: "minItems", bound: n, upper: false}, nil
 	})
-	registerEvaluator("uniqueItems", func(_ *evalBuilder, raw any, loc string) (evaluator, error) {
+	registerEvaluator("uniqueItems", func(_ *evalBuilder, _ *buildFrame, raw any, loc string) (evaluator, error) {
 		b, ok := raw.(bool)
 		if !ok {
 			return nil, &CompileError{KeywordLocation: loc, Message: "uniqueItems must be a boolean"}
@@ -548,10 +518,6 @@ func init() {
 		return &uniqueItemsEval{loc: loc, on: b}, nil
 	})
 }
-
-// =====================================================================
-// maxProperties / minProperties / required / dependentRequired
-// =====================================================================.
 
 type propsCountEval struct {
 	loc   string
@@ -579,6 +545,12 @@ func (e *propsCountEval) eval(ctx *runCtx, instance any) {
 type requiredEval struct {
 	loc  string
 	keys []string
+	// readOnlyKeys / writeOnlyKeys collect properties whose subschema
+	// declared "readOnly": true / "writeOnly": true at compile time, so
+	// the corresponding direction option ([WithWriteOnly] / [WithReadOnly])
+	// can skip them.
+	readOnlyKeys  map[string]struct{}
+	writeOnlyKeys map[string]struct{}
 }
 
 func (e *requiredEval) keyword() string { return "required" }
@@ -591,6 +563,16 @@ func (e *requiredEval) eval(ctx *runCtx, instance any) {
 	for _, k := range e.keys {
 		if ctx.shouldStop() {
 			return
+		}
+		if ctx.opts.writeOnly {
+			if _, ro := e.readOnlyKeys[k]; ro {
+				continue
+			}
+		}
+		if ctx.opts.readOnly {
+			if _, wo := e.writeOnlyKeys[k]; wo {
+				continue
+			}
 		}
 		if _, present := obj[k]; !present {
 			ctx.addError(e.loc, "required", "", fmt.Sprintf("missing required property %q", k))
@@ -624,21 +606,21 @@ func (e *dependentRequiredEval) eval(ctx *runCtx, instance any) {
 
 //nolint:gochecknoinits // evaluator registry is built at package init by design.
 func init() {
-	registerEvaluator("maxProperties", func(_ *evalBuilder, raw any, loc string) (evaluator, error) {
+	registerEvaluator("maxProperties", func(_ *evalBuilder, _ *buildFrame, raw any, loc string) (evaluator, error) {
 		n, ok := toInt(raw)
 		if !ok || n < 0 {
 			return nil, &CompileError{KeywordLocation: loc, Message: "maxProperties must be a non-negative integer"}
 		}
 		return &propsCountEval{loc: loc, kw: "maxProperties", bound: n, upper: true}, nil
 	})
-	registerEvaluator("minProperties", func(_ *evalBuilder, raw any, loc string) (evaluator, error) {
+	registerEvaluator("minProperties", func(_ *evalBuilder, _ *buildFrame, raw any, loc string) (evaluator, error) {
 		n, ok := toInt(raw)
 		if !ok || n < 0 {
 			return nil, &CompileError{KeywordLocation: loc, Message: "minProperties must be a non-negative integer"}
 		}
 		return &propsCountEval{loc: loc, kw: "minProperties", bound: n, upper: false}, nil
 	})
-	registerEvaluator("required", func(_ *evalBuilder, raw any, loc string) (evaluator, error) {
+	registerEvaluator("required", func(_ *evalBuilder, f *buildFrame, raw any, loc string) (evaluator, error) {
 		arr, ok := raw.([]any)
 		if !ok {
 			return nil, &CompileError{KeywordLocation: loc, Message: "required must be an array"}
@@ -651,9 +633,10 @@ func init() {
 			}
 			keys = append(keys, s)
 		}
-		return &requiredEval{loc: loc, keys: keys}, nil
+		ro, wo := scanDirectionalAnnotations(f)
+		return &requiredEval{loc: loc, keys: keys, readOnlyKeys: ro, writeOnlyKeys: wo}, nil
 	})
-	registerEvaluator("dependentRequired", func(_ *evalBuilder, raw any, loc string) (evaluator, error) {
+	registerEvaluator("dependentRequired", func(_ *evalBuilder, _ *buildFrame, raw any, loc string) (evaluator, error) {
 		m, ok := raw.(map[string]any)
 		if !ok {
 			return nil, &CompileError{KeywordLocation: loc, Message: "dependentRequired must be an object"}
@@ -678,6 +661,48 @@ func init() {
 	})
 }
 
-// itoaInt is a small wrapper around strconv.Itoa for use by the package's
-// other eval files.
+// itoaInt wraps strconv.Itoa so the eval files share one helper.
 func itoaInt(i int) string { return strconv.Itoa(i) }
+
+// scanDirectionalAnnotations collects property names flagged with
+// "readOnly": true or "writeOnly": true in the parent's properties map.
+// Both return values are nil when no flagged property is found, so the
+// evaluator's hot path skips the lookup entirely.
+func scanDirectionalAnnotations(f *buildFrame) (map[string]struct{}, map[string]struct{}) {
+	parent, ok := f.parent.(map[string]any)
+	if !ok {
+		return nil, nil
+	}
+	rawProps, ok := parent["properties"]
+	if !ok {
+		return nil, nil
+	}
+	propMap, ok := rawProps.(map[string]any)
+	if !ok {
+		return nil, nil
+	}
+	var readOnly, writeOnly map[string]struct{}
+	for name, raw := range propMap {
+		schema, ok := raw.(map[string]any)
+		if !ok {
+			continue
+		}
+		if v, ok := schema["readOnly"]; ok {
+			if flag, ok := v.(bool); ok && flag {
+				if readOnly == nil {
+					readOnly = map[string]struct{}{}
+				}
+				readOnly[name] = struct{}{}
+			}
+		}
+		if v, ok := schema["writeOnly"]; ok {
+			if flag, ok := v.(bool); ok && flag {
+				if writeOnly == nil {
+					writeOnly = map[string]struct{}{}
+				}
+				writeOnly[name] = struct{}{}
+			}
+		}
+	}
+	return readOnly, writeOnly
+}

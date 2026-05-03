@@ -5,6 +5,18 @@ import (
 	"testing"
 )
 
+// Deferred to v0.2: external seed corpus from the JSON Schema Test Suite.
+//
+// §8.4 of the requirements doc calls for seeding [FuzzCompile] / [FuzzValidate]
+// with the suite's invalid-schema corpus so the fuzzer starts from realistic
+// problem inputs instead of a handful of hand-rolled cases. The current seed
+// helpers (seedFuzzCompile / seedFuzzValidate / seedFuzzGenerate) cover only
+// a small in-package set; expanding to the upstream suite requires a
+// fixture-loader that walks `testdata/JSON-Schema-Test-Suite` and registers
+// each `invalid` entry as a `f.Add(...)` call. The change is pure additive
+// surface area — no behavior change — so it is tracked for v0.2 rather than
+// blocking the v0.1 release.
+
 // FuzzCompile exercises [Compile] on arbitrary byte input. The invariant is
 // "no panics" — any compile failure surfaces as a typed *CompileError, never
 // a runtime panic.

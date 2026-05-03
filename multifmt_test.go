@@ -498,3 +498,22 @@ func TestLoadJSONC_InvalidSchema(t *testing.T) {
 		t.Fatalf("expected compile error")
 	}
 }
+
+// TestLoadYAML_AliasToUndefinedAnchor confirms that a YAML document
+// referencing an alias (*foo) without a matching anchor (&foo) is rejected
+// with [ErrInvalidYAML]. The decoder must catch the unresolved reference at
+// parse time so a malformed document can never silently produce an empty or
+// nil node tree.
+func TestLoadYAML_AliasToUndefinedAnchor(t *testing.T) {
+	src := `type: object
+properties:
+  x: *undefined_alias
+`
+	_, err := LoadYAML([]byte(src))
+	if err == nil {
+		t.Fatal("expected error for undefined alias")
+	}
+	if !errors.Is(err, ErrInvalidYAML) {
+		t.Errorf("err = %v, want errors.Is(_, ErrInvalidYAML)", err)
+	}
+}

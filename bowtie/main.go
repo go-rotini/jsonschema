@@ -153,9 +153,8 @@ func main() {
 	}
 }
 
-// dispatch is the read-eval-print loop. It is exported in package terms
-// (lowercase but reachable from main_test.go in the same package) so tests
-// can drive the protocol over bytes.Buffer pipes without invoking exec.
+// dispatch is the read-eval-print loop; tests drive it over bytes.Buffer
+// pipes instead of invoking the binary.
 func dispatch(in io.Reader, out io.Writer) error {
 	scanner := bufio.NewScanner(in)
 	scanner.Buffer(make([]byte, 0, 64*1024), maxScanBufferBytes)
@@ -180,9 +179,9 @@ func dispatch(in io.Reader, out io.Writer) error {
 	return nil
 }
 
-// handleLine decodes one JSON line and dispatches it to the right command
-// handler. Per-test panics are recovered by handleRun; this function only
-// surfaces protocol-level failures.
+// handleLine decodes one JSON line and dispatches it. Per-test panics
+// are recovered downstream in handleRun; this function only surfaces
+// protocol-level failures.
 func handleLine(line []byte, st *state, enc *json.Encoder) error {
 	var cmd command
 	if err := json.Unmarshal(line, &cmd); err != nil {
@@ -282,9 +281,8 @@ func newCaseCompiler(dialect jsonschema.Draft, registry map[string]json.RawMessa
 	return c, nil
 }
 
-// compileCaseSchema feeds the case's raw schema bytes into the compiler.
-// Boolean schemas (`true` / `false`) are valid per the spec and round-trip
-// through Compile transparently.
+// compileCaseSchema compiles the case's raw schema bytes; boolean
+// schemas round-trip through Compile transparently.
 func compileCaseSchema(c *jsonschema.Compiler, raw json.RawMessage) (*jsonschema.Schema, error) {
 	if len(raw) == 0 {
 		return nil, errEmptyCaseSchema
@@ -307,9 +305,8 @@ func evaluateTests(schema *jsonschema.Schema, tests []testInstance) []testResult
 	return results
 }
 
-// evaluateOne validates a single instance with panic recovery. Bowtie does
-// not require us to re-marshal the instance — ValidateValue accepts the
-// already-decoded any tree directly.
+// evaluateOne validates one instance with panic recovery, decoding via
+// json.Number so the validator sees the wire form.
 func evaluateOne(schema *jsonschema.Schema, raw json.RawMessage) (res testResult) {
 	defer func() {
 		if r := recover(); r != nil {

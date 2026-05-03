@@ -10,9 +10,19 @@ import (
 	"sync"
 )
 
-// errTrailingContent is the static sentinel used by [decodeSchemaBytes]
-// when the schema document is followed by extra non-whitespace bytes.
-var errTrailingContent = errors.New("trailing content after schema")
+// errTrailingContent is the static sentinel used by [decodeSchemaBytes] and
+// [decodeInstanceBytes] when the document is followed by extra
+// non-whitespace bytes (a "concatenated documents" smuggle attempt).
+var errTrailingContent = errors.New("trailing content after document")
+
+// traceLoaderFetch emits one line per successful loader fetch to w. A nil
+// writer is a no-op so the option can be safely left unset.
+func traceLoaderFetch(w io.Writer, uri string) {
+	if w == nil {
+		return
+	}
+	_, _ = fmt.Fprintf(w, "jsonschema: loader fetched %s\n", uri)
+}
 
 // keywordBinding ties a recognized keyword at a specific subschema location
 // to its raw value and (for refs) its pre-resolved target. The validator
@@ -101,11 +111,22 @@ func Validate(schemaJSON, instanceJSON []byte, opts ...Option) (*Result, error) 
 // references — the cache amortizes loader I/O.
 //
 // A Compiler is safe for concurrent use after construction. The cache is
-// keyed by absolute URI.
+// keyed by absolute URI; concurrent [*Compiler.CompileURL] calls for the
+// same URI share a single fetch+compile pipeline via an inline single-flight.
 type Compiler struct {
 	opts      *compileOptions
 	cache     sync.Map // map[string]*Schema
 	resources sync.Map // map[string][]byte — pre-registered AddResource entries
+	flight    sync.Map // map[string]*compileInflight — in-flight CompileURL calls
+}
+
+// compileInflight is the single-flight record used by [*Compiler.CompileURL]
+// so two goroutines requesting the same URI share one network round-trip
+// plus one compile pass.
+type compileInflight struct {
+	wg     sync.WaitGroup
+	schema *Schema
+	err    error
 }
 
 // NewCompiler returns a fresh [*Compiler] with the supplied options applied.
@@ -117,12 +138,36 @@ func NewCompiler(opts ...CompileOption) *Compiler {
 	if co.loader == nil {
 		co.loader = DefaultLoader()
 	}
+	if co.loaderTrace != nil {
+		co.loader = &tracingLoader{inner: co.loader, w: co.loaderTrace}
+	}
 	return &Compiler{opts: co}
+}
+
+// tracingLoader wraps a [Loader] and writes a one-line trace per successful
+// fetch to its [io.Writer]. Failed fetches do not emit a line; callers can
+// observe failures via the returned error.
+type tracingLoader struct {
+	inner Loader
+	w     io.Writer
+}
+
+// Load implements [Loader].
+func (l *tracingLoader) Load(uri string) ([]byte, error) {
+	data, err := l.inner.Load(uri)
+	if err != nil {
+		return nil, fmt.Errorf("trace loader: %w", err)
+	}
+	traceLoaderFetch(l.w, uri)
+	return data, nil
 }
 
 // Compile parses and compiles schemaJSON. The result is cached by $id so
 // subsequent calls referencing the same document via $ref short-circuit.
 func (c *Compiler) Compile(schemaJSON []byte) (*Schema, error) {
+	if c == nil {
+		return nil, ErrSchemaNotCompiled
+	}
 	value, err := decodeSchemaBytes(schemaJSON)
 	if err != nil {
 		return nil, &CompileError{Message: "decode schema", Cause: err}
@@ -142,36 +187,92 @@ func (c *Compiler) MustCompile(schemaJSON []byte) *Schema {
 // CompileValue compiles an already-decoded Go value (an `any` produced by
 // json.Unmarshal — typically a map[string]any tree).
 func (c *Compiler) CompileValue(v any) (*Schema, error) {
+	if c == nil {
+		return nil, ErrSchemaNotCompiled
+	}
 	return c.compile(v, nil, c.opts.baseURI)
 }
 
+// MustCompileValue is the panic-on-error variant of [*Compiler.CompileValue].
+func (c *Compiler) MustCompileValue(v any) *Schema {
+	s, err := c.CompileValue(v)
+	if err != nil {
+		panic(err)
+	}
+	return s
+}
+
 // CompileURL fetches uri via the compiler's loader and compiles the
-// resulting bytes.
+// resulting bytes. Concurrent calls for the same URI share a single
+// fetch+compile pipeline (single-flight); the result is cached so subsequent
+// calls return immediately.
 func (c *Compiler) CompileURL(uri string) (*Schema, error) {
+	if c == nil {
+		return nil, ErrSchemaNotCompiled
+	}
 	if cached, ok := c.cache.Load(uri); ok {
-		s, ok := cached.(*Schema)
-		if ok {
+		if s, ok := cached.(*Schema); ok {
 			return s, nil
 		}
 	}
+
+	// Single-flight: concurrent calls for the same URI share one fetch+compile.
+	flight := &compileInflight{}
+	flight.wg.Add(1)
+	actual, loaded := c.flight.LoadOrStore(uri, flight)
+	if loaded {
+		other, ok := actual.(*compileInflight)
+		if !ok {
+			return nil, &CompileError{KeywordLocation: uri, Message: "compile flight: invalid state"}
+		}
+		other.wg.Wait()
+		return other.schema, other.err
+	}
+	defer func() {
+		c.flight.Delete(uri)
+		flight.wg.Done()
+	}()
+
+	// Re-check after winning the flight slot: another goroutine may have
+	// populated the cache between the first check and LoadOrStore.
+	if cached, ok := c.cache.Load(uri); ok {
+		if s, ok := cached.(*Schema); ok {
+			flight.schema = s
+			return s, nil
+		}
+	}
+
 	loader := c.opts.loader
 	if loader == nil {
 		loader = DefaultLoader()
 	}
 	data, err := loader.Load(uri)
 	if err != nil {
-		return nil, &CompileError{KeywordLocation: uri, Message: "load", Cause: err}
+		flight.err = &CompileError{KeywordLocation: uri, Message: "load", Cause: err}
+		return nil, flight.err
 	}
 	value, err := decodeSchemaBytes(data)
 	if err != nil {
-		return nil, &CompileError{KeywordLocation: uri, Message: "decode schema", Cause: err}
+		flight.err = &CompileError{KeywordLocation: uri, Message: "decode schema", Cause: err}
+		return nil, flight.err
 	}
 	s, err := c.compile(value, data, uri)
 	if err != nil {
+		flight.err = err
 		return nil, err
 	}
 	c.cache.Store(uri, s)
+	flight.schema = s
 	return s, nil
+}
+
+// MustCompileURL is the panic-on-error variant of [*Compiler.CompileURL].
+func (c *Compiler) MustCompileURL(uri string) *Schema {
+	s, err := c.CompileURL(uri)
+	if err != nil {
+		panic(err)
+	}
+	return s
 }
 
 // AddResource registers a schema document under uri so subsequent
@@ -179,6 +280,9 @@ func (c *Compiler) CompileURL(uri string) (*Schema, error) {
 // The bytes are validated as JSON; the document is parsed lazily when first
 // referenced.
 func (c *Compiler) AddResource(uri string, schemaJSON []byte) error {
+	if c == nil {
+		return ErrSchemaNotCompiled
+	}
 	if uri == "" {
 		return &CompileError{Message: "AddResource: empty URI"}
 	}
@@ -191,11 +295,10 @@ func (c *Compiler) AddResource(uri string, schemaJSON []byte) error {
 	return nil
 }
 
-// compile is the inner workhorse used by every public Compile* entry point.
-// rawSource is the canonical JSON byte slice; nil means the caller compiled
-// from a Go value and we synthesize the source via json.Marshal.
+// compile is the inner entry point shared by every public Compile* call.
+// rawSource may be nil; in that case the source bytes are synthesized via
+// json.Marshal of value.
 func (c *Compiler) compile(value any, rawSource []byte, baseURI string) (*Schema, error) {
-	// Determine the active draft.
 	draft := c.opts.defaultDraft
 	if draft == DraftUnknown {
 		draft = DraftDefault
@@ -214,7 +317,6 @@ func (c *Compiler) compile(value any, rawSource []byte, baseURI string) (*Schema
 		}
 	}
 
-	// Determine the root $id (if any) and the absolute root URI.
 	rootID := ""
 	if obj, ok := value.(map[string]any); ok {
 		if v, ok := obj[idKey]; ok {
@@ -233,22 +335,17 @@ func (c *Compiler) compile(value any, rawSource []byte, baseURI string) (*Schema
 		rootURI, _ = splitFragment(abs)
 	}
 
-	// Build the resource tree.
 	rm := newResourceMap()
-	// Pre-seed resources with anything registered via AddResource so
-	// compile-time refs to those URIs succeed without a loader call.
 	c.seedResources(rm)
 	if err := walkResource(rm, value, rootURI, draft); err != nil {
 		return nil, err
 	}
 
-	// Compile-time ref resolution + structural keyword validation.
 	bindings, err := c.bindAndResolve(rm, value, rootURI, "#", draft, nil)
 	if err != nil {
 		return nil, err
 	}
 
-	// Materialize the canonical source bytes.
 	if rawSource == nil {
 		buf, err := json.Marshal(value)
 		if err != nil {
@@ -269,7 +366,6 @@ func (c *Compiler) compile(value any, rawSource []byte, baseURI string) (*Schema
 		bindings:      bindings,
 		compileOpts:   c.opts,
 	}
-	// Build the runtime evaluator tree.
 	eb := &evalBuilder{
 		schema: schema,
 		rm:     rm,
@@ -277,7 +373,7 @@ func (c *Compiler) compile(value any, rawSource []byte, baseURI string) (*Schema
 		draft:  draft,
 		cache:  map[string]*subschema{},
 	}
-	root, err := eb.buildSubschema(value, "#", rootURI, rootURI, true)
+	root, err := eb.buildSubschema(value, "#", rootURI, rootURI)
 	if err != nil {
 		return nil, err
 	}
@@ -360,8 +456,7 @@ func (c *Compiler) seedResources(rm *resourceMap) {
 		if err != nil {
 			return true
 		}
-		// Errors from the seeding walk are non-fatal — the seed is a
-		// best-effort hint; failures are surfaced when the resource
+		// Seeding is best-effort: walk failures surface when the resource
 		// is actually consulted.
 		if walkErr := walkResource(rm, parsed, uri, DraftDefault); walkErr != nil {
 			_ = walkErr
@@ -468,8 +563,8 @@ func (c *Compiler) buildBinding(rm *resourceMap, key string, raw any, baseURI, l
 		}
 		resolved, err := resolveRef(rm, c.opts.loader, baseURI, ref, append(refStack, baseURI), subDraft)
 		if err != nil {
-			// Failing static resolution becomes a lazy edge — the
-			// dynamic scope may produce a target at run time.
+			// Static resolution failed: defer to a lazy edge so the
+			// dynamic scope can supply a target at run time.
 			binding.Resolved = &resolvedRef{Source: ref, AbsoluteURI: ref, Lazy: true, Target: nil, TargetURI: ""}
 		} else {
 			binding.Resolved = resolved
@@ -542,9 +637,6 @@ func (c *Compiler) bindAndResolveChild(rm *resourceMap, raw any, baseURI, locati
 			}
 		}
 	default:
-		// "additionalProperties", "propertyNames", "items" (object form),
-		// "contains", "not", "if", "then", "else", "additionalItems",
-		// "unevaluatedItems", "unevaluatedProperties", "contentSchema".
 		children, err := c.bindAndResolve(rm, raw, baseURI, location, draft, refStack)
 		if err != nil {
 			return nil, err
@@ -554,13 +646,9 @@ func (c *Compiler) bindAndResolveChild(rm *resourceMap, raw any, baseURI, locati
 	return out, nil
 }
 
-// validateKeywordShape performs a minimal "is this keyword's value the
-// right kind of JSON value" check. The list mirrors the structural rules
-// in JSON Schema's meta-schema; full meta-schema validation lands in Phase
-// 4 once the validator engine is online.
-//
-// Implementation note: the validator is split into per-shape helpers so
-// each switch arm fits into a small, easy-to-audit table.
+// validateKeywordShape verifies that a keyword's raw JSON value has the
+// right shape (string vs. number vs. object, ...). Full meta-schema
+// validation is opt-in via [WithMetaSchemaValidation].
 func validateKeywordShape(key string, raw any, loc string) error {
 	if shape, ok := shapeIntegers[key]; ok {
 		return shape.check(key, raw, loc)
@@ -681,10 +769,8 @@ func checkNonEmptyArray(key string, raw any, loc string) error {
 	return nil
 }
 
-// isNonNegativeInteger reports whether v is a JSON number with no fractional
-// part and a value ≥ 0. The compiler uses json.Number throughout so we
-// inspect the wire form when possible. Numbers like `2.0` are accepted as
-// integers (per spec: integer = number with no fractional part).
+// isNonNegativeInteger reports whether v is a JSON number ≥ 0 with no
+// fractional part. Numbers like 2.0 count as integers per the spec.
 func isNonNegativeInteger(v any) bool {
 	switch t := v.(type) {
 	case json.Number:
@@ -720,8 +806,8 @@ func isPositiveNumber(v any) bool {
 	return false
 }
 
-// escapePointerToken applies the inverse of [unescapePointerToken]: it
-// escapes ~ and / within a JSON Pointer reference token.
+// escapePointerToken escapes ~ and / within a JSON Pointer reference
+// token. Inverse of [unescapePointerToken].
 func escapePointerToken(s string) string {
 	out := make([]byte, 0, len(s))
 	for i := range s {

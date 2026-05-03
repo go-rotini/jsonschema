@@ -9,9 +9,6 @@ import (
 	"strings"
 )
 
-// Static error sentinels for ref.go's value-shaped errors. Wrapping these via
-// %w keeps the err113 lint clean while still surfacing useful context to the
-// caller.
 var (
 	errNoLoaderForExternalRef   = errors.New("unknown resource and no loader configured")
 	errLoaderEmptyDocument      = errors.New("loader returned a document with no resource")
@@ -24,8 +21,6 @@ var (
 	errPointerCannotDescend     = errors.New("cannot descend into scalar")
 )
 
-// keyword constants used in multiple branches; extracted so goconst stays
-// quiet and the descent rules stay easy to scan.
 const (
 	keyDefs              = "$defs"
 	keyDefinitions       = "definitions"
@@ -49,7 +44,6 @@ func resolveURI(base, ref string) (string, error) {
 		return "", nil
 	}
 	if base == "" {
-		// Validate the ref parses, then return it verbatim.
 		if _, err := url.Parse(ref); err != nil {
 			return "", fmt.Errorf("parse ref: %w", err)
 		}
@@ -145,13 +139,9 @@ func walkResource(rm *resourceMap, node any, baseURI string, draft Draft) error 
 	return walkNode(rm, root, node, draft)
 }
 
-// walkNode recurses through node (a parsed schema value) using current as
-// the active resource. When a nested object declares its own $id, walkNode
-// opens a new resource and continues the walk inside it.
-//
-// A schema is, syntactically, either an object (a real schema) or a boolean
-// (the "true"/"false" shorthand). Booleans contribute no anchors or refs so
-// they are simply ignored at the resource level.
+// walkNode recurses through node, opening a new resource whenever a nested
+// object declares its own $id. Boolean schemas contribute no anchors or
+// refs and are skipped silently.
 func walkNode(rm *resourceMap, current *resource, node any, draft Draft) error {
 	obj, ok := node.(map[string]any)
 	if !ok {
@@ -163,9 +153,6 @@ func walkNode(rm *resourceMap, current *resource, node any, draft Draft) error {
 	if err != nil {
 		return err
 	}
-	// isResourceRoot is true on the very first walk into a resource: either
-	// we just opened a fresh one via $id, or this object is the resource's
-	// root (the same map that walkResource registered as current.root).
 	isResourceRoot := opened || sameMap(target.root, obj)
 	registerAnchors(target, obj, isResourceRoot)
 	for k, v := range obj {
@@ -209,11 +196,9 @@ func openResourceIfNeeded(rm *resourceMap, current *resource, obj map[string]any
 	if !ok || idStr == "" {
 		return current, false, nil
 	}
-	// Pre-2019-09 ($id == "id" in Draft 4, or $id in Draft 6/7) allowed
-	// a plain-name fragment $id (e.g. {"$id": "#foo"}) as an alternative
-	// way to declare an anchor. In modern drafts (2019-09+) $id must be
-	// an absolute URI or absolute path; a plain-name $id does NOT open a
-	// new resource — it indexes the schema as an anchor in the parent.
+	// Pre-2019-09 drafts allowed a plain-name $id (e.g. {"$id": "#foo"})
+	// as an alternative anchor declaration; from 2019-09 on, $id must be
+	// absolute and a "#name" $id is treated as a sibling anchor instead.
 	if subDraft <= Draft7 && strings.HasPrefix(idStr, "#") && !strings.HasPrefix(idStr, "#/") {
 		name := idStr[1:]
 		if name != "" {
@@ -226,6 +211,15 @@ func openResourceIfNeeded(rm *resourceMap, current *resource, obj map[string]any
 		return nil, false, &CompileError{KeywordLocation: idKey, Message: "invalid " + idKey, Cause: err}
 	}
 	absID, _ = splitFragment(absID)
+	if existing, dup := rm.byURI[absID]; dup && existing != nil && !sameMap(existing.root, obj) {
+		// Duplicate $id would silently shadow the earlier resource; the
+		// sameMap guard lets the root walk re-enter its own $id without
+		// tripping. Other [RefCollisionPolicy] values are reserved for v0.2.
+		return nil, false, &CompileError{
+			KeywordLocation: idKey,
+			Message:         fmt.Sprintf("duplicate $id %q", absID),
+		}
+	}
 	res := &resource{
 		baseURI:        absID,
 		root:           obj,
@@ -329,8 +323,8 @@ func walkDependencies(rm *resourceMap, target *resource, v any, subDraft Draft) 
 		return nil
 	}
 	for _, child := range m {
-		// Pre-2019-09 dependencies were either a schema or a list of
-		// property names. Only the schema variant carries subschemas.
+		// Pre-2019-09 dependencies could be either a schema or a list of
+		// property names; only the schema variant carries subschemas.
 		if _, ok := child.(map[string]any); ok {
 			if err := walkNode(rm, target, child, subDraft); err != nil {
 				return err
@@ -341,10 +335,8 @@ func walkDependencies(rm *resourceMap, target *resource, v any, subDraft Draft) 
 }
 
 // descendsInto reports whether the keyword k may carry a subschema (or a
-// container of subschemas) for the given draft. The list is the union of
-// every applicator across drafts; per-draft retirement is enforced by the
-// caller (a retired keyword in this draft simply has no value in the parsed
-// schema, so the descent is a no-op).
+// container of subschemas). The list is the union of applicators across
+// every supported draft.
 func descendsInto(k string, _ Draft) bool {
 	switch k {
 	case
@@ -394,13 +386,11 @@ func resolveRef(rm *resourceMap, loader Loader, baseURI, ref string, stack []str
 	}
 	docPart, frag := splitFragment(abs)
 
-	// Cycle detection: the same absolute URI appearing twice on the stack
-	// becomes a lazy edge (the validator walks it at run time).
+	// A repeat URI on the stack signals a cycle: defer to a lazy edge.
 	if slices.Contains(stack, abs) {
 		return &resolvedRef{Source: ref, AbsoluteURI: abs, TargetURI: docPart, Lazy: true}, nil
 	}
 
-	// Locate the resource owning docPart.
 	res, ok := rm.byURI[docPart]
 	if !ok {
 		fetched, err := fetchExternalResource(rm, loader, ref, baseURI, docPart, draft)
@@ -460,9 +450,8 @@ func resolveFragment(res *resource, frag string) (any, error) {
 	case frag == "" || frag == "#":
 		return res.root, nil
 	case strings.HasPrefix(frag, "#/"):
-		// URI-decode the JSON Pointer (the fragment is URI-escaped per
-		// RFC 3986; the schema's pointer tokens themselves use ~0/~1
-		// escaping per RFC 6901).
+		// Fragment is URI-escaped (RFC 3986); pointer tokens are then
+		// ~0/~1-escaped (RFC 6901).
 		ptr, err := url.PathUnescape(frag[1:])
 		if err != nil {
 			ptr = frag[1:]
@@ -528,9 +517,8 @@ func unescapePointerToken(s string) string {
 	return s
 }
 
-// sameMap reports whether the two values are the same map[string]any (by
-// underlying header). Used to detect that we are at a resource's root object
-// without panicking on uncomparable map equality.
+// sameMap reports whether the two values share the same map[string]any
+// header. Avoids the runtime panic from comparing maps with ==.
 func sameMap(a any, b map[string]any) bool {
 	am, ok := a.(map[string]any)
 	if !ok {

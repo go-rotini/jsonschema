@@ -278,6 +278,63 @@ func TestUnknownFormatWarn(t *testing.T) {
 	}
 }
 
+// TestHostnameLengthBoundary exercises the 255-byte total-length boundary.
+// Per the implementation in [validateHostname], a 255-byte total length is
+// the upper bound (inclusive), and 256 bytes are rejected. We pick labels
+// that respect the per-label cap (63) so the total-length check is what
+// distinguishes pass from fail.
+func TestHostnameLengthBoundary(t *testing.T) {
+	// Four 63-byte labels separated by three dots: 63*4 + 3 = 255 bytes.
+	// (Label-cap 63 is checked separately by isHostnameLabel.)
+	label63 := strings.Repeat("a", 63)
+	host255 := label63 + "." + label63 + "." + label63 + "." + label63
+	if len(host255) != 255 {
+		t.Fatalf("test setup: host255 length = %d, want 255", len(host255))
+	}
+	host256 := host255 + "a"
+	if err := validateHostname(host255); err != nil {
+		t.Errorf("validateHostname(255 bytes): unexpected error %v", err)
+	}
+	if err := validateHostname(host256); err == nil {
+		t.Errorf("validateHostname(256 bytes): expected error, got nil")
+	}
+}
+
+// TestUUIDAllFs confirms the canonical 8-4-4-4-12 hex grouping accepts every
+// hex character — not just the typical [0-9a-f] forms but also the
+// upper-case all-Fs string. Treats the format as case-insensitive.
+func TestUUIDAllFs(t *testing.T) {
+	cases := []string{
+		"FFFFFFFF-FFFF-FFFF-FFFF-FFFFFFFFFFFF",
+		"ffffffff-ffff-ffff-ffff-ffffffffffff",
+		"FfFfFfFf-FfFf-FfFf-FfFf-FfFfFfFfFfFf",
+	}
+	for _, s := range cases {
+		t.Run(s, func(t *testing.T) {
+			if err := validateUUID(s); err != nil {
+				t.Errorf("validateUUID(%q): unexpected error %v", s, err)
+			}
+		})
+	}
+}
+
+// TestDateTimeYearBoundaries exercises RFC 3339's permissive 4-digit year
+// range. 0000 and 9999 are both legal.
+func TestDateTimeYearBoundaries(t *testing.T) {
+	cases := []string{
+		"0000-01-01T00:00:00Z",
+		"9999-12-31T23:59:59Z",
+		"0001-01-01T00:00:00.000Z",
+	}
+	for _, s := range cases {
+		t.Run(s, func(t *testing.T) {
+			if err := validateDateTime(s); err != nil {
+				t.Errorf("validateDateTime(%q): unexpected error %v", s, err)
+			}
+		})
+	}
+}
+
 // TestFormatConcurrencySmoke validates the same compiled schema in parallel
 // with assertion mode on. Running with -race catches data races.
 func TestFormatConcurrencySmoke(t *testing.T) {
@@ -295,6 +352,8 @@ func TestFormatConcurrencySmoke(t *testing.T) {
 				data = bad
 			}
 			for range 50 {
+				// Smoke test: the race detector catches data races; we
+				// don't validate per-call output here.
 				_, _ = schema.Validate(data, WithFormatAssertion(true))
 			}
 		}()

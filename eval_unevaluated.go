@@ -1,9 +1,5 @@
 package jsonschema
 
-// =====================================================================
-// unevaluatedItems
-// =====================================================================.
-
 type unevaluatedItemsEval struct {
 	loc string
 	sub *subschema
@@ -16,7 +12,6 @@ func (e *unevaluatedItemsEval) eval(ctx *runCtx, instance any) {
 	if !ok {
 		return
 	}
-	// Determine what indices have been evaluated already.
 	covered := make(map[int]bool)
 	if v, ok := ctx.getAnnotation("prefixItems"); ok {
 		if iv, ok := v.(evaluatedItems); ok {
@@ -67,10 +62,6 @@ func (e *unevaluatedItemsEval) eval(ctx *runCtx, instance any) {
 	}
 }
 
-// =====================================================================
-// unevaluatedProperties
-// =====================================================================.
-
 type unevaluatedPropertiesEval struct {
 	loc string
 	sub *subschema
@@ -108,15 +99,15 @@ func (e *unevaluatedPropertiesEval) eval(ctx *runCtx, instance any) {
 
 //nolint:gochecknoinits // evaluator registry is built at package init by design.
 func init() {
-	registerEvaluator("unevaluatedItems", func(b *evalBuilder, raw any, loc string) (evaluator, error) {
-		sub, err := b.buildSubschema(raw, loc, b.currentBase, b.currentResource, false)
+	registerEvaluator("unevaluatedItems", func(b *evalBuilder, f *buildFrame, raw any, loc string) (evaluator, error) {
+		sub, err := b.buildSubschemaFrame(f, raw, loc, f.base, f.resource)
 		if err != nil {
 			return nil, err
 		}
 		return &unevaluatedItemsEval{loc: loc, sub: sub}, nil
 	})
-	registerEvaluator("unevaluatedProperties", func(b *evalBuilder, raw any, loc string) (evaluator, error) {
-		sub, err := b.buildSubschema(raw, loc, b.currentBase, b.currentResource, false)
+	registerEvaluator("unevaluatedProperties", func(b *evalBuilder, f *buildFrame, raw any, loc string) (evaluator, error) {
+		sub, err := b.buildSubschemaFrame(f, raw, loc, f.base, f.resource)
 		if err != nil {
 			return nil, err
 		}

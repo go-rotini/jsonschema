@@ -17,7 +17,7 @@ type Keyword interface {
 
 // Vocabulary groups a set of keywords under a single URI per Draft 2019-09's
 // vocabulary mechanism. The standard vocabularies are registered at package
-// init time; callers can add their own via [WithVocabulary].
+// init time; custom-vocabulary registration is reserved for v0.2.
 type Vocabulary struct {
 	// URI is the canonical identifier for the vocabulary (e.g.
 	// VocabApplicator).
@@ -112,15 +112,10 @@ var stdVocabularies = []Vocabulary{
 			kw("$dynamicAnchor", Draft202012, DraftUnknown),
 			kw("$comment", Draft7, DraftUnknown),
 			kw("$vocabulary", Draft201909, DraftUnknown),
-			// Draft 4 used "id" (no $) and "definitions"; Draft 6/7 kept
-			// "definitions" until 2019-09 renamed it to "$defs". They
-			// live in Core for routing purposes even though the spec
-			// only assigns them an active vocabulary in 2019-09+.
+			// Legacy aliases: "id" / "definitions" predate "$id" / "$defs";
+			// $recursiveRef / $recursiveAnchor were retired in 2020-12.
 			kw("id", Draft4, Draft6),
 			kw("definitions", Draft4, Draft201909),
-			// Draft 2019-09 introduced $recursiveRef / $recursiveAnchor;
-			// 2020-12 retired them in favor of $dynamicRef /
-			// $dynamicAnchor.
 			kw("$recursiveRef", Draft201909, Draft202012),
 			kw("$recursiveAnchor", Draft201909, Draft202012),
 		},
@@ -143,13 +138,8 @@ var stdVocabularies = []Vocabulary{
 			kw("patternProperties", Draft4, DraftUnknown),
 			kw("additionalProperties", Draft4, DraftUnknown),
 			kw("propertyNames", Draft6, DraftUnknown),
-			// Pre-2020 alias: items took an array form that 2020-12
-			// split out into prefixItems; additionalItems described
-			// "items past the array prefix".
+			// Legacy aliases retired by later drafts.
 			kw("additionalItems", Draft4, Draft202012),
-			// Pre-2019 alias: dependencies covered both the "schema"
-			// and "required" cases that 2019-09 split into
-			// dependentSchemas + dependentRequired.
 			kw("dependencies", Draft4, Draft201909),
 		},
 	},
@@ -186,14 +176,9 @@ var stdVocabularies = []Vocabulary{
 		},
 	},
 	{
-		// "format" is registered in BOTH the format-annotation and
-		// format-assertion vocabularies. They are the same keyword name
-		// but different vocabulary URIs: the dialect determines whether
-		// "format" produces an annotation only (annotation vocab) or
-		// short-circuits to a validation failure (assertion vocab).
-		// 2020-12 schemas opt into the assertion vocabulary explicitly
-		// via $vocabulary; the package mirrors the spec by registering
-		// both entries.
+		// "format" appears in both the annotation and assertion
+		// vocabularies; the dialect's $vocabulary opts into one or the
+		// other.
 		URI: VocabFormatAnnot,
 		Keywords: []Keyword{
 			kw("format", Draft4, DraftUnknown),
@@ -202,8 +187,6 @@ var stdVocabularies = []Vocabulary{
 	{
 		URI: VocabFormatAssert,
 		Keywords: []Keyword{
-			// Same keyword as above, different vocabulary URI. See
-			// the VocabFormatAnnot block for the rationale.
 			kw("format", Draft4, DraftUnknown),
 		},
 	},
@@ -228,12 +211,6 @@ var stdVocabularies = []Vocabulary{
 		},
 	},
 	{
-		// OpenAPI 3.1 base vocabulary. The OAS dialect layers these four
-		// annotation-only keywords on top of Draft 2020-12. They are
-		// recognized for every draft from 2020-12 onward (since the
-		// dialect itself is built on 2020-12); pre-2020-12 schemas that
-		// happen to use them still tolerate them as unknown keywords
-		// when WithStrictKeywords is off.
 		URI: VocabOAS,
 		Keywords: []Keyword{
 			kw("discriminator", Draft202012, DraftUnknown),

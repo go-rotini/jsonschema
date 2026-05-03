@@ -195,9 +195,8 @@ func decodeYAML(data []byte) (any, error) {
 	if doc == nil {
 		return nil, nil //nolint:nilnil // null document
 	}
-	// A DocumentNode wraps a single child (the actual root scalar/mapping/
-	// sequence). Older inputs occasionally come back already unwrapped;
-	// handle both.
+	// DocumentNode wraps a single child; older yaml inputs occasionally
+	// arrive already unwrapped, so handle both shapes.
 	root := doc
 	if doc.Kind == yaml.DocumentNode {
 		if len(doc.Children) == 0 {

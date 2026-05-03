@@ -79,13 +79,6 @@ const (
 	UnknownFormatError
 )
 
-// FormatIgnore is an alias for [UnknownFormatIgnore]; it matches the option
-// surface documented in the requirements doc.
-const (
-	FormatIgnore = UnknownFormatIgnore
-	FormatWarn   = UnknownFormatWarn
-)
-
 // String returns a human-readable label for p.
 func (p UnknownFormatPolicy) String() string {
 	switch p {
@@ -132,6 +125,11 @@ func (p RefCollisionPolicy) String() string {
 // Result is the structured outcome of a validation run. It is returned by
 // every [*Schema] Validate-family method; the [Result.Output] helper renders
 // it into one of the four spec-defined output formats.
+//
+// Callers should not construct a [Result] via a struct literal: future
+// versions of this package may add fields and a literal-construction site
+// would silently miss them. Always obtain a [*Result] from a [*Schema]
+// Validate-family method.
 type Result struct {
 	// Valid reports whether the instance validated successfully.
 	Valid bool
@@ -182,6 +180,10 @@ type ValidationError struct {
 	// Causes carries nested failures from compound applicators; it is empty
 	// for leaf assertion failures.
 	Causes []ValidationError
+	// Cause carries an optional underlying typed error (e.g. a
+	// [*FormatError] surfaced by the format assertion). Walked by
+	// [errors.As] via [ValidationError.Unwrap].
+	Cause error
 }
 
 // Error returns a human-readable, single-line summary of the failure suitable
@@ -207,23 +209,37 @@ func (e *ValidationError) Error() string {
 	return b.String()
 }
 
-// Is reports whether target is a [*ValidationError] sentinel, supporting
-// errors.Is(err, ErrValidation) checks.
+// Is reports whether target is the [ErrValidation] sentinel. Only the
+// zero-value [*ValidationError] (i.e. [ErrValidation]) matches; another
+// concrete [*ValidationError] does not match unrelated keyword failures via
+// [errors.Is]. Use [errors.As] to extract the typed error and inspect
+// [ValidationError.Keyword] for stable classification.
 func (e *ValidationError) Is(target error) bool {
-	_, ok := target.(*ValidationError)
-	return ok
+	tgt, ok := target.(*ValidationError)
+	if !ok || tgt == nil {
+		return false
+	}
+	// Only the zero-value sentinel matches; non-zero targets are unrelated
+	// instances. Use errors.As to inspect a concrete error.
+	return tgt.KeywordLocation == "" && tgt.AbsoluteKeywordLocation == "" &&
+		tgt.InstanceLocation == "" && tgt.Keyword == "" && tgt.Message == "" &&
+		len(tgt.Causes) == 0 && tgt.Cause == nil
 }
 
 // Unwrap returns the nested causes for use with Go 1.20+ multi-error
 // errors.Is / errors.As. Returns nil when there are no causes so that the
-// stdlib treats the error as a leaf.
+// stdlib treats the error as a leaf. When [ValidationError.Cause] is set it
+// is included alongside any nested [Causes].
 func (e *ValidationError) Unwrap() []error {
-	if len(e.Causes) == 0 {
+	if len(e.Causes) == 0 && e.Cause == nil {
 		return nil
 	}
-	out := make([]error, len(e.Causes))
+	out := make([]error, 0, len(e.Causes)+1)
 	for i := range e.Causes {
-		out[i] = &e.Causes[i]
+		out = append(out, &e.Causes[i])
+	}
+	if e.Cause != nil {
+		out = append(out, e.Cause)
 	}
 	return out
 }

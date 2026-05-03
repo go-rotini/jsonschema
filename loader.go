@@ -24,7 +24,12 @@ var (
 	errHTTPNon2xx              = errors.New("http: non-2xx status")
 	errHTTPBodyTooLarge        = errors.New("http: body exceeds MaxBodySize")
 	errPathEscapesRoot         = errors.New("file: path escapes root")
+	errHTTPTooManyRedirects    = errors.New("http: too many redirects")
 )
+
+// httpMaxRedirects caps the redirect chain on a single HTTPLoader fetch
+// (lower than the stdlib default of 10) so redirect loops cannot stall it.
+const httpMaxRedirects = 5
 
 // Loader fetches the contents of a schema referenced by URI. Implementations
 // must be safe for concurrent use; the compiler may invoke a single Loader
@@ -52,7 +57,6 @@ func (m MapLoader) Load(uri string) ([]byte, error) {
 		copy(out, data)
 		return out, nil
 	}
-	// Tolerate trailing-hash mismatches.
 	trimmed := strings.TrimSuffix(uri, "#")
 	if trimmed != uri {
 		if data, ok := m[trimmed]; ok {
@@ -91,9 +95,6 @@ func (l FileLoader) Load(uri string) ([]byte, error) {
 	if parsed.Scheme != "file" {
 		return nil, &LoaderError{URI: uri, Cause: ErrLoaderRejected}
 	}
-	// url.Path is decoded; on Windows this also drops the leading slash
-	// before the drive letter, but rotini targets Unix-y filesystems for
-	// its tests.
 	rel := parsed.Path
 	if rel == "" {
 		rel = parsed.Opaque
@@ -102,9 +103,8 @@ func (l FileLoader) Load(uri string) ([]byte, error) {
 	if err != nil {
 		return nil, &LoaderError{URI: uri, Cause: fmt.Errorf("resolve root: %w", err)}
 	}
-	// Reject any explicit ".." segment in the URI path BEFORE joining so a
-	// crafted file:///../etc/passwd cannot turn into rootAbs/etc/passwd
-	// after filepath.Clean swallows the upward traversal.
+	// Reject ".." segments before joining: filepath.Clean would otherwise
+	// resolve file:///../etc/passwd to rootAbs/etc/passwd silently.
 	rawRel := strings.TrimPrefix(rel, "/")
 	if slices.Contains(strings.Split(rawRel, "/"), "..") {
 		return nil, &LoaderError{URI: uri, Cause: fmt.Errorf("%w: %w", errPathEscapesRoot, ErrLoaderRejected)}
@@ -123,14 +123,18 @@ func (l FileLoader) Load(uri string) ([]byte, error) {
 	return data, nil
 }
 
-// readFile is split out so tests can substitute it without touching the
-// filesystem. The default uses [os.ReadFile] via [fs.ReadFile] on the OS root.
+// readFile is overridable so tests can substitute it without touching the
+// filesystem.
 var readFile = readFileImpl
 
 // HTTPLoader resolves http:// and https:// URIs over the network. It is
 // HTTPS-only by default; AllowHTTP must be set to true to follow plain http://
 // URLs. Concurrent requests for the same URI share a single network round-trip
 // via an inline single-flight.
+//
+// Set the exported fields at construction; treat the value as read-only
+// afterwards. Pass *HTTPLoader (not a copy) so the cache and in-flight state
+// are shared across goroutines.
 type HTTPLoader struct {
 	// Client is the http.Client used to perform requests. nil falls back
 	// to a per-call client built from Timeout.
@@ -165,8 +169,7 @@ type httpInflight struct {
 	err  error
 }
 
-// httpDefaultTimeout / httpDefaultMaxBody are exposed as variables so tests
-// can shrink them without wiring options through every fixture.
+// Variables (not consts) so tests can shrink them via fixture setup.
 var (
 	httpDefaultTimeout = 10 * time.Second
 	httpDefaultMaxBody = int64(10 * 1024 * 1024) // 10 MiB
@@ -180,7 +183,6 @@ func (l *HTTPLoader) Load(uri string) ([]byte, error) {
 	}
 	switch parsed.Scheme {
 	case "https":
-		// Always allowed.
 	case "http":
 		if !l.AllowHTTP {
 			return nil, &LoaderError{URI: uri, Cause: ErrLoaderRejected}
@@ -189,7 +191,6 @@ func (l *HTTPLoader) Load(uri string) ([]byte, error) {
 		return nil, &LoaderError{URI: uri, Cause: ErrLoaderRejected}
 	}
 
-	// Cache check.
 	if l.Cache > 0 {
 		if data, ok := l.cacheGet(uri); ok {
 			out := make([]byte, len(data))
@@ -198,8 +199,7 @@ func (l *HTTPLoader) Load(uri string) ([]byte, error) {
 		}
 	}
 
-	// Single-flight: identical concurrent requests for the same URI share
-	// one network round-trip.
+	// Single-flight: concurrent fetches for the same URI share one round-trip.
 	flight := &httpInflight{}
 	flight.wg.Add(1)
 	actual, loaded := l.flight.LoadOrStore(uri, flight)
@@ -245,9 +245,16 @@ func (l *HTTPLoader) fetch(uri string) ([]byte, error) {
 	if maxBody <= 0 {
 		maxBody = httpDefaultMaxBody
 	}
+	// Probe RequestDecorator's header set so cross-host redirects can scrub
+	// it (preventing token leaks to unintended hosts).
+	decoratedHeaders := decoratorHeaderNames(l.RequestDecorator)
 	client := l.Client
 	if client == nil {
-		client = &http.Client{Timeout: timeout}
+		client = &http.Client{
+			Timeout:       timeout,
+			Transport:     defaultHTTPTransport(),
+			CheckRedirect: redirectScrubber(decoratedHeaders),
+		}
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), timeout)
 	defer cancel()
@@ -275,6 +282,79 @@ func (l *HTTPLoader) fetch(uri string) ([]byte, error) {
 		return nil, &LoaderError{URI: uri, Cause: fmt.Errorf("%w: %d bytes", errHTTPBodyTooLarge, maxBody)}
 	}
 	return data, nil
+}
+
+// defaultHTTPTransport returns a tightened [*http.Transport] inheriting
+// proxy + dialer settings from [http.DefaultTransport] but with stricter
+// connection-pool and handshake timeouts. The returned transport is
+// reusable across requests; callers that need different limits should
+// construct their own [http.Client].
+func defaultHTTPTransport() *http.Transport {
+	base, ok := http.DefaultTransport.(*http.Transport)
+	if !ok {
+		return &http.Transport{
+			MaxIdleConns:          100,
+			MaxIdleConnsPerHost:   10,
+			IdleConnTimeout:       90 * time.Second,
+			TLSHandshakeTimeout:   10 * time.Second,
+			ExpectContinueTimeout: 1 * time.Second,
+		}
+	}
+	t := base.Clone()
+	t.MaxIdleConns = 100
+	t.MaxIdleConnsPerHost = 10
+	t.IdleConnTimeout = 90 * time.Second
+	t.TLSHandshakeTimeout = 10 * time.Second
+	t.ExpectContinueTimeout = 1 * time.Second
+	return t
+}
+
+// decoratorHeaderNames returns the set of header names added (or replaced)
+// by decorator. We probe a no-op request and diff its header set
+// before/after running the hook.
+func decoratorHeaderNames(decorator func(*http.Request)) map[string]struct{} {
+	if decorator == nil {
+		return nil
+	}
+	probe, err := http.NewRequest(http.MethodGet, "http://invalid.example/", http.NoBody)
+	if err != nil {
+		return nil
+	}
+	before := make(map[string]struct{}, len(probe.Header))
+	for name := range probe.Header {
+		before[name] = struct{}{}
+	}
+	decorator(probe)
+	added := map[string]struct{}{}
+	for name := range probe.Header {
+		if _, existed := before[name]; !existed {
+			added[name] = struct{}{}
+		}
+	}
+	return added
+}
+
+// redirectScrubber returns a CheckRedirect function that strips
+// decorator-added headers from requests that cross to a different host
+// (preventing leak of bearer tokens to unintended servers) and caps the
+// redirect chain at [httpMaxRedirects].
+func redirectScrubber(decoratedHeaders map[string]struct{}) func(*http.Request, []*http.Request) error {
+	return func(req *http.Request, via []*http.Request) error {
+		if len(via) >= httpMaxRedirects {
+			return errHTTPTooManyRedirects
+		}
+		if len(via) == 0 || len(decoratedHeaders) == 0 {
+			return nil
+		}
+		origin := via[0].URL.Host
+		if req.URL.Host == origin {
+			return nil
+		}
+		for name := range decoratedHeaders {
+			req.Header.Del(name)
+		}
+		return nil
+	}
 }
 
 func (l *HTTPLoader) cacheGet(uri string) ([]byte, bool) {
@@ -355,9 +435,6 @@ func (c ChainLoader) Load(uri string) ([]byte, error) {
 	return nil, lastErr
 }
 
-// defaultLoaderOnce ensures we build the default loader exactly once and
-// hand the same singleton out to every caller. The chain combines the
-// embedded standard meta-schemas with an HTTPS-only HTTPLoader.
 var (
 	defaultLoaderOnce  sync.Once
 	defaultLoaderValue Loader
@@ -415,12 +492,8 @@ func embeddedMetaMapLoader() MapLoader {
 			m[alt] = data
 		}
 	}
-	// Per-vocabulary meta-schemas. Walk the embedded FS and, for every
-	// .json file under meta/draft-*/, parse its $id and register the URI.
 	registerVocabMeta(m, "meta/draft-2019-09/meta")
 	registerVocabMeta(m, "meta/draft-2020-12/meta")
-	// Output-format meta-schema (Draft 2020-12). Register by its canonical
-	// $id so tests and callers can $ref it without network access.
 	if data, err := fs.ReadFile(metaSchemaFS, "meta/output-2020-12.json"); err == nil {
 		if id := extractID(data); id != "" {
 			m[id] = data
@@ -431,10 +504,6 @@ func embeddedMetaMapLoader() MapLoader {
 			}
 		}
 	}
-	// OpenAPI 3.1 Schema Object dialect meta-schema. Registers under its
-	// canonical $id ([OASDialectURL]) so callers declaring
-	// `$schema: "https://spec.openapis.org/oas/3.1/dialect/base"` can
-	// resolve the dialect offline.
 	if data, err := fs.ReadFile(metaSchemaFS, "meta/openapi-3.1-dialect.json"); err == nil {
 		if id := extractID(data); id != "" {
 			m[id] = data
@@ -478,9 +547,8 @@ func registerVocabMeta(m MapLoader, dir string) {
 	}
 }
 
-// extractID is a tiny helper that pulls the "$id" property out of a JSON
-// document via a minimal scan. We avoid a full json.Unmarshal here so the
-// init cost stays small even with the full meta-schema corpus.
+// extractID pulls the "$id" property out of a JSON document via a minimal
+// scan, avoiding a full json.Unmarshal so the init cost stays small.
 func extractID(data []byte) string {
 	const key = `"$id"`
 	idx := indexBytesString(data, key)
@@ -488,7 +556,6 @@ func extractID(data []byte) string {
 		return ""
 	}
 	rest := data[idx+len(key):]
-	// Skip whitespace + colon + whitespace.
 	for len(rest) > 0 && (rest[0] == ' ' || rest[0] == '\t' || rest[0] == '\n' || rest[0] == '\r') {
 		rest = rest[1:]
 	}

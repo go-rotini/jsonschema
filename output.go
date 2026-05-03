@@ -8,37 +8,21 @@ import (
 	"sync"
 )
 
-// outputNode is one node in the Detailed / Verbose tree. Each node represents
-// one keyword evaluation (or a synthetic group node aggregating siblings at
-// the same path prefix). The leaf form carries either an `error` string
-// (failure) or an `annotation` value (passing keyword); the group form
-// carries `errors` and/or `annotations` child slices that point at the
-// downstream nodes.
+// outputNode is one node in the Detailed / Verbose tree. Leaf nodes carry
+// either error (failure) or annotation (passing keyword); group nodes
+// aggregate child failures or annotations under a shared path prefix.
 type outputNode struct {
-	valid bool
-	// keywordLocation is the JSON Pointer of the keyword in the schema
-	// (e.g. "/properties/name/minLength"). Synthetic group nodes use the
-	// shared prefix path (e.g. "/properties/name").
-	keywordLocation string
-	// absoluteKeywordLocation is set when the path contains "/$ref/" or
-	// "/$dynamicRef/" or when the schema has a root $id; empty otherwise.
+	valid                   bool
+	keywordLocation         string
 	absoluteKeywordLocation string
-	// instanceLocation is the JSON Pointer of the instance value the node
-	// describes.
-	instanceLocation string
-	// error is the human-readable failure message when valid is false; only
-	// set on leaf failure nodes (group nodes set errors instead).
-	error string
-	// annotation is the keyword's annotation value when valid is true and
-	// the keyword produced an annotation; set on leaf annotation nodes only.
-	annotation any
-	// hasAnnotation distinguishes a real annotation value (which may be nil
-	// or false) from "no annotation set on this node".
+	instanceLocation        string
+	error                   string
+	annotation              any
+	// hasAnnotation distinguishes a real annotation value (which may be
+	// nil or false) from "no annotation set on this node".
 	hasAnnotation bool
-	// errors are the failure children for a group/parent node.
-	errors []*outputNode
-	// annotations are the annotation children for a passing group node.
-	annotations []*outputNode
+	errors        []*outputNode
+	annotations   []*outputNode
 }
 
 // Output renders the result in the requested format per Draft 2020-12 §12.
@@ -88,10 +72,8 @@ type flatBasicEntry struct {
 	Annotation              any    `json:"annotation,omitempty"`
 }
 
-// normalizeKeywordLocation strips the leading "#" fragment marker that the
-// compiler keeps internally so the output `keywordLocation` is a JSON
-// Pointer per the Draft 2020-12 output meta-schema (which requires
-// `format: json-pointer`). The empty pointer "" stays "".
+// normalizeKeywordLocation strips the internal "#" prefix so the output's
+// keywordLocation conforms to the spec's json-pointer format. "" stays "".
 func normalizeKeywordLocation(s string) string {
 	if s == "" {
 		return ""
@@ -105,9 +87,9 @@ func normalizeKeywordLocation(s string) string {
 	return s
 }
 
-// sanitizeAnnotation converts annotation values that the validator stores
-// internally (evaluatedKeys / evaluatedItems / evaluatedItemsAll) into
-// JSON-friendly shapes so the rendered output is well-formed.
+// sanitizeAnnotation converts the validator's internal annotation types
+// (evaluatedKeys / evaluatedItems / evaluatedItemsAll) into JSON-friendly
+// shapes for the rendered output.
 func sanitizeAnnotation(v any) any {
 	switch t := v.(type) {
 	case evaluatedKeys:
@@ -142,9 +124,8 @@ func renderBasic(r *Result) []byte {
 		InstanceLocation: "",
 	}
 	if !r.Valid {
-		// Top-level entry first, then the per-error entries.
 		out.Errors = make([]flatBasicEntry, 0, len(r.Errors)+1)
-		// Header entry per spec example.
+		// Header entry per spec example, followed by per-error entries.
 		out.Errors = append(out.Errors, flatBasicEntry{
 			Valid:            false,
 			KeywordLocation:  "",
@@ -220,14 +201,12 @@ func renderVerbose(r *Result) []byte {
 	return marshalCompact(nodeToJSON(root, true))
 }
 
-// propagateValidity sets group-node validity based on descendant failures.
-// A group node with any failing descendant is itself invalid; otherwise it
-// keeps its initial (valid) state.
+// propagateValidity sets each group node's validity from its descendants:
+// any failing descendant flips the group invalid.
 func propagateValidity(n *outputNode) bool {
 	if n == nil {
 		return true
 	}
-	// Leaf failures: error string set ⇒ invalid.
 	if n.error != "" {
 		n.valid = false
 		return false
@@ -249,9 +228,8 @@ func propagateValidity(n *outputNode) bool {
 	return n.valid
 }
 
-// buildOutputTree reconstructs a tree from the flat error and annotation
-// lists on r. Each error/annotation lives at a keywordLocation path; we
-// group entries that share prefixes.
+// buildOutputTree reconstructs a tree from the flat error/annotation lists
+// on r, grouping entries that share keywordLocation prefixes.
 func buildOutputTree(r *Result) *outputNode {
 	root := &outputNode{
 		valid:            r.Valid,
@@ -267,9 +245,8 @@ func buildOutputTree(r *Result) *outputNode {
 	return root
 }
 
-// insertErrorIntoTree adds e (and its nested causes) into the tree rooted at
-// root. The error becomes a leaf node at its keywordLocation; intermediate
-// path segments are created as group nodes if needed.
+// insertErrorIntoTree adds e (and its nested causes) into root. The error
+// is a leaf at its keywordLocation; missing prefix segments become groups.
 func insertErrorIntoTree(root *outputNode, e *ValidationError) {
 	leafLoc := normalizeKeywordLocation(e.KeywordLocation)
 	leaf := &outputNode{
@@ -279,7 +256,6 @@ func insertErrorIntoTree(root *outputNode, e *ValidationError) {
 		instanceLocation:        e.InstanceLocation,
 		error:                   errorMessage(e),
 	}
-	// Recursively attach causes as children of this leaf.
 	for i := range e.Causes {
 		insertErrorIntoTree(leaf, &e.Causes[i])
 	}
@@ -287,8 +263,8 @@ func insertErrorIntoTree(root *outputNode, e *ValidationError) {
 	parent.errors = append(parent.errors, leaf)
 }
 
-// insertAnnotationIntoTree adds a annotation entry as a leaf node within the
-// tree.
+// insertAnnotationIntoTree adds an Annotation as a leaf at its
+// keywordLocation, creating prefix groups along the way.
 func insertAnnotationIntoTree(root *outputNode, a *Annotation) {
 	leafLoc := normalizeKeywordLocation(a.KeywordLocation)
 	leaf := &outputNode{
@@ -303,21 +279,14 @@ func insertAnnotationIntoTree(root *outputNode, a *Annotation) {
 	parent.annotations = append(parent.annotations, leaf)
 }
 
-// ensureParentForPath walks down from root creating group nodes for each
-// prefix of keywordLocation and returns the node that should receive a leaf
-// at keywordLocation. Returned node has keywordLocation equal to the parent
-// of the leaf (i.e. the leaf's own location is appended on insertion).
+// ensureParentForPath walks root creating group nodes for each prefix of
+// keywordLocation and returns the parent node that the leaf at
+// keywordLocation should attach to.
 func ensureParentForPath(root *outputNode, keywordLocation, instanceLocation string) *outputNode {
-	// Split the path; we want to create one group per applicator-style
-	// segment. In practice this is the immediate parent — JSON-pointer paths
-	// like "/allOf/0/minimum" group naturally as "/allOf/0" → "/allOf" → "".
 	parentLoc := parentPointer(keywordLocation)
 	if parentLoc == keywordLocation || parentLoc == "" {
 		return root
 	}
-	// Walk segments of parentLoc. We split on `/` and build successive
-	// prefixes. We attach intermediate group nodes to root (or the previous
-	// group) as needed.
 	segments := splitPointer(parentLoc)
 	cur := root
 	var prefixBuf strings.Builder
@@ -325,7 +294,6 @@ func ensureParentForPath(root *outputNode, keywordLocation, instanceLocation str
 		prefixBuf.WriteByte('/')
 		prefixBuf.WriteString(seg)
 		prefix := prefixBuf.String()
-		// Look for an existing group child with this prefix.
 		var found *outputNode
 		for _, child := range cur.errors {
 			if child.keywordLocation == prefix && child.error == "" {
@@ -347,9 +315,7 @@ func ensureParentForPath(root *outputNode, keywordLocation, instanceLocation str
 				keywordLocation:  prefix,
 				instanceLocation: instanceLocation,
 			}
-			// Group nodes are appended to the current node's children. We
-			// attach to the errors slice so that pruneToFailing can find them
-			// reliably; the renderer treats group nodes uniformly.
+			// Attach to errors so pruneToFailing can find groups uniformly.
 			cur.errors = append(cur.errors, found)
 		}
 		cur = found
@@ -357,8 +323,8 @@ func ensureParentForPath(root *outputNode, keywordLocation, instanceLocation str
 	return cur
 }
 
-// parentPointer returns the JSON Pointer parent of p. Returns "" for "" or
-// for top-level keywords (e.g. parentPointer("/minimum") == "").
+// parentPointer returns the JSON Pointer parent of p. parentPointer("") and
+// parentPointer("/minimum") both return "".
 func parentPointer(p string) string {
 	if p == "" {
 		return ""
@@ -370,8 +336,8 @@ func parentPointer(p string) string {
 	return p[:idx]
 }
 
-// splitPointer splits a non-empty JSON Pointer into its segments, dropping
-// the leading empty segment caused by the leading slash.
+// splitPointer splits a non-empty JSON Pointer into segments and drops the
+// leading empty segment from the leading slash.
 func splitPointer(p string) []string {
 	if p == "" {
 		return nil
@@ -383,15 +349,12 @@ func splitPointer(p string) []string {
 	return parts
 }
 
-// pruneToFailing removes any subtree whose every leaf is a passing
-// annotation. The pruning matches the spec's Detailed format: groups that
-// produced no errors are collapsed away. A node is retained when it has at
-// least one descendant that contributes an error.
+// pruneToFailing collapses any subtree whose every leaf is a passing
+// annotation, matching the spec's Detailed format.
 func pruneToFailing(node *outputNode) *outputNode {
 	if node == nil {
 		return nil
 	}
-	// Recursively prune children.
 	pruned := make([]*outputNode, 0, len(node.errors))
 	for _, c := range node.errors {
 		if c.error != "" {
@@ -403,17 +366,13 @@ func pruneToFailing(node *outputNode) *outputNode {
 			pruned = append(pruned, pc)
 		}
 	}
-	// Collapse: a group node with exactly one failing child becomes the
-	// child (so the spec's "collapse passing parent" example renders as a
-	// single child entry). Only collapse when this node itself is a group
-	// (no error message of its own).
+	// Collapse: a group with exactly one failing child becomes the child
+	// (matching the spec's "collapse passing parent" example).
 	if node.error == "" && len(pruned) == 1 && node.keywordLocation != "" {
-		// preserve the parent's instance location if the child has none.
 		child := pruned[0]
 		if child.instanceLocation == "" {
 			child.instanceLocation = node.instanceLocation
 		}
-		// only collapse when this is purely a group (no annotations).
 		if len(node.annotations) == 0 && !node.hasAnnotation {
 			out := *child
 			return &out
@@ -445,8 +404,8 @@ func pruneToValid(node *outputNode) *outputNode {
 			prunedAnno = append(prunedAnno, pc)
 		}
 	}
-	// The errors slice on a passing tree contains only group nodes; recurse
-	// into them too in case annotations live under a group.
+	// On a passing tree, the errors slice carries only group nodes;
+	// recurse so annotations under a group are kept.
 	prunedGroups := make([]*outputNode, 0, len(node.errors))
 	for _, c := range node.errors {
 		if c.error != "" {
@@ -479,9 +438,9 @@ type nodeJSON struct {
 	hasAnnotation           bool        // internal: tracks explicit annotation
 }
 
-// MarshalJSON emits the nodeJSON, ensuring `annotation` is included even
-// when the value is nil/false (so a real annotation value of `false` is not
-// dropped by `omitempty`).
+// MarshalJSON emits the nodeJSON shape, including "annotation" when the
+// node carries an explicit annotation (so a value of false / nil survives
+// rather than being dropped by omitempty).
 func (n *nodeJSON) MarshalJSON() ([]byte, error) {
 	type outShape struct {
 		Valid                   bool        `json:"valid"`
@@ -508,13 +467,10 @@ func (n *nodeJSON) MarshalJSON() ([]byte, error) {
 	return json.Marshal(out)
 }
 
-// nodeToJSON converts an outputNode tree into its JSON-shaped counterpart.
-//
-// The verbose flag is reserved for future renderer extensions (it is
-// currently a placeholder so the call sites in renderDetailed and
-// renderVerbose remain symmetric); the present rendering identical for both
-// modes — the structural difference lives in pruning, performed by the
-// caller before this function runs.
+// nodeToJSON converts an outputNode tree to its JSON shape. The verbose
+// flag is a placeholder so the renderDetailed / renderVerbose call sites
+// remain symmetric; the structural difference lives in the pruning the
+// caller performs before invoking this function.
 func nodeToJSON(n *outputNode, verbose bool) *nodeJSON { //nolint:unparam // see doc
 	if n == nil {
 		return nil
@@ -555,16 +511,13 @@ func nodeToJSON(n *outputNode, verbose bool) *nodeJSON { //nolint:unparam // see
 }
 
 // marshalCompact JSON-encodes v with HTML-escaping disabled (so embedded
-// regex strings retain their `<` `>` characters) and returns the bytes
-// without the trailing newline that [encoding/json.Encoder] adds.
+// regex characters survive) and trims the trailing newline that
+// json.Encoder adds.
 func marshalCompact(v any) []byte {
 	var buf bytes.Buffer
 	enc := json.NewEncoder(&buf)
 	enc.SetEscapeHTML(false)
 	if err := enc.Encode(v); err != nil {
-		// json.Marshal is the fallback so renderer errors do not panic; the
-		// resulting bytes are still valid JSON for any value the renderer
-		// constructs internally.
 		b, err := json.Marshal(v)
 		if err != nil {
 			return []byte(`{"valid":false}`)
@@ -578,12 +531,8 @@ func marshalCompact(v any) []byte {
 	return out
 }
 
-// outputMetaSchema returns the compiled Draft 2020-12 output meta-schema. It
-// is used by tests to assert that every rendered output validates against
-// the spec's output schema.
-//
-// The result is memoized via [sync.OnceValue] so the meta-schema is parsed
-// at most once per process.
+// outputMetaSchema lazily compiles the embedded Draft 2020-12 output
+// meta-schema. Memoized via sync.OnceValue.
 var outputMetaSchema = sync.OnceValue(func() *Schema {
 	data, err := metaSchemaFS.ReadFile("meta/output-2020-12.json")
 	if err != nil {
@@ -598,12 +547,8 @@ var outputMetaSchema = sync.OnceValue(func() *Schema {
 })
 
 // OutputMetaSchema returns the compiled Draft 2020-12 output-format
-// meta-schema. The schema is embedded in the package; the result is
-// memoized.
-//
-// Returns nil only when the embedded bytes fail to compile, which would
-// indicate a build-time mistake; callers can rely on a non-nil return in
-// practice.
+// meta-schema (memoized; embedded). It returns nil only when the embedded
+// bytes fail to compile, which would indicate a build-time mistake.
 func OutputMetaSchema() *Schema {
 	return outputMetaSchema()
 }

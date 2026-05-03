@@ -3,6 +3,7 @@ package jsonschema
 import (
 	"bytes"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 )
@@ -20,11 +21,7 @@ func ValidateTo[T any](schema *Schema, instanceJSON []byte, opts ...Option) (T, 
 		return zero, err
 	}
 	if !res.Valid {
-		if len(res.Errors) > 0 {
-			e := res.Errors[0]
-			return zero, &e
-		}
-		return zero, ErrValidationFailed
+		return zero, validationFailureError(res.Errors)
 	}
 	var v T
 	if err := json.Unmarshal(instanceJSON, &v); err != nil {
@@ -33,16 +30,38 @@ func ValidateTo[T any](schema *Schema, instanceJSON []byte, opts ...Option) (T, 
 	return v, nil
 }
 
+// MustValidateTo is the panic-on-error variant of [ValidateTo]. Intended for
+// package-init use of static, well-known instances; tests and one-shot CLIs
+// where a malformed input is a programming error.
+func MustValidateTo[T any](schema *Schema, instanceJSON []byte, opts ...Option) T {
+	v, err := ValidateTo[T](schema, instanceJSON, opts...)
+	if err != nil {
+		panic(err)
+	}
+	return v
+}
+
 // Validate validates instanceJSON against the schema and returns a [*Result].
+//
+// Empty input ([]byte{} or all-whitespace) is rejected with an error wrapping
+// [io.EOF]. The literal `null` is a valid JSON value and validates against
+// any schema that accepts the null type; it is never treated as "no input".
 func (s *Schema) Validate(instanceJSON []byte, opts ...Option) (*Result, error) {
 	if s == nil {
 		return nil, ErrSchemaNotCompiled
+	}
+	ro := defaultRunOptions()
+	for _, o := range opts {
+		o(ro)
+	}
+	if ro.maxInstanceSize > 0 && len(instanceJSON) > ro.maxInstanceSize {
+		return nil, ErrInstanceTooLarge
 	}
 	value, err := decodeInstanceBytes(instanceJSON)
 	if err != nil {
 		return nil, err
 	}
-	return s.ValidateValue(value, opts...)
+	return s.validateWithOptions(value, ro)
 }
 
 // ValidateValue validates an already-decoded Go value against the schema.
@@ -54,16 +73,21 @@ func (s *Schema) ValidateValue(v any, opts ...Option) (*Result, error) {
 	for _, o := range opts {
 		o(ro)
 	}
+	return s.validateWithOptions(v, ro)
+}
+
+// validateWithOptions is the inner entry point shared by [*Schema.Validate]
+// and [*Schema.ValidateValue]; ro is the already-resolved option set.
+func (s *Schema) validateWithOptions(v any, ro *runOptions) (*Result, error) {
 	ctx := newRunCtx(s, ro)
 	defer ctx.release()
 	if root := s.evalRoot(); root != nil {
 		ctx.evaluate(root, v)
 	}
 	res := &Result{Valid: len(ctx.errors) == 0, Errors: ctx.errors}
-	// In stop-on-first-error mode the validator bails on the first failure
-	// and skips annotation work, since neither unevaluated* keywords nor
-	// the Detailed/Verbose output formats are useful when the validator
-	// short-circuits. The flat error list still surfaces the first error.
+	// Stop-on-first-error skips annotation collection: unevaluated* keywords
+	// and the Detailed/Verbose output formats are not useful when the
+	// validator short-circuits on the first failure.
 	if ro.collectAnnotations && !ro.stopOnFirstError {
 		res.Annotations = ctx.publicAnnotations()
 	}
@@ -97,11 +121,7 @@ func (s *Schema) ValidateAndUnmarshal(instanceJSON []byte, v any, opts ...Option
 		return err
 	}
 	if !res.Valid {
-		if len(res.Errors) > 0 {
-			e := res.Errors[0]
-			return &e
-		}
-		return ErrValidationFailed
+		return validationFailureError(res.Errors)
 	}
 	if v == nil {
 		return nil
@@ -112,14 +132,36 @@ func (s *Schema) ValidateAndUnmarshal(instanceJSON []byte, v any, opts ...Option
 	return nil
 }
 
-// decodeInstanceBytes decodes raw JSON bytes via [encoding/json.Decoder] with
-// UseNumber set so number-precision keywords like multipleOf can compare
-// against the wire form.
+// validationFailureError packages a slice of failures into a single
+// [*ValidationError]. The first failure becomes the head; the rest are
+// attached as Causes so [errors.As] can recover the full slice.
+func validationFailureError(errs []ValidationError) error {
+	if len(errs) == 0 {
+		return ErrValidationFailed
+	}
+	if len(errs) == 1 {
+		e := errs[0]
+		return &e
+	}
+	first := errs[0]
+	first.Causes = append(first.Causes, errs[1:]...)
+	return &first
+}
+
+// decodeInstanceBytes decodes raw JSON bytes with UseNumber set so
+// precision-sensitive keywords compare against the wire form. Trailing
+// non-whitespace is rejected to block concatenated-document smuggling.
 func decodeInstanceBytes(data []byte) (any, error) {
 	dec := json.NewDecoder(bytes.NewReader(data))
 	dec.UseNumber()
 	var v any
 	if err := dec.Decode(&v); err != nil {
+		return nil, fmt.Errorf("jsonschema: decode instance: %w", err)
+	}
+	var trailing any
+	if err := dec.Decode(&trailing); err == nil {
+		return nil, fmt.Errorf("jsonschema: decode instance: %w", errTrailingContent)
+	} else if !errors.Is(err, io.EOF) {
 		return nil, fmt.Errorf("jsonschema: decode instance: %w", err)
 	}
 	return v, nil
