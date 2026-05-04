@@ -611,6 +611,49 @@ func TestMustLoadFormat_PanicAndSuccess(t *testing.T) {
 	MustLoadJSONC([]byte(`{`))
 }
 
+// TestLoadJSON_AliasFamily confirms the LoadJSON / LoadJSONURL /
+// LoadJSONValue aliases (and their Must* counterparts) compile a schema
+// equivalent to the underlying Compile / CompileURL / CompileValue calls.
+// These are thin wrappers, so the test scope is "exists, forwards, returns
+// non-nil schema." Failure-path behavior is covered by the underlying
+// Compile* tests.
+func TestLoadJSON_AliasFamily(t *testing.T) {
+	const src = `{"type":"string","minLength":1}`
+
+	s, err := LoadJSON([]byte(src))
+	if err != nil {
+		t.Fatalf("LoadJSON: %v", err)
+	}
+	if s == nil {
+		t.Fatal("LoadJSON returned nil schema")
+	}
+
+	v, err := LoadJSONValue(map[string]any{"type": "string"})
+	if err != nil {
+		t.Fatalf("LoadJSONValue: %v", err)
+	}
+	if v == nil {
+		t.Fatal("LoadJSONValue returned nil schema")
+	}
+
+	if s := MustLoadJSON([]byte(src)); s == nil {
+		t.Error("MustLoadJSON returned nil for valid input")
+	}
+	if s := MustLoadJSONValue(map[string]any{"type": "integer"}); s == nil {
+		t.Error("MustLoadJSONValue returned nil for valid input")
+	}
+
+	// Panic-on-error variant.
+	func() {
+		defer func() {
+			if r := recover(); r == nil {
+				t.Error("MustLoadJSON did not panic on invalid input")
+			}
+		}()
+		MustLoadJSON([]byte(`{not json}`))
+	}()
+}
+
 // TestLoadYAML_AliasToUndefinedAnchor confirms that a YAML document
 // referencing an alias (*foo) without a matching anchor (&foo) is rejected
 // with [ErrInvalidYAML]. The decoder must catch the unresolved reference at

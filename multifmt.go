@@ -72,6 +72,41 @@ var (
 	ErrInvalidTOML = errors.New("jsonschema: invalid toml")
 )
 
+// LoadJSON parses a JSON schema document and compiles it. It is a verbatim
+// alias for [Compile] provided for naming symmetry with [LoadJSONC],
+// [LoadYAML], and [LoadTOML] when callers dispatch on a runtime format
+// label.
+func LoadJSON(schemaJSON []byte, opts ...CompileOption) (*Schema, error) {
+	return Compile(schemaJSON, opts...)
+}
+
+// LoadJSONURL fetches a JSON schema document from uri using the configured
+// loader and compiles it. Alias for [CompileURL].
+func LoadJSONURL(uri string, opts ...CompileOption) (*Schema, error) {
+	return CompileURL(uri, opts...)
+}
+
+// LoadJSONValue compiles an already-decoded Go value as a JSON schema.
+// Alias for [CompileValue].
+func LoadJSONValue(v any, opts ...CompileOption) (*Schema, error) {
+	return CompileValue(v, opts...)
+}
+
+// MustLoadJSON is the panic-on-error variant of [LoadJSON].
+func MustLoadJSON(schemaJSON []byte, opts ...CompileOption) *Schema {
+	return MustCompile(schemaJSON, opts...)
+}
+
+// MustLoadJSONURL is the panic-on-error variant of [LoadJSONURL].
+func MustLoadJSONURL(uri string, opts ...CompileOption) *Schema {
+	return MustCompileURL(uri, opts...)
+}
+
+// MustLoadJSONValue is the panic-on-error variant of [LoadJSONValue].
+func MustLoadJSONValue(v any, opts ...CompileOption) *Schema {
+	return MustCompileValue(v, opts...)
+}
+
 // LoadJSONC parses a JSONC schema document via [github.com/go-rotini/jsonc]
 // and compiles it as a JSON Schema. Comments and trailing commas in the
 // source are tolerated; numeric literals retain their original text via

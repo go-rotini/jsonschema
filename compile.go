@@ -223,7 +223,7 @@ func (c *Compiler) CompileURL(uri string) (*Schema, error) {
 	if loaded {
 		// LoadOrStore only returns values previously stored by us; the
 		// type assertion is guaranteed to succeed.
-		other := actual.(*compileInflight)
+		other := actual.(*compileInflight) //nolint:forcetypeassert // sync.Map only holds *compileInflight values stored by this method.
 		other.wg.Wait()
 		return other.schema, other.err
 	}
@@ -546,14 +546,14 @@ func (c *Compiler) buildBinding(rm *resourceMap, key string, raw any, baseURI, l
 	binding := keywordBinding{Name: key, Location: loc, RawValue: raw, Resolved: nil}
 	switch key {
 	case "$ref":
-		ref := raw.(string)
+		ref := raw.(string) //nolint:forcetypeassert // validateKeywordShape rejects non-string $ref upstream.
 		resolved, err := resolveRef(rm, c.opts.loader, baseURI, ref, append(refStack, baseURI), subDraft)
 		if err != nil {
 			return binding, err
 		}
 		binding.Resolved = resolved
 	case "$dynamicRef":
-		ref := raw.(string)
+		ref := raw.(string) //nolint:forcetypeassert // validateKeywordShape rejects non-string $dynamicRef upstream.
 		resolved, err := resolveRef(rm, c.opts.loader, baseURI, ref, append(refStack, baseURI), subDraft)
 		if err != nil {
 			// Static resolution failed: defer to a lazy edge so the

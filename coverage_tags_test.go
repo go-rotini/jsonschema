@@ -315,7 +315,7 @@ func TestGenerateAlternateDraft(t *testing.T) {
 // uniqueItems.
 func TestGenerateTagFlagOptionsRejectValue(t *testing.T) {
 	cases := []struct {
-		name   string
+		name    string
 		struct_ any
 	}{
 		{"required-with-value", struct {
