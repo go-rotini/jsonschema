@@ -33,18 +33,18 @@ lint:
 
 test: clone-test-suite
 	@go test -v -count=1 -coverprofile=test.out ./...
-	@go tool cover -func=test.out | tail -1
+	@go tool cover -func=test.out
 
 test-acceptance:
 	@go test -v -count=1 -run TestAcceptance -coverprofile=test_acceptance.out ./...
-	@go tool cover -func=test_acceptance.out | tail -1
+	@go tool cover -func=test_acceptance.out
 
 test-bench:
 	@go test -bench=. -benchmem -count=1 ./... | tee test_bench.out
 
 test-conformance: clone-test-suite
 	@go test -v -count=1 -run 'TestJSONSchemaTestSuite|TestJSONSchemaEdgeCases' -coverprofile=test_conformance.out ./...
-	@go tool cover -func=test_conformance.out | tail -1
+	@go tool cover -func=test_conformance.out
 
 test-fuzz:
 	@go test -fuzz=FuzzCompile  -fuzztime=60s -run=^$$ .
@@ -56,7 +56,7 @@ test-mutation: clone-test-suite
 
 test-race:
 	@go test -race -count=1 -coverprofile=test_race.out ./...
-	@go tool cover -func=test_race.out | tail -1
+	@go tool cover -func=test_race.out
 
 # Re-fetches the version-pinned upstream acceptance fixtures. Run intentionally
 # at release time when bumping pinned versions; not part of `make all`.

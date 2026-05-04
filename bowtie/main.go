@@ -147,10 +147,19 @@ type state struct {
 }
 
 func main() {
-	if err := dispatch(os.Stdin, os.Stdout); err != nil && !errors.Is(err, errStop) {
-		fmt.Fprintln(os.Stderr, "bowtie:", err)
-		os.Exit(1)
+	os.Exit(run(os.Stdin, os.Stdout, os.Stderr))
+}
+
+// run is the testable core of main: it drives the dispatch loop against
+// the supplied I/O streams and returns the exit code main should pass to
+// os.Exit. Splitting the os.Exit call out keeps main itself a thin
+// shell while letting the package's tests cover the I/O wiring path.
+func run(in io.Reader, out, errOut io.Writer) int {
+	if err := dispatch(in, out); err != nil && !errors.Is(err, errStop) {
+		fmt.Fprintln(errOut, "bowtie:", err)
+		return 1
 	}
+	return 0
 }
 
 // dispatch is the read-eval-print loop; tests drive it over bytes.Buffer
