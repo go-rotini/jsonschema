@@ -313,6 +313,13 @@ func applyTagFlagOption(spec *tagSpec, name string, hasValue bool, path string) 
 
 // applyTagStringOption handles the string-valued passthrough options
 // (description, title, format, pattern, $id, $ref).
+//
+// The `format=` value passes through verbatim to the emitted schema; the
+// generator does not validate that the name is a registered or known
+// format. At validation time the standard "format" keyword behaves as an
+// annotation by default (see [WithFormatAssertion]), so unknown format
+// values are tolerated unless the caller explicitly opts into assertion
+// mode and registers a [CustomFormat] for the name.
 func applyTagStringOption(spec *tagSpec, name, value string, hasValue bool, path string) (bool, error) {
 	target := struct {
 		set     func(string)

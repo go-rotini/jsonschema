@@ -129,12 +129,14 @@ type runOptions struct {
 	stopOnFirstError    bool
 	maxInstanceSize     int
 	maxValidationDepth  int
+	maxKeyCount         int
 	unknownFormatPolicy UnknownFormatPolicy
 	customFormats       map[string]func(string) error
 	maxErrors           int
 	readOnly            bool
 	writeOnly           bool
 	collectAnnotations  bool
+	warningSink         io.Writer
 }
 
 // defaultRunOptions returns a freshly-initialized [*runOptions] with sensible
@@ -170,6 +172,12 @@ func WithContentAssertion(b bool) Option {
 
 // WithStopOnFirstError short-circuits validation as soon as the first error
 // is found. Equivalent to selecting OutputFlag at the collector level.
+//
+// Note: applicator branches (anyOf, oneOf, if/then/else) always evaluate
+// every alternative regardless of this option, because the keyword's
+// outcome depends on knowing which branches passed. Short-circuiting
+// applies only at the top-level evaluator and to sibling keywords within
+// a single subschema.
 func WithStopOnFirstError(b bool) Option {
 	return func(o *runOptions) { o.stopOnFirstError = b }
 }
@@ -197,6 +205,28 @@ func WithMaxValidationDepth(n int) Option {
 // WithMaxDepth is a sister-package alias for [WithMaxValidationDepth].
 func WithMaxDepth(n int) Option {
 	return WithMaxValidationDepth(n)
+}
+
+// WithMaxKeyCount caps the number of object keys the validator will visit
+// on any single object instance. When an object has more keys than n,
+// validation surfaces a [*ValidationError] with Keyword "$maxKeyCount" and
+// Cause [ErrMaxKeyCount]. Default: 0 (unlimited).
+//
+// Mitigates DoS via instances with millions of object keys.
+// [WithMaxInstanceSize] transitively bounds the same attack surface;
+// WithMaxKeyCount is a finer-grain guard for cases where the instance
+// bytes are not the limiting factor (e.g. repeated short keys).
+func WithMaxKeyCount(n int) Option {
+	return func(o *runOptions) { o.maxKeyCount = n }
+}
+
+// WithWarningSink installs a writer that receives diagnostic messages
+// emitted during validation. v0.1 emits one line per unknown format under
+// the [UnknownFormatWarn] policy, deduplicated within a single Validate
+// call. Future warning-class diagnostics will write to the same sink.
+// Default: nil (warnings dropped silently).
+func WithWarningSink(w io.Writer) Option {
+	return func(o *runOptions) { o.warningSink = w }
 }
 
 // WithUnknownFormat controls handling of unrecognized "format" names.

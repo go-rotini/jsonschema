@@ -117,6 +117,127 @@ func (s *Schema) Resources() []string {
 	return out
 }
 
+// Vocabularies returns the set of vocabulary URIs declared by the schema's
+// effective $vocabulary keyword (or, when absent, the standard set for the
+// schema's draft). Returns a fresh slice each call; safe for callers to
+// mutate.
+//
+// In v0.1, $vocabulary at the schema root is recognized as a structural
+// keyword but not honored as an opt-in selector — the returned set is
+// always the standard vocabularies for [Schema.Draft]. When the root
+// schema declares a [VocabOAS]-aware $schema (the [OASDialectURL]),
+// [VocabOAS] is included alongside the draft's standard set. Custom
+// vocabulary registration is reserved for v0.2.
+func (s *Schema) Vocabularies() []string {
+	if s == nil {
+		return nil
+	}
+	stdSet := stdVocabularySet(s.draft)
+	// If the root schema declared $vocabulary, prefer that set verbatim
+	// (even though we don't honor opt-in/opt-out semantics yet — this lets
+	// introspecting tools see what the schema asked for).
+	if uris := rootVocabularyURIs(s); uris != nil {
+		out := make([]string, len(uris))
+		copy(out, uris)
+		return out
+	}
+	out := make([]string, 0, len(stdSet)+1)
+	out = append(out, stdSet...)
+	if s.metaSchemaURI == OASDialectURL {
+		out = append(out, VocabOAS)
+	}
+	return out
+}
+
+// Bindings returns the keyword bindings extracted at compile time. Each
+// binding records the keyword name, its source location, and the keyword's
+// raw value. Returns a fresh slice each call; the slice is safe for callers
+// to mutate, but the embedded RawValue may share storage with the schema's
+// parsed source.
+//
+// In v0.1, ref-resolution targets are not exposed in the public binding —
+// only Name, Location, and RawValue are populated. v0.2 may extend
+// [KeywordBinding] with a typed Resolved field.
+func (s *Schema) Bindings() []KeywordBinding {
+	if s == nil || len(s.bindings) == 0 {
+		return nil
+	}
+	out := make([]KeywordBinding, len(s.bindings))
+	for i, b := range s.bindings {
+		out[i] = KeywordBinding{
+			Name:     b.Name,
+			Location: b.Location,
+			RawValue: b.RawValue,
+		}
+	}
+	return out
+}
+
+// KeywordBinding is the public projection of one keyword binding extracted
+// at compile time. Returned by [*Schema.Bindings] for introspection and
+// metadata-only consumers.
+type KeywordBinding struct {
+	// Name is the keyword identifier (e.g. "minLength", "$ref").
+	Name string
+	// Location is the JSON Pointer of the keyword in the source schema.
+	Location string
+	// RawValue is the parsed value of the keyword (json.Unmarshal'd).
+	// May be a map[string]any, []any, json.Number, string, bool, or nil.
+	RawValue any
+}
+
+// stdVocabularySet returns the standard vocabulary URIs registered for
+// draft d. The slice is built fresh on each call.
+func stdVocabularySet(d Draft) []string {
+	// Vocabulary URIs vary across drafts, but the package's stdVocabularies
+	// table is keyed at the 2020-12 URIs. For pre-2019-09 drafts the
+	// $vocabulary mechanism does not exist — we still surface the set the
+	// validator implements so introspection callers see something useful.
+	if d == DraftUnknown {
+		return nil
+	}
+	out := make([]string, 0, len(stdVocabularies))
+	for _, v := range stdVocabularies {
+		// VocabOAS is included only when the schema's meta-schema opts
+		// into it; it is not a standard 2020-12 vocabulary.
+		if v.URI == VocabOAS {
+			continue
+		}
+		out = append(out, v.URI)
+	}
+	return out
+}
+
+// rootVocabularyURIs extracts the URIs declared by a $vocabulary keyword
+// at the schema root, in declaration order. Returns nil if no $vocabulary
+// is present (or the binding is malformed).
+func rootVocabularyURIs(s *Schema) []string {
+	for _, b := range s.bindings {
+		if b.Name != "$vocabulary" || b.Location != "#/$vocabulary" {
+			continue
+		}
+		m, ok := b.RawValue.(map[string]any)
+		if !ok {
+			return nil
+		}
+		out := make([]string, 0, len(m))
+		for uri, enabled := range m {
+			// Per Draft 2019-09, the value is a bool. Honor only true
+			// entries; unknown/false vocabularies are dropped.
+			b, ok := enabled.(bool)
+			if !ok || !b {
+				continue
+			}
+			out = append(out, uri)
+		}
+		if len(out) == 0 {
+			return nil
+		}
+		return out
+	}
+	return nil
+}
+
 // Anchors returns the plain-name anchors declared in the root resource.
 // Returns nil when the schema is nil or was constructed without a resource
 // map. The returned slice is freshly allocated; callers may mutate it.

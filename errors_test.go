@@ -178,16 +178,89 @@ func TestSentinelMessages(t *testing.T) {
 	}
 }
 
-func TestRenderErrorStub(t *testing.T) {
+func TestRenderError_Passthrough(t *testing.T) {
 	if got := RenderError(nil, nil, nil); got != "" {
 		t.Errorf("RenderError(nil err) = %q, want empty", got)
 	}
+	// A non-validation, non-compile error falls through to err.Error().
 	target := errors.New("test")
 	if got := RenderError(nil, nil, target); got != "test" {
-		t.Errorf("RenderError stub = %q, want %q", got, "test")
+		t.Errorf("RenderError fallthrough = %q, want %q", got, "test")
 	}
-	// Color flag is currently a no-op.
 	if got := RenderError(nil, nil, target, true); got != "test" {
-		t.Errorf("RenderError stub with color = %q, want %q", got, "test")
+		t.Errorf("RenderError fallthrough with color = %q, want %q", got, "test")
+	}
+}
+
+// TestRenderError_ValidationError verifies that *ValidationError is
+// rendered with structured per-cause blocks.
+func TestRenderError_ValidationError(t *testing.T) {
+	ve := &ValidationError{
+		KeywordLocation:  "/properties/name/minLength",
+		InstanceLocation: "/name",
+		Keyword:          "minLength",
+		Message:          "value too short",
+	}
+	got := RenderError(nil, nil, ve)
+	if !strings.Contains(got, "minLength") {
+		t.Errorf("missing keyword in output: %q", got)
+	}
+	if !strings.Contains(got, "/properties/name/minLength") {
+		t.Errorf("missing schema pointer in output: %q", got)
+	}
+	if !strings.Contains(got, "/name") {
+		t.Errorf("missing instance pointer in output: %q", got)
+	}
+	if !strings.Contains(got, "value too short") {
+		t.Errorf("missing message in output: %q", got)
+	}
+}
+
+// TestRenderError_SourceSnippet verifies that a JSON pointer + source bytes
+// yield a line snippet with a caret pointer.
+func TestRenderError_SourceSnippet(t *testing.T) {
+	schemaSrc := []byte("{\n  \"properties\": {\n    \"name\": {\"minLength\": 3}\n  }\n}")
+	instanceSrc := []byte("{\n  \"name\": \"x\"\n}")
+	ve := &ValidationError{
+		KeywordLocation:  "/properties/name/minLength",
+		InstanceLocation: "/name",
+		Keyword:          "minLength",
+		Message:          "value too short",
+	}
+	got := RenderError(schemaSrc, instanceSrc, ve)
+	if !strings.Contains(got, "schema (line") {
+		t.Errorf("expected schema line annotation: %q", got)
+	}
+	if !strings.Contains(got, "instance (line") {
+		t.Errorf("expected instance line annotation: %q", got)
+	}
+	if !strings.Contains(got, "^") {
+		t.Errorf("expected caret pointer: %q", got)
+	}
+}
+
+// TestRenderError_CompileError verifies CompileError rendering.
+func TestRenderError_CompileError(t *testing.T) {
+	ce := &CompileError{KeywordLocation: "/minLength", Message: "must be a non-negative integer"}
+	got := RenderError([]byte(`{"minLength":-1}`), nil, ce)
+	if !strings.Contains(got, "compile error:") {
+		t.Errorf("missing compile-error header: %q", got)
+	}
+	if !strings.Contains(got, "/minLength") {
+		t.Errorf("missing pointer: %q", got)
+	}
+}
+
+// TestRenderError_Color verifies that color=true emits ANSI escapes.
+func TestRenderError_Color(t *testing.T) {
+	ve := &ValidationError{
+		KeywordLocation:  "/type",
+		InstanceLocation: "",
+		Keyword:          "type",
+		Message:          "wrong type",
+	}
+	got := RenderError(nil, nil, ve, true)
+	if !strings.Contains(got, "\x1b[31m") {
+		t.Errorf("expected ANSI red sequence: %q", got)
 	}
 }

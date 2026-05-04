@@ -185,6 +185,55 @@ func TestGenerateBytesIntWidthBounds(t *testing.T) {
 	}
 }
 
+// TestGenerateIntegerKindBounds enumerates every signed and unsigned Go
+// integer kind and pins the per-kind bounds emitted by
+// [integerSchemaForKind]. The contract: every integer kind emits
+// {"type":"integer"}; widths with a known finite range carry the
+// matching minimum/maximum; the unbounded kinds (int, int64, uint,
+// uint64) drop the bound that the architecture cannot guarantee.
+func TestGenerateIntegerKindBounds(t *testing.T) {
+	type intsAll struct {
+		I   int    `json:"i"`
+		I8  int8   `json:"i8"`
+		I16 int16  `json:"i16"`
+		I32 int32  `json:"i32"`
+		I64 int64  `json:"i64"`
+		U   uint   `json:"u"`
+		U8  uint8  `json:"u8"`
+		U16 uint16 `json:"u16"`
+		U32 uint32 `json:"u32"`
+		U64 uint64 `json:"u64"`
+	}
+	data, err := GenerateBytes(intsAll{})
+	if err != nil {
+		t.Fatalf("GenerateBytes: %v", err)
+	}
+	src := string(data)
+	cases := []struct {
+		field string
+		want  string
+	}{
+		// "int" and "int64" emit no bounds (architecture dependent for int,
+		// 64-bit-wide range too large to round-trip safely).
+		{"i", `"i":{"type":"integer"}`},
+		{"i8", `"i8":{"type":"integer","minimum":-128,"maximum":127}`},
+		{"i16", `"i16":{"type":"integer","minimum":-32768,"maximum":32767}`},
+		{"i32", `"i32":{"type":"integer","minimum":-2147483648,"maximum":2147483647}`},
+		{"i64", `"i64":{"type":"integer"}`},
+		// uint / uint64 carry only the lower bound (0).
+		{"u", `"u":{"type":"integer","minimum":0}`},
+		{"u8", `"u8":{"type":"integer","minimum":0,"maximum":255}`},
+		{"u16", `"u16":{"type":"integer","minimum":0,"maximum":65535}`},
+		{"u32", `"u32":{"type":"integer","minimum":0,"maximum":4294967295}`},
+		{"u64", `"u64":{"type":"integer","minimum":0}`},
+	}
+	for _, c := range cases {
+		if !strings.Contains(src, c.want) {
+			t.Errorf("%s field: expected %q in schema; got %s", c.field, c.want, src)
+		}
+	}
+}
+
 func TestGenerateBytesPointerInline(t *testing.T) {
 	type Inner struct {
 		V int `json:"v"`
@@ -264,6 +313,46 @@ func TestGenerateBytesInterfaceAsAny(t *testing.T) {
 	if !strings.Contains(string(data), `"v":{}`) {
 		t.Errorf("expected empty schema for any, got %s", data)
 	}
+}
+
+// TestGenerateInterfaceDirect pins the documented behavior of
+// [Generate] when the caller passes an untyped nil interface ([any]
+// zero value). The contract: nil values fail with a [*CompileError]
+// since the generator has no [reflect.Type] to walk; callers wanting
+// the "anything" schema must wrap a typed nil ((*T)(nil)) or pass the
+// reflect.Type directly via [FromType].
+func TestGenerateInterfaceDirect(t *testing.T) {
+	t.Run("untyped_nil_errors", func(t *testing.T) {
+		_, err := Generate(any(nil))
+		if err == nil {
+			t.Fatal("Generate(nil): expected error, got nil")
+		}
+		var ce *CompileError
+		if !errors.As(err, &ce) {
+			t.Fatalf("err = %T %v; want *CompileError", err, err)
+		}
+		if !strings.Contains(ce.Message, "nil value") {
+			t.Errorf("CompileError.Message = %q; want it to mention nil value", ce.Message)
+		}
+	})
+	t.Run("generatebytes_nil_errors", func(t *testing.T) {
+		_, err := GenerateBytes(any(nil))
+		if err == nil {
+			t.Fatal("GenerateBytes(nil): expected error")
+		}
+	})
+	t.Run("typed_nil_pointer_succeeds", func(t *testing.T) {
+		type T struct {
+			Name string `json:"name"`
+		}
+		s, err := Generate((*T)(nil))
+		if err != nil {
+			t.Fatalf("Generate((*T)(nil)): %v", err)
+		}
+		if s == nil {
+			t.Fatal("expected non-nil schema for typed nil pointer")
+		}
+	})
 }
 
 func TestGenerateBytesInterfaceAsAnyDisabledErrors(t *testing.T) {

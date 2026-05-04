@@ -24,6 +24,7 @@ var (
 	errHTTPNon2xx              = errors.New("http: non-2xx status")
 	errHTTPBodyTooLarge        = errors.New("http: body exceeds MaxBodySize")
 	errPathEscapesRoot         = errors.New("file: path escapes root")
+	errSymlinkEscapesRoot      = errors.New("file: symlink target escapes root")
 	errHTTPTooManyRedirects    = errors.New("http: too many redirects")
 )
 
@@ -116,12 +117,34 @@ func (l FileLoader) Load(uri string) ([]byte, error) {
 	if err != nil || strings.HasPrefix(rel2, "..") || rel2 == ".." {
 		return nil, &LoaderError{URI: uri, Cause: fmt.Errorf("%w: %w", errPathEscapesRoot, ErrLoaderRejected)}
 	}
-	data, err := readFile(joined)
+	// Symlink-aware second pass: filepath.Clean is purely lexical, so a
+	// symlink inside Root pointing at /etc/passwd would still be followed
+	// by os.ReadFile. Resolve symlinks on both Root and the joined path
+	// (Root itself may be a symlink) and re-verify the prefix.
+	resolvedRoot, err := evalSymlinks(rootAbs)
+	if err != nil {
+		return nil, &LoaderError{URI: uri, Cause: fmt.Errorf("resolve root: %w", err)}
+	}
+	resolvedPath, err := evalSymlinks(joined)
+	if err != nil {
+		// Pass through the underlying I/O error (covers ENOENT) so callers
+		// can distinguish "not found" from "rejected".
+		return nil, &LoaderError{URI: uri, Cause: fmt.Errorf("resolve path: %w", err)}
+	}
+	rel3, err := filepath.Rel(resolvedRoot, resolvedPath)
+	if err != nil || rel3 == ".." || strings.HasPrefix(rel3, ".."+string(filepath.Separator)) {
+		return nil, &LoaderError{URI: uri, Cause: fmt.Errorf("%w: %w", errSymlinkEscapesRoot, ErrLoaderRejected)}
+	}
+	data, err := readFile(resolvedPath)
 	if err != nil {
 		return nil, &LoaderError{URI: uri, Cause: err}
 	}
 	return data, nil
 }
+
+// evalSymlinks is overridable so tests can substitute it without touching
+// the filesystem.
+var evalSymlinks = filepath.EvalSymlinks
 
 // readFile is overridable so tests can substitute it without touching the
 // filesystem.

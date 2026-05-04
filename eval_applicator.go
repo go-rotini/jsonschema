@@ -347,6 +347,9 @@ func (e *propertiesEval) eval(ctx *runCtx, instance any) {
 	if !ok {
 		return
 	}
+	if !ctx.checkMaxKeyCount(obj, e.loc) {
+		return
+	}
 	evaluated := evaluatedKeys{}
 	for k, sub := range e.subs {
 		v, present := obj[k]
@@ -379,6 +382,9 @@ func (e *patternPropertiesEval) eval(ctx *runCtx, instance any) {
 	if !ok {
 		return
 	}
+	if !ctx.checkMaxKeyCount(obj, e.loc) {
+		return
+	}
 	evaluated := evaluatedKeys{}
 	for k, v := range obj {
 		for _, pp := range e.patterns {
@@ -403,6 +409,9 @@ func (e *additionalPropertiesEval) keyword() string { return "additionalProperti
 func (e *additionalPropertiesEval) eval(ctx *runCtx, instance any) {
 	obj, ok := instance.(map[string]any)
 	if !ok {
+		return
+	}
+	if !ctx.checkMaxKeyCount(obj, e.loc) {
 		return
 	}
 	covered := evaluatedKeys{}
@@ -443,6 +452,9 @@ func (e *propertyNamesEval) keyword() string { return "propertyNames" }
 func (e *propertyNamesEval) eval(ctx *runCtx, instance any) {
 	obj, ok := instance.(map[string]any)
 	if !ok {
+		return
+	}
+	if !ctx.checkMaxKeyCount(obj, e.loc) {
 		return
 	}
 	for k := range obj {

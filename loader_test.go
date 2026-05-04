@@ -120,6 +120,70 @@ func TestFileLoaderMissingFile(t *testing.T) {
 	}
 }
 
+// TestFileLoaderRejectsSymlinkOutsideRoot confirms that a symlink inside
+// Root pointing at a file outside Root is refused. Pure lexical
+// path-cleaning would let an attacker who can write a symlink under Root
+// (e.g. via a co-tenant compile-time fixture) read arbitrary host files.
+func TestFileLoaderRejectsSymlinkOutsideRoot(t *testing.T) {
+	root := t.TempDir()
+	outside := t.TempDir()
+	if err := os.WriteFile(filepath.Join(outside, "secret"), []byte("secret"), 0o600); err != nil {
+		t.Fatalf("write outside file: %v", err)
+	}
+	if err := os.Symlink(filepath.Join(outside, "secret"), filepath.Join(root, "evil")); err != nil {
+		t.Skipf("symlink unsupported on this platform: %v", err)
+	}
+	l := FileLoader{Root: root}
+	_, err := l.Load("file:///evil")
+	if err == nil {
+		t.Fatal("expected loader to reject symlink target outside root")
+	}
+	if !errors.Is(err, ErrLoaderRejected) {
+		t.Errorf("err = %v, want wrapped ErrLoaderRejected", err)
+	}
+}
+
+// TestFileLoaderAllowsSymlinkInsideRoot confirms a symlink whose target
+// stays inside Root is still served. The symlink check rejects only
+// resolved targets that escape Root.
+func TestFileLoaderAllowsSymlinkInsideRoot(t *testing.T) {
+	root := t.TempDir()
+	target := filepath.Join(root, "real.json")
+	if err := os.WriteFile(target, []byte(`{"ok":1}`), 0o600); err != nil {
+		t.Fatalf("write target: %v", err)
+	}
+	if err := os.Symlink(target, filepath.Join(root, "alias.json")); err != nil {
+		t.Skipf("symlink unsupported on this platform: %v", err)
+	}
+	l := FileLoader{Root: root}
+	data, err := l.Load("file:///alias.json")
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if string(data) != `{"ok":1}` {
+		t.Errorf("Load = %s", data)
+	}
+}
+
+// TestFileLoaderResolvesRootSymlink confirms that Root itself being a
+// symlink does not cause the prefix check to fail. macOS in particular
+// returns /private/var/... when /var/... is requested; we must compare
+// the symlink-resolved versions of both Root and the joined path.
+func TestFileLoaderResolvesRootSymlink(t *testing.T) {
+	realRoot := t.TempDir()
+	if err := os.WriteFile(filepath.Join(realRoot, "a.json"), []byte(`{}`), 0o600); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+	link := filepath.Join(t.TempDir(), "rootlink")
+	if err := os.Symlink(realRoot, link); err != nil {
+		t.Skipf("symlink unsupported on this platform: %v", err)
+	}
+	l := FileLoader{Root: link}
+	if _, err := l.Load("file:///a.json"); err != nil {
+		t.Fatalf("Load via symlinked root: %v", err)
+	}
+}
+
 func TestHTTPLoaderRejectsHTTPByDefault(t *testing.T) {
 	l := &HTTPLoader{}
 	_, err := l.Load("http://example.com/a")

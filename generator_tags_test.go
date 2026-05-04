@@ -325,3 +325,27 @@ func TestTagTitleOption(t *testing.T) {
 		t.Errorf("got %s", data)
 	}
 }
+
+// TestTagUnknownFormatPassesThrough pins the documented contract for the
+// `jsonschema:"format=..."` tag: the value passes through verbatim
+// regardless of whether the name is a registered format. This matches
+// the standard "format" keyword's annotation-by-default semantics —
+// unknown formats are tolerated. Validation only asserts when the
+// caller opts in via [WithFormatAssertion] AND a [CustomFormat]
+// matches the name.
+func TestTagUnknownFormatPassesThrough(t *testing.T) {
+	type S struct {
+		X string `json:"x" jsonschema:"format=fictitious-format"`
+	}
+	data, err := GenerateBytes(S{})
+	if err != nil {
+		t.Fatalf("GenerateBytes: %v", err)
+	}
+	if !strings.Contains(string(data), `"format":"fictitious-format"`) {
+		t.Errorf("expected fictitious-format to pass through; got %s", data)
+	}
+	// And the schema compiles cleanly even though the format is unknown.
+	if _, err := Compile(data); err != nil {
+		t.Errorf("Compile: schema with unknown format must compile cleanly: %v", err)
+	}
+}

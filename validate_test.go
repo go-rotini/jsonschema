@@ -1,8 +1,10 @@
 package jsonschema
 
 import (
+	"encoding/json"
 	"errors"
 	"fmt"
+	"math"
 	"strings"
 	"testing"
 )
@@ -504,10 +506,138 @@ func TestValidate_MetaSchemaValidation_TyposCaught(t *testing.T) {
 	_ = err
 }
 
+// TestValidateAgainstMetaSchema_FailureSurfacesCompileError exercises the
+// failure branch of [validateAgainstMetaSchema]: the schema's bytes are
+// well-formed JSON and pass the per-keyword shape checks, but the value
+// of "type" is an array containing an unknown atom which the 2020-12
+// meta-schema's anyOf rejects. The error must surface as *CompileError
+// with message "schema does not match meta-schema".
+func TestValidateAgainstMetaSchema_FailureSurfacesCompileError(t *testing.T) {
+	_, err := Compile(
+		[]byte(`{"$schema":"https://json-schema.org/draft/2020-12/schema","type":["bogus"]}`),
+		WithMetaSchemaValidation(true),
+	)
+	if err == nil {
+		t.Fatal("expected meta-schema validation failure")
+	}
+	var ce *CompileError
+	if !errors.As(err, &ce) {
+		t.Fatalf("err = %T %v; want *CompileError", err, err)
+	}
+	if !strings.Contains(ce.Message, "schema does not match meta-schema") {
+		t.Errorf("CompileError.Message = %q; want it to contain meta-schema diagnostic prefix", ce.Message)
+	}
+	// The cause should be a ValidationError so callers can inspect it.
+	var ve *ValidationError
+	if !errors.As(err, &ve) {
+		t.Errorf("expected ValidationError in cause chain; got %v", err)
+	}
+}
+
+// TestValidateAgainstMetaSchema_OASDialectFailure exercises the dialect
+// branch: a schema declaring the OAS 3.1 dialect URL is validated against
+// the embedded openapi-3.1-dialect.json, NOT against vanilla 2020-12.
+// `discriminator: 42` violates the dialect's `type: object` constraint.
+func TestValidateAgainstMetaSchema_OASDialectFailure(t *testing.T) {
+	_, err := Compile(
+		[]byte(`{"$schema":"https://spec.openapis.org/oas/3.1/dialect/base","discriminator":42}`),
+		WithMetaSchemaValidation(true),
+	)
+	if err == nil {
+		t.Fatal("expected dialect meta-schema validation failure")
+	}
+	var ce *CompileError
+	if !errors.As(err, &ce) {
+		t.Fatalf("err = %T %v; want *CompileError", err, err)
+	}
+	if !strings.Contains(ce.Message, "discriminator") {
+		t.Errorf("CompileError.Message = %q; expected message to mention the offending keyword", ce.Message)
+	}
+}
+
+// TestValidateAgainstMetaSchema_UnknownDialectFallsBack confirms that a
+// schema declaring an unknown $schema URI does NOT crash the validation
+// path. The package falls back to DraftDefault's meta-schema, which
+// still catches cross-cutting shape violations (here, the bogus type
+// atom). The test guards against the regression where a non-embedded
+// $schema URI plus no Loader caused a nil-pointer or empty-error path.
+func TestValidateAgainstMetaSchema_UnknownDialectFallsBack(t *testing.T) {
+	_, err := Compile(
+		[]byte(`{"$schema":"https://example.com/custom-schema-not-embedded","type":["bogus-type"]}`),
+		WithMetaSchemaValidation(true),
+	)
+	if err == nil {
+		t.Fatal("expected meta-schema validation failure even with unknown $schema URI")
+	}
+	var ce *CompileError
+	if !errors.As(err, &ce) {
+		t.Fatalf("err = %T %v; want *CompileError", err, err)
+	}
+}
+
 func TestValidate_NilSchemaErrors(t *testing.T) {
 	var s *Schema
 	if _, err := s.Validate([]byte(`null`)); !errors.Is(err, ErrSchemaNotCompiled) {
 		t.Errorf("Validate(nil): %v", err)
+	}
+}
+
+// TestNumberToRat_PathologicalNumbers exercises [numberToRat] across the
+// out-of-band JSON-number shapes that the validation runtime might see
+// when the upstream JSON parser is configured with [json.Number] (so
+// number text reaches us verbatim without float64 round-tripping).
+//
+// The test pins the package's documented "best-effort, never crash"
+// contract: arbitrary-precision big.Rat handles huge magnitudes; NaN /
+// Inf / leading-zero strings are accepted as numeric and converted via
+// the available code paths; truly empty / sign-only text fails cleanly.
+func TestNumberToRat_PathologicalNumbers(t *testing.T) {
+	cases := []struct {
+		name   string
+		in     any
+		wantOK bool
+	}{
+		// Arbitrary-precision big.Rat handles this without overflow.
+		{"huge_positive_exponent", json.Number("1e1000"), true},
+		{"huge_negative_exponent", json.Number("-1e1000"), true},
+		// NaN / Inf as json.Number — SetString fails, Int64 fails, Float64
+		// succeeds with NaN/Inf which SetFloat64 silently zeroes. The
+		// function reports "ok" with a 0/1 rat. We pin this so a future
+		// fix can deliberately change the contract.
+		{"json_number_nan", json.Number("NaN"), true},
+		{"json_number_inf", json.Number("Inf"), true},
+		// Leading-zero integer strings parse fine for big.Rat.
+		{"leading_zeros", json.Number("007"), true},
+		// Above MaxInt64 and outside float64's integer-precision range.
+		{"big_integer_above_int64", json.Number("100000000000000000000"), true},
+		// Empty / sign-only strings are not numeric.
+		{"empty_string", json.Number(""), false},
+		{"bare_minus", json.Number("-"), false},
+		// Native Go numeric kinds the function explicitly handles.
+		{"native_float64", float64(3.14), true},
+		{"native_float64_zero", float64(0), true},
+		{"native_float64_nan", math.NaN(), false},
+		{"native_float64_pos_inf", math.Inf(1), false},
+		{"native_float64_neg_inf", math.Inf(-1), false},
+		{"native_int", int(42), true},
+		{"native_int_negative", int(-42), true},
+		{"native_int64", int64(1 << 40), true},
+		{"native_int32", int32(-1234), true},
+		// Unsupported types report (nil, false) without panicking.
+		{"unsupported_string", "not a number", false},
+		{"unsupported_bool", true, false},
+		{"unsupported_nil", nil, false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			r, ok := numberToRat(tc.in)
+			if ok != tc.wantOK {
+				t.Fatalf("numberToRat(%v) ok = %v; want %v", tc.in, ok, tc.wantOK)
+			}
+			if ok && r == nil {
+				t.Errorf("numberToRat(%v) returned nil rat with ok=true", tc.in)
+			}
+		})
 	}
 }
 

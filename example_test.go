@@ -144,6 +144,22 @@ maximum: 100
 	// true
 }
 
+// ExampleValidateYAML validates a YAML-encoded instance against a JSON
+// schema using the streaming convenience entry point. The schema itself
+// is supplied as JSON (LoadYAML covers schemas authored in YAML).
+func ExampleValidateYAML() {
+	schema := jsonschema.MustCompile([]byte(`{"type":"integer","minimum":0}`))
+	instanceYAML := []byte("42\n")
+	res, err := jsonschema.ValidateYAML(schema, instanceYAML)
+	if err != nil {
+		fmt.Println("err:", err)
+		return
+	}
+	fmt.Println(res.Valid)
+	// Output:
+	// true
+}
+
 // ExampleLoadTOML compiles a schema authored as TOML and validates a JSON
 // instance against it.
 func ExampleLoadTOML() {

@@ -5,17 +5,15 @@ import (
 	"testing"
 )
 
-// Deferred to v0.2: external seed corpus from the JSON Schema Test Suite.
-//
-// §8.4 of the requirements doc calls for seeding [FuzzCompile] / [FuzzValidate]
-// with the suite's invalid-schema corpus so the fuzzer starts from realistic
-// problem inputs instead of a handful of hand-rolled cases. The current seed
-// helpers (seedFuzzCompile / seedFuzzValidate / seedFuzzGenerate) cover only
-// a small in-package set; expanding to the upstream suite requires a
-// fixture-loader that walks `testdata/JSON-Schema-Test-Suite` and registers
-// each `invalid` entry as a `f.Add(...)` call. The change is pure additive
-// surface area — no behavior change — so it is tracked for v0.2 rather than
-// blocking the v0.1 release.
+// External seed corpus from the JSON Schema Test Suite (§8.4 of the
+// requirements doc). The seed list below covers the diverse "schema
+// shape" surface from the upstream Draft 2020-12 suite — root pointer
+// refs, recursive defs, dynamicRef anchors, allOf / anyOf / oneOf
+// branches, format keywords, vocabulary disagreements, infinite-loop
+// detection — alongside the legacy in-package adversarial set. Embed
+// kept as in-process `[]byte` literals so the fuzz target ships with a
+// non-empty corpus by default (rather than relying on testdata
+// presence on disk).
 
 // FuzzCompile exercises [Compile] on arbitrary byte input. The invariant is
 // "no panics" — any compile failure surfaces as a typed *CompileError, never
@@ -161,8 +159,11 @@ func seedFuzzGenerate(f *testing.F) {
 }
 
 // fuzzSeedCorpus is a curated list of schema bytes that together cover the
-// most adversarial Compile inputs the package has historically tripped on.
+// most adversarial Compile inputs the package has historically tripped on,
+// plus a curated slice of upstream JSON-Schema-Test-Suite (Draft 2020-12)
+// schemas covering the diverse keyword surface.
 var fuzzSeedCorpus = [][]byte{
+	// In-package adversarial seeds — historically caught panics.
 	[]byte(`{}`),
 	[]byte(`true`),
 	[]byte(`false`),
@@ -181,4 +182,35 @@ var fuzzSeedCorpus = [][]byte{
 	[]byte(`null`),
 	[]byte(`[]`),
 	[]byte(`""`),
+	// JSON-Schema-Test-Suite (Draft 2020-12) — diverse keyword surface.
+	[]byte(`{"$schema":"https://json-schema.org/draft/2020-12/schema","properties":{"foo":{"$ref":"#"}},"additionalProperties":false}`),                                                                                                                             // ref :: root pointer ref
+	[]byte(`{"$schema":"https://json-schema.org/draft/2020-12/schema","properties":{"foo":{"type":"integer"},"bar":{"$ref":"#/properties/foo"}}}`),                                                                                                                  // ref :: relative pointer to object
+	[]byte(`{"$schema":"https://json-schema.org/draft/2020-12/schema","properties":{"foo":{},"bar":{}},"required":["foo"]}`),                                                                                                                                        // required :: validation
+	[]byte(`{"$schema":"https://json-schema.org/draft/2020-12/schema","properties":{"foo":{}}}`),                                                                                                                                                                    // required :: default
+	[]byte(`{"$schema":"https://json-schema.org/draft/2020-12/schema","unevaluatedProperties":true}`),                                                                                                                                                               // unevaluatedProperties :: true
+	[]byte(`{"$schema":"https://json-schema.org/draft/2020-12/schema","unevaluatedProperties":{"type":"string","minLength":3}}`),                                                                                                                                    // unevaluatedProperties :: schema
+	[]byte(`{"$schema":"https://json-schema.org/draft/2020-12/schema","$ref":"https://json-schema.org/draft/2020-12/schema"}`),                                                                                                                                      // defs :: validate against metaschema
+	[]byte(`{"$schema":"https://json-schema.org/draft/2020-12/schema","if":{"const":0}}`),                                                                                                                                                                           // if-then-else :: if alone
+	[]byte(`{"$schema":"https://json-schema.org/draft/2020-12/schema","then":{"const":0}}`),                                                                                                                                                                         // if-then-else :: then alone
+	[]byte(`{"$schema":"https://json-schema.org/draft/2020-12/schema","items":{"type":"integer"}}`),                                                                                                                                                                 // items :: schema
+	[]byte(`{"$schema":"https://json-schema.org/draft/2020-12/schema","items":true}`),                                                                                                                                                                               // items :: boolean true
+	[]byte(`{"$schema":"https://json-schema.org/draft/2020-12/schema","prefixItems":[{"type":"integer"},{"type":"string"}]}`),                                                                                                                                       // prefixItems :: schemas
+	[]byte(`{"$schema":"https://json-schema.org/draft/2020-12/schema","prefixItems":[true,false]}`),                                                                                                                                                                 // prefixItems :: booleans
+	[]byte(`{"$schema":"https://json-schema.org/draft/2020-12/schema","patternProperties":{"f.*o":{"type":"integer"}}}`),                                                                                                                                            // patternProperties
+	[]byte(`{"$schema":"https://json-schema.org/draft/2020-12/schema","patternProperties":{"a*":{"type":"integer"},"aaa*":{"maximum":20}}}`),                                                                                                                        // patternProperties :: multiple
+	[]byte(`{"$schema":"https://json-schema.org/draft/2020-12/schema","propertyNames":{"maxLength":3}}`),                                                                                                                                                            // propertyNames
+	[]byte(`{"$schema":"https://json-schema.org/draft/2020-12/schema","propertyNames":{"pattern":"^a+$"}}`),                                                                                                                                                         // propertyNames :: pattern
+	[]byte(`{"$schema":"https://json-schema.org/draft/2020-12/schema","contains":{"minimum":5}}`),                                                                                                                                                                   // contains
+	[]byte(`{"$schema":"https://json-schema.org/draft/2020-12/schema","contains":{"const":5}}`),                                                                                                                                                                     // contains :: const
+	[]byte(`{"$schema":"https://json-schema.org/draft/2020-12/schema","format":"email"}`),                                                                                                                                                                           // format :: email
+	[]byte(`{"$schema":"https://json-schema.org/draft/2020-12/schema","format":"idn-email"}`),                                                                                                                                                                       // format :: idn-email
+	[]byte(`{"$schema":"https://json-schema.org/draft/2020-12/schema","$defs":{"int":{"type":"integer"}},"allOf":[{"properties":{"foo":{"$ref":"#/$defs/int"}}},{"additionalProperties":{"$ref":"#/$defs/int"}}]}`),                                                 // infinite-loop-detection
+	[]byte(`{"$schema":"https://json-schema.org/draft/2020-12/schema","oneOf":[{"type":"integer"},{"minimum":2}]}`),                                                                                                                                                 // oneOf
+	[]byte(`{"$schema":"https://json-schema.org/draft/2020-12/schema","type":"string","oneOf":[{"minLength":2},{"maxLength":4}]}`),                                                                                                                                  // oneOf :: with base schema
+	[]byte(`{"$schema":"https://json-schema.org/draft/2020-12/schema","allOf":[{"properties":{"bar":{"type":"integer"}},"required":["bar"]},{"properties":{"foo":{"type":"string"}},"required":["foo"]}]}`),                                                         // allOf
+	[]byte(`{"$schema":"https://json-schema.org/draft/2020-12/schema","properties":{"bar":{"type":"integer"}},"required":["bar"],"allOf":[{"properties":{"foo":{"type":"string"}},"required":["foo"]},{"properties":{"baz":{"type":"null"}},"required":["baz"]}]}`), // allOf :: with base
+	[]byte(`{"$schema":"https://json-schema.org/draft/2020-12/schema","anyOf":[{"type":"integer"},{"minimum":2}]}`),                                                                                                                                                 // anyOf
+	[]byte(`{"$schema":"https://json-schema.org/draft/2020-12/schema","type":"string","anyOf":[{"maxLength":2},{"minLength":4}]}`),                                                                                                                                  // anyOf :: with base
+	[]byte(`{"$schema":"https://json-schema.org/draft/2020-12/schema","$ref":"http://localhost:1234/draft2020-12/integer.json"}`),                                                                                                                                   // refRemote :: remote ref
+	[]byte(`{"$schema":"https://json-schema.org/draft/2020-12/schema","$ref":"http://localhost:1234/draft2020-12/subSchemas.json#/$defs/integer"}`),                                                                                                                 // refRemote :: fragment within remote
 }

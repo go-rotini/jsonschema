@@ -116,6 +116,170 @@ func LoadTOML(schemaTOML []byte, opts ...CompileOption) (*Schema, error) {
 	return s, nil
 }
 
+// LoadJSONCURL fetches a JSONC schema document from uri using the
+// configured loader and compiles it. Mirrors [CompileURL] for the JSONC
+// adapter.
+func LoadJSONCURL(uri string, opts ...CompileOption) (*Schema, error) {
+	data, err := loadURLBytes(uri, opts)
+	if err != nil {
+		return nil, fmt.Errorf("jsonschema: load jsonc url: %w", err)
+	}
+	return LoadJSONC(data, opts...)
+}
+
+// LoadYAMLURL fetches a YAML schema document from uri using the configured
+// loader and compiles it. Mirrors [CompileURL] for the YAML adapter.
+func LoadYAMLURL(uri string, opts ...CompileOption) (*Schema, error) {
+	data, err := loadURLBytes(uri, opts)
+	if err != nil {
+		return nil, fmt.Errorf("jsonschema: load yaml url: %w", err)
+	}
+	return LoadYAML(data, opts...)
+}
+
+// LoadTOMLURL fetches a TOML schema document from uri using the configured
+// loader and compiles it. Mirrors [CompileURL] for the TOML adapter.
+func LoadTOMLURL(uri string, opts ...CompileOption) (*Schema, error) {
+	data, err := loadURLBytes(uri, opts)
+	if err != nil {
+		return nil, fmt.Errorf("jsonschema: load toml url: %w", err)
+	}
+	return LoadTOML(data, opts...)
+}
+
+// LoadJSONCValue compiles an already-decoded Go value as if it had been
+// produced by the JSONC adapter. Provided for symmetry with [CompileValue]
+// when the caller has run their own JSONC decoder.
+func LoadJSONCValue(v any, opts ...CompileOption) (*Schema, error) {
+	s, err := CompileValue(v, opts...)
+	if err != nil {
+		return nil, fmt.Errorf("jsonschema: compile jsonc value: %w", err)
+	}
+	return s, nil
+}
+
+// LoadYAMLValue compiles an already-decoded Go value as if it had been
+// produced by the YAML adapter. Provided for symmetry with [CompileValue]
+// when the caller has run their own YAML decoder.
+func LoadYAMLValue(v any, opts ...CompileOption) (*Schema, error) {
+	s, err := CompileValue(v, opts...)
+	if err != nil {
+		return nil, fmt.Errorf("jsonschema: compile yaml value: %w", err)
+	}
+	return s, nil
+}
+
+// LoadTOMLValue compiles an already-decoded Go value as if it had been
+// produced by the TOML adapter. Provided for symmetry with [CompileValue]
+// when the caller has run their own TOML decoder.
+func LoadTOMLValue(v any, opts ...CompileOption) (*Schema, error) {
+	s, err := CompileValue(v, opts...)
+	if err != nil {
+		return nil, fmt.Errorf("jsonschema: compile toml value: %w", err)
+	}
+	return s, nil
+}
+
+// MustLoadJSONC is the panic-on-error variant of [LoadJSONC].
+func MustLoadJSONC(schemaJSONC []byte, opts ...CompileOption) *Schema {
+	s, err := LoadJSONC(schemaJSONC, opts...)
+	if err != nil {
+		panic(err)
+	}
+	return s
+}
+
+// MustLoadYAML is the panic-on-error variant of [LoadYAML].
+func MustLoadYAML(schemaYAML []byte, opts ...CompileOption) *Schema {
+	s, err := LoadYAML(schemaYAML, opts...)
+	if err != nil {
+		panic(err)
+	}
+	return s
+}
+
+// MustLoadTOML is the panic-on-error variant of [LoadTOML].
+func MustLoadTOML(schemaTOML []byte, opts ...CompileOption) *Schema {
+	s, err := LoadTOML(schemaTOML, opts...)
+	if err != nil {
+		panic(err)
+	}
+	return s
+}
+
+// MustLoadJSONCURL is the panic-on-error variant of [LoadJSONCURL].
+func MustLoadJSONCURL(uri string, opts ...CompileOption) *Schema {
+	s, err := LoadJSONCURL(uri, opts...)
+	if err != nil {
+		panic(err)
+	}
+	return s
+}
+
+// MustLoadYAMLURL is the panic-on-error variant of [LoadYAMLURL].
+func MustLoadYAMLURL(uri string, opts ...CompileOption) *Schema {
+	s, err := LoadYAMLURL(uri, opts...)
+	if err != nil {
+		panic(err)
+	}
+	return s
+}
+
+// MustLoadTOMLURL is the panic-on-error variant of [LoadTOMLURL].
+func MustLoadTOMLURL(uri string, opts ...CompileOption) *Schema {
+	s, err := LoadTOMLURL(uri, opts...)
+	if err != nil {
+		panic(err)
+	}
+	return s
+}
+
+// MustLoadJSONCValue is the panic-on-error variant of [LoadJSONCValue].
+func MustLoadJSONCValue(v any, opts ...CompileOption) *Schema {
+	s, err := LoadJSONCValue(v, opts...)
+	if err != nil {
+		panic(err)
+	}
+	return s
+}
+
+// MustLoadYAMLValue is the panic-on-error variant of [LoadYAMLValue].
+func MustLoadYAMLValue(v any, opts ...CompileOption) *Schema {
+	s, err := LoadYAMLValue(v, opts...)
+	if err != nil {
+		panic(err)
+	}
+	return s
+}
+
+// MustLoadTOMLValue is the panic-on-error variant of [LoadTOMLValue].
+func MustLoadTOMLValue(v any, opts ...CompileOption) *Schema {
+	s, err := LoadTOMLValue(v, opts...)
+	if err != nil {
+		panic(err)
+	}
+	return s
+}
+
+// loadURLBytes fetches uri's raw bytes using the loader configured by opts
+// (or the package default). The bytes are returned to the caller for
+// format-specific decoding.
+func loadURLBytes(uri string, opts []CompileOption) ([]byte, error) {
+	co := defaultCompileOptions()
+	for _, o := range opts {
+		o(co)
+	}
+	loader := co.loader
+	if loader == nil {
+		loader = DefaultLoader()
+	}
+	data, err := loader.Load(uri)
+	if err != nil {
+		return nil, &LoaderError{URI: uri, Cause: err}
+	}
+	return data, nil
+}
+
 // ValidateJSONC decodes data as JSONC and validates the resulting Go value
 // against s. Number-precision-sensitive keywords see the original numeric
 // text via [json.Number].

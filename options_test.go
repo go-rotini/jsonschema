@@ -337,6 +337,84 @@ func TestFormatErrorReachableViaValidationCause(t *testing.T) {
 // TestValidationErrorIsNotOverbroad confirms the post-fix behavior of
 // ValidationError.Is: only the zero-value sentinel ErrValidation matches;
 // a non-zero exemplar must not match an unrelated keyword failure.
+// TestWithMaxKeyCount confirms the per-object key cap surfaces an error
+// keyed "$maxKeyCount" once the cap is exceeded, and that an instance
+// at the cap boundary still validates cleanly.
+func TestWithMaxKeyCount(t *testing.T) {
+	s := MustCompile([]byte(`{"type":"object","additionalProperties":true}`))
+
+	// At cap (3 keys) → valid.
+	res, err := s.Validate([]byte(`{"a":1,"b":2,"c":3}`), WithMaxKeyCount(3))
+	if err != nil {
+		t.Fatalf("Validate at cap: %v", err)
+	}
+	if !res.Valid {
+		t.Fatalf("expected valid at cap; got errors=%v", res.Errors)
+	}
+
+	// Over cap (4 keys) → fails with $maxKeyCount.
+	res, err = s.Validate([]byte(`{"a":1,"b":2,"c":3,"d":4}`), WithMaxKeyCount(3))
+	if err != nil {
+		t.Fatalf("Validate over cap: %v", err)
+	}
+	if res.Valid {
+		t.Fatal("expected invalid when over cap")
+	}
+	found := false
+	for _, ve := range res.Errors {
+		if ve.Keyword == "$maxKeyCount" {
+			found = true
+			if !errors.Is(&ve, ErrMaxKeyCount) {
+				t.Errorf("error does not match ErrMaxKeyCount: %v", ve)
+			}
+			break
+		}
+	}
+	if !found {
+		t.Errorf("expected a $maxKeyCount error; got: %v", res.Errors)
+	}
+}
+
+// TestWithWarningSink confirms unknown-format warnings under
+// UnknownFormatWarn are written to the configured sink, deduplicated
+// within a single Validate call.
+func TestWithWarningSink(t *testing.T) {
+	src := []byte(`{
+		"type":"object",
+		"properties":{
+			"a":{"type":"string","format":"made-up"},
+			"b":{"type":"string","format":"made-up"},
+			"c":{"type":"string","format":"also-bogus"}
+		}
+	}`)
+	s := MustCompile(src)
+	var buf bytes.Buffer
+	res, err := s.Validate(
+		[]byte(`{"a":"x","b":"y","c":"z"}`),
+		WithFormatAssertion(true),
+		WithUnknownFormat(UnknownFormatWarn),
+		WithWarningSink(&buf),
+	)
+	if err != nil {
+		t.Fatalf("Validate: %v", err)
+	}
+	if !res.Valid {
+		t.Errorf("expected valid (unknown formats are warn-only); got errors=%v", res.Errors)
+	}
+	out := buf.String()
+	if !strings.Contains(out, "made-up") {
+		t.Errorf("expected warning for 'made-up' format; got: %q", out)
+	}
+	if !strings.Contains(out, "also-bogus") {
+		t.Errorf("expected warning for 'also-bogus' format; got: %q", out)
+	}
+	// Dedup: 'made-up' should appear only once even though two properties
+	// reference it.
+	if got := strings.Count(out, "made-up"); got != 1 {
+		t.Errorf("'made-up' warning emitted %d times, want 1; got: %q", got, out)
+	}
+}
+
 func TestValidationErrorIsNotOverbroad(t *testing.T) {
 	maxLengthErr := &ValidationError{Keyword: "maxLength", Message: "too long"}
 	// errors.Is against ErrValidation: must succeed.

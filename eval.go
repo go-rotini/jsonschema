@@ -1,6 +1,7 @@
 package jsonschema
 
 import (
+	"fmt"
 	"sort"
 	"strings"
 	"sync"
@@ -345,6 +346,13 @@ type runCtx struct {
 	// instance location. Lazily allocated.
 	contentDecoded map[string][]byte
 	contentParsed  map[string]any
+	// keyCountFired records instance locations that have already surfaced
+	// a $maxKeyCount error so sibling object applicators don't emit
+	// duplicate failures for the same overlong instance.
+	keyCountFired map[string]bool
+	// formatWarned records unknown-format names already written to
+	// runOptions.warningSink so a single Validate call dedupes warnings.
+	formatWarned map[string]bool
 }
 
 // annotationEntry is the internal record of one annotation. unevaluated*
@@ -473,6 +481,49 @@ func (ctx *runCtx) addCausesError(keywordLoc, keyword, msg string, causes []Vali
 	if ctx.opts.stopOnFirstError {
 		ctx.stopFired = true
 	}
+}
+
+// checkMaxKeyCount enforces the [WithMaxKeyCount] cap. When obj has more
+// keys than the configured cap, an error is appended at the current
+// instance location and the function returns false to instruct the calling
+// applicator to skip its iteration. Returns true (caller should proceed)
+// when the cap is unset or not exceeded. The error is emitted at most
+// once per instance location so sibling applicators don't pile on.
+func (ctx *runCtx) checkMaxKeyCount(obj map[string]any, keywordLoc string) bool {
+	if ctx.opts.maxKeyCount <= 0 {
+		return true
+	}
+	if len(obj) <= ctx.opts.maxKeyCount {
+		return true
+	}
+	loc := ctx.instanceLocation()
+	if ctx.keyCountFired == nil {
+		ctx.keyCountFired = map[string]bool{}
+	}
+	if ctx.keyCountFired[loc] {
+		return false
+	}
+	ctx.keyCountFired[loc] = true
+	ctx.addErrorWithCause(keywordLoc, "$maxKeyCount", "",
+		ErrMaxKeyCount.Error(), ErrMaxKeyCount)
+	return false
+}
+
+// emitFormatWarning writes a single deduplicated unknown-format warning to
+// the configured [WithWarningSink]. No-op when the sink is unset.
+func (ctx *runCtx) emitFormatWarning(format string) {
+	if ctx.opts == nil || ctx.opts.warningSink == nil {
+		return
+	}
+	if ctx.formatWarned == nil {
+		ctx.formatWarned = map[string]bool{}
+	}
+	if ctx.formatWarned[format] {
+		return
+	}
+	ctx.formatWarned[format] = true
+	_, _ = fmt.Fprintf(ctx.opts.warningSink,
+		"jsonschema: unknown format %q\n", format)
 }
 
 // shouldStop reports whether validation should stop early.

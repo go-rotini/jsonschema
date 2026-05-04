@@ -404,6 +404,97 @@ func TestRefPlainNameAnchorEndToEnd(t *testing.T) {
 	}
 }
 
+// TestRefRecursiveDraft201909 covers the Draft 2019-09 $recursiveRef /
+// $recursiveAnchor pair. With $recursiveAnchor:true at the root, a
+// nested $recursiveRef:"#" must resolve back to the outermost dynamic
+// scope so a recursive tree validates end-to-end. The negative case
+// pins the type-mismatch surface at the deepest descent.
+func TestRefRecursiveDraft201909_OutermostResolution(t *testing.T) {
+	schema, err := Compile([]byte(`{
+		"$schema": "https://json-schema.org/draft/2019-09/schema",
+		"$id": "https://example.com/tree-2019",
+		"$recursiveAnchor": true,
+		"type": "object",
+		"properties": {
+			"value": {"type": "string"},
+			"children": {
+				"type": "array",
+				"items": {"$recursiveRef": "#"}
+			}
+		}
+	}`))
+	if err != nil {
+		t.Fatalf("compile: %v", err)
+	}
+	tree := []byte(`{"value":"root","children":[{"value":"a","children":[]},{"value":"b","children":[{"value":"b1","children":[]}]}]}`)
+	res, err := schema.Validate(tree)
+	if err != nil {
+		t.Fatalf("validate: %v", err)
+	}
+	if !res.Valid {
+		t.Fatalf("expected valid; got errors: %+v", res.Errors)
+	}
+	bad := []byte(`{"value":"root","children":[{"value":42,"children":[]}]}`)
+	res, err = schema.Validate(bad)
+	if err != nil {
+		t.Fatalf("validate bad: %v", err)
+	}
+	if res.Valid {
+		t.Fatalf("expected invalid (children[0].value should be string)")
+	}
+	// The error must surface at the descended location with the right
+	// keyword, confirming the recursive resolution actually reached the
+	// inner node rather than short-circuiting.
+	var hit bool
+	for _, e := range res.Errors {
+		if e.Keyword == "type" && e.InstanceLocation == "/children/0/value" {
+			hit = true
+			break
+		}
+	}
+	if !hit {
+		t.Errorf("expected type error at /children/0/value; got %+v", res.Errors)
+	}
+}
+
+// TestRefRecursiveDraft201909_FallbackWithoutAnchor verifies the
+// fallback semantics: when no $recursiveAnchor:true is in scope,
+// $recursiveRef behaves like a static $ref. The same tree schema
+// without the anchor still validates because "#" still resolves
+// statically to the root resource.
+func TestRefRecursiveDraft201909_FallbackWithoutAnchor(t *testing.T) {
+	schema, err := Compile([]byte(`{
+		"$schema": "https://json-schema.org/draft/2019-09/schema",
+		"$id": "https://example.com/tree-no-anchor",
+		"type": "object",
+		"properties": {
+			"value": {"type": "string"},
+			"children": {
+				"type": "array",
+				"items": {"$recursiveRef": "#"}
+			}
+		}
+	}`))
+	if err != nil {
+		t.Fatalf("compile: %v", err)
+	}
+	res, err := schema.Validate([]byte(`{"value":"root","children":[{"value":"x","children":[]}]}`))
+	if err != nil {
+		t.Fatalf("validate: %v", err)
+	}
+	if !res.Valid {
+		t.Fatalf("expected valid; got errors: %+v", res.Errors)
+	}
+	// A type mismatch at a descended node still surfaces.
+	res, err = schema.Validate([]byte(`{"value":"root","children":[{"value":42,"children":[]}]}`))
+	if err != nil {
+		t.Fatalf("validate bad: %v", err)
+	}
+	if res.Valid {
+		t.Fatalf("expected invalid for non-string nested value")
+	}
+}
+
 // TestRefRecursiveDynamic exercises a $dynamicRef that recurses through
 // itself across nested instance values. The canonical use case is a tree
 // schema where each node carries a list of children referencing the same

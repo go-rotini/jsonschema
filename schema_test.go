@@ -93,6 +93,65 @@ func TestSchemaStringMinimal(t *testing.T) {
 	}
 }
 
+// TestSchemaVocabularies covers the new public Vocabularies() accessor:
+// nil schema returns nil; a draft 2020-12 schema returns the standard set;
+// declaring the OAS dialect adds VocabOAS.
+func TestSchemaVocabularies(t *testing.T) {
+	var nilS *Schema
+	if got := nilS.Vocabularies(); got != nil {
+		t.Errorf("nil Schema.Vocabularies() = %v, want nil", got)
+	}
+	s := MustCompile([]byte(`{"$schema":"https://json-schema.org/draft/2020-12/schema","type":"object"}`))
+	got := s.Vocabularies()
+	want := []string{VocabCore, VocabApplicator, VocabValidation, VocabFormatAnnot}
+	for _, w := range want {
+		if !containsString(got, w) {
+			t.Errorf("Vocabularies missing %q; got=%v", w, got)
+		}
+	}
+	// VocabOAS only appears for OAS-dialect schemas.
+	if containsString(got, VocabOAS) {
+		t.Errorf("Vocabularies should not include VocabOAS for plain 2020-12; got=%v", got)
+	}
+
+	oasS := MustCompile([]byte(`{"$schema":"https://spec.openapis.org/oas/3.1/dialect/base","type":"object"}`))
+	if !containsString(oasS.Vocabularies(), VocabOAS) {
+		t.Errorf("OAS-dialect Vocabularies missing VocabOAS; got=%v", oasS.Vocabularies())
+	}
+}
+
+// TestSchemaBindings confirms the new public Bindings() accessor exposes
+// keyword bindings extracted at compile time, with copies that callers may
+// mutate freely.
+func TestSchemaBindings(t *testing.T) {
+	var nilS *Schema
+	if got := nilS.Bindings(); got != nil {
+		t.Errorf("nil Schema.Bindings() = %v, want nil", got)
+	}
+	s := MustCompile([]byte(`{"type":"object","properties":{"name":{"type":"string"}}}`))
+	bindings := s.Bindings()
+	if len(bindings) == 0 {
+		t.Fatal("Bindings() empty; expected at least 'type' and 'properties'")
+	}
+	// Second call returns a fresh slice — mutating it shouldn't affect the
+	// schema's internal state.
+	first := s.Bindings()
+	first[0].Name = "MUTATED"
+	second := s.Bindings()
+	if second[0].Name == "MUTATED" {
+		t.Error("Bindings() returned shared storage; expected fresh slice")
+	}
+}
+
+func containsString(haystack []string, needle string) bool {
+	for _, s := range haystack {
+		if s == needle {
+			return true
+		}
+	}
+	return false
+}
+
 func TestSchemaValidateNilSchema(t *testing.T) {
 	var s *Schema
 	if _, err := s.Validate([]byte(`null`)); !errors.Is(err, ErrSchemaNotCompiled) {

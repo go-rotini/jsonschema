@@ -48,8 +48,10 @@ func (e *formatEval) eval(ctx *runCtx, instance any) {
 	if !ok {
 		switch ctx.opts.unknownFormatPolicy {
 		case UnknownFormatWarn:
-			// Annotation already emitted; warn-mode is otherwise silent
-			// so the package never writes to stderr.
+			// Annotation already emitted; emit a one-line diagnostic to
+			// the configured warning sink (if any), deduplicated within
+			// this Validate call.
+			ctx.emitFormatWarning(e.format)
 		case UnknownFormatError:
 			ctx.addErrorWithCause(e.loc, "format", "format",
 				"unknown format: "+e.format,
