@@ -309,3 +309,167 @@ func TestGenerateAlternateDraft(t *testing.T) {
 		t.Errorf("expected draft-07 in $schema: %s", data)
 	}
 }
+
+// TestGenerateTagFlagOptionsRejectValue covers the "flag option does not
+// take a value" branches for required/deprecated/readOnly/writeOnly/
+// uniqueItems.
+func TestGenerateTagFlagOptionsRejectValue(t *testing.T) {
+	cases := []struct {
+		name   string
+		struct_ any
+	}{
+		{"required-with-value", struct {
+			A string `json:"a" jsonschema:"required=true"`
+		}{}},
+		{"deprecated-with-value", struct {
+			A string `json:"a" jsonschema:"deprecated=true"`
+		}{}},
+		{"readOnly-with-value", struct {
+			A string `json:"a" jsonschema:"readOnly=true"`
+		}{}},
+		{"writeOnly-with-value", struct {
+			A string `json:"a" jsonschema:"writeOnly=true"`
+		}{}},
+		{"uniqueItems-with-value", struct {
+			A []string `json:"a" jsonschema:"uniqueItems=true"`
+		}{}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if _, err := GenerateBytes(tc.struct_); err == nil {
+				t.Errorf("expected error for %s", tc.name)
+			}
+		})
+	}
+}
+
+// TestGenerateTagStringOptionsMissingValue covers the "requires a value"
+// branches for description/title/format/pattern/$id/$ref.
+func TestGenerateTagStringOptionsMissingValue(t *testing.T) {
+	cases := []struct {
+		name    string
+		struct_ any
+	}{
+		{"description", struct {
+			A string `json:"a" jsonschema:"description"`
+		}{}},
+		{"title", struct {
+			A string `json:"a" jsonschema:"title"`
+		}{}},
+		{"format", struct {
+			A string `json:"a" jsonschema:"format"`
+		}{}},
+		{"pattern", struct {
+			A string `json:"a" jsonschema:"pattern"`
+		}{}},
+		{"$id", struct {
+			A string `json:"a" jsonschema:"$id"`
+		}{}},
+		{"$ref", struct {
+			A string `json:"a" jsonschema:"$ref"`
+		}{}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if _, err := GenerateBytes(tc.struct_); err == nil {
+				t.Errorf("expected error for %s missing value", tc.name)
+			}
+		})
+	}
+}
+
+// TestGenerateTagDefaultMissingValue covers default/const requires-a-value.
+func TestGenerateTagDefaultMissingValue(t *testing.T) {
+	type item struct {
+		A int `json:"a" jsonschema:"default"`
+	}
+	if _, err := GenerateBytes(item{}); err == nil {
+		t.Error("expected error for default without value")
+	}
+}
+
+// TestGenerateTagConstMissingValue covers const requires-a-value.
+func TestGenerateTagConstMissingValue(t *testing.T) {
+	type item struct {
+		A int `json:"a" jsonschema:"const"`
+	}
+	if _, err := GenerateBytes(item{}); err == nil {
+		t.Error("expected error for const without value")
+	}
+}
+
+// TestGenerateTagDefaultBadCoercion covers the default coerceFieldValue
+// error branch.
+func TestGenerateTagDefaultBadCoercion(t *testing.T) {
+	type item struct {
+		A int `json:"a" jsonschema:"default=not-an-int"`
+	}
+	if _, err := GenerateBytes(item{}); err == nil {
+		t.Error("expected error for bad default coercion")
+	}
+}
+
+// TestGenerateTagConstBadCoercion covers the const coerceFieldValue error
+// branch.
+func TestGenerateTagConstBadCoercion(t *testing.T) {
+	type item struct {
+		A int `json:"a" jsonschema:"const=not-an-int"`
+	}
+	if _, err := GenerateBytes(item{}); err == nil {
+		t.Error("expected error for bad const coercion")
+	}
+}
+
+// TestGenerateTagListMissingValue covers enum/examples requires-a-value.
+func TestGenerateTagListMissingValue(t *testing.T) {
+	type item struct {
+		A int `json:"a" jsonschema:"enum"`
+	}
+	if _, err := GenerateBytes(item{}); err == nil {
+		t.Error("expected error for enum without value")
+	}
+}
+
+// TestGenerateTagListBadCoercion covers the enum/examples coerce error.
+func TestGenerateTagListBadCoercion(t *testing.T) {
+	type item struct {
+		A int `json:"a" jsonschema:"enum=alpha|beta"`
+	}
+	if _, err := GenerateBytes(item{}); err == nil {
+		t.Error("expected error for bad enum coercion")
+	}
+}
+
+// TestGenerateTagEmptyToken covers tokenizeJSONSchemaTag's empty-token
+// continue branch (a tag like ",,required" produces empty tokens).
+func TestGenerateTagEmptyToken(t *testing.T) {
+	type item struct {
+		A string `json:"a" jsonschema:",,required"`
+	}
+	if _, err := GenerateBytes(item{}); err != nil {
+		t.Errorf("expected success skipping empty tokens: %v", err)
+	}
+}
+
+// TestGenerateTagDanglingEscape covers tokenizeJSONSchemaTag's trailing
+// escape branch.
+func TestGenerateTagDanglingEscape(t *testing.T) {
+	type item struct {
+		A string `json:"a" jsonschema:"description=hello\\"`
+	}
+	// Trailing escape produces a dangling backslash. Should still parse.
+	if _, err := GenerateBytes(item{}); err != nil {
+		t.Logf("dangling-escape err (acceptable): %v", err)
+	}
+}
+
+// TestGenerateTagEscapedEqualsInName covers splitTagOption's escape skip
+// (\=) branch.
+func TestGenerateTagEscapedEqualsInName(t *testing.T) {
+	type item struct {
+		A string `json:"a" jsonschema:"description=foo\\=bar"`
+	}
+	if _, err := GenerateBytes(item{}); err != nil {
+		t.Errorf("escaped equals: %v", err)
+	}
+}

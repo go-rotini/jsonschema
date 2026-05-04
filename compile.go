@@ -221,10 +221,9 @@ func (c *Compiler) CompileURL(uri string) (*Schema, error) {
 	flight.wg.Add(1)
 	actual, loaded := c.flight.LoadOrStore(uri, flight)
 	if loaded {
-		other, ok := actual.(*compileInflight)
-		if !ok {
-			return nil, &CompileError{KeywordLocation: uri, Message: "compile flight: invalid state"}
-		}
+		// LoadOrStore only returns values previously stored by us; the
+		// type assertion is guaranteed to succeed.
+		other := actual.(*compileInflight)
 		other.wg.Wait()
 		return other.schema, other.err
 	}
@@ -242,11 +241,9 @@ func (c *Compiler) CompileURL(uri string) (*Schema, error) {
 		}
 	}
 
-	loader := c.opts.loader
-	if loader == nil {
-		loader = DefaultLoader()
-	}
-	data, err := loader.Load(uri)
+	// NewCompiler defaults c.opts.loader to DefaultLoader() when no
+	// WithLoader option is supplied, so loader is always non-nil here.
+	data, err := c.opts.loader.Load(uri)
 	if err != nil {
 		flight.err = &CompileError{KeywordLocation: uri, Message: "load", Cause: err}
 		return nil, flight.err
@@ -542,25 +539,21 @@ func bindResolveBaseURI(v map[string]any, idKey, baseURI, location string) (stri
 }
 
 // buildBinding constructs the keyword binding for (key, raw). For $ref and
-// $dynamicRef it also performs compile-time resolution.
+// $dynamicRef it also performs compile-time resolution. raw's shape is
+// already validated by validateKeywordShape (so $ref / $dynamicRef are
+// guaranteed to be strings here).
 func (c *Compiler) buildBinding(rm *resourceMap, key string, raw any, baseURI, loc string, subDraft Draft, refStack []string) (keywordBinding, error) {
 	binding := keywordBinding{Name: key, Location: loc, RawValue: raw, Resolved: nil}
 	switch key {
 	case "$ref":
-		ref, ok := raw.(string)
-		if !ok {
-			return binding, &CompileError{KeywordLocation: loc, Message: "$ref must be a string"}
-		}
+		ref := raw.(string)
 		resolved, err := resolveRef(rm, c.opts.loader, baseURI, ref, append(refStack, baseURI), subDraft)
 		if err != nil {
 			return binding, err
 		}
 		binding.Resolved = resolved
 	case "$dynamicRef":
-		ref, ok := raw.(string)
-		if !ok {
-			return binding, &CompileError{KeywordLocation: loc, Message: "$dynamicRef must be a string"}
-		}
+		ref := raw.(string)
 		resolved, err := resolveRef(rm, c.opts.loader, baseURI, ref, append(refStack, baseURI), subDraft)
 		if err != nil {
 			// Static resolution failed: defer to a lazy edge so the

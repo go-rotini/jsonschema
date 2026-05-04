@@ -185,13 +185,6 @@ func (e *ifThenElseEval) eval(ctx *runCtx, instance any) {
 	}
 }
 
-// noopEval handles "then" / "else" key dispatch; their subschemas are
-// folded into the parent ifThenElseEval when "if" is seen.
-type noopEval struct{ name string }
-
-func (n *noopEval) keyword() string       { return n.name }
-func (n *noopEval) eval(_ *runCtx, _ any) {}
-
 //nolint:gochecknoinits // evaluator registry is built at package init by design.
 func init() {
 	registerEvaluator("if", func(b *evalBuilder, f *buildFrame, raw any, loc string) (evaluator, error) {
@@ -224,11 +217,15 @@ func init() {
 		}
 		return ev, nil
 	})
+	// then / else are folded into the parent ifThenElseEval when "if" is
+	// seen. Standalone (no sibling "if") they have no validation effect, so
+	// returning nil here keeps the dispatcher table tidy without a no-op
+	// evaluator type — populateSubschema filters nil evaluators.
 	registerEvaluator("then", func(_ *evalBuilder, _ *buildFrame, _ any, _ string) (evaluator, error) {
-		return &noopEval{name: "then"}, nil
+		return nil, nil //nolint:nilnil // intentional: keyword has no runtime effect when standalone.
 	})
 	registerEvaluator("else", func(_ *evalBuilder, _ *buildFrame, _ any, _ string) (evaluator, error) {
-		return &noopEval{name: "else"}, nil
+		return nil, nil //nolint:nilnil // intentional: keyword has no runtime effect when standalone.
 	})
 }
 
@@ -799,12 +796,13 @@ func init() {
 		}
 		return ev, nil
 	})
-	// maxContains / minContains are folded into containsEval; the
-	// dispatcher needs no-ops to handle them as standalone keys.
+	// maxContains / minContains are folded into containsEval at build
+	// time; standalone they have no runtime effect (and populateSubschema
+	// filters nil evaluators).
 	registerEvaluator("maxContains", func(_ *evalBuilder, _ *buildFrame, _ any, _ string) (evaluator, error) {
-		return &noopEval{name: "maxContains"}, nil
+		return nil, nil //nolint:nilnil // intentional: keyword has no runtime effect when standalone.
 	})
 	registerEvaluator("minContains", func(_ *evalBuilder, _ *buildFrame, _ any, _ string) (evaluator, error) {
-		return &noopEval{name: "minContains"}, nil
+		return nil, nil //nolint:nilnil // intentional: keyword has no runtime effect when standalone.
 	})
 }

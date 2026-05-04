@@ -11,6 +11,192 @@ import (
 	"testing"
 )
 
+// TestCompileDeepNestedBadShape covers the bindAndResolve path where a
+// recursively-resolved child schema returns an error that propagates up
+// through bindAndResolveChild → bindAndResolve.
+func TestCompileDeepNestedBadShape(t *testing.T) {
+	v := map[string]any{
+		"properties": map[string]any{
+			"x": map[string]any{
+				"allOf": "not-an-array",
+			},
+		},
+	}
+	if _, err := CompileValue(v, WithMetaSchemaValidation(false)); err == nil {
+		t.Error("expected error from nested allOf shape failure")
+	}
+}
+
+// TestCompileItemsArrayBadChild covers the items array recursion with a
+// malformed child shape.
+func TestCompileItemsArrayBadChild(t *testing.T) {
+	v := map[string]any{
+		"items": []any{
+			map[string]any{"allOf": "not-an-array"},
+		},
+	}
+	if _, err := CompileValue(v, WithMetaSchemaValidation(false)); err == nil {
+		t.Error("expected error from bad items[0] shape")
+	}
+}
+
+// TestCompileItemsSingleSchemaBadChild covers the items default-case
+// (single schema) recursion with a malformed shape.
+func TestCompileItemsSingleSchemaBadChild(t *testing.T) {
+	v := map[string]any{
+		"items": map[string]any{
+			"allOf": "not-an-array",
+		},
+	}
+	if _, err := CompileValue(v, WithMetaSchemaValidation(false)); err == nil {
+		t.Error("expected error from bad items single-schema shape")
+	}
+}
+
+// TestCompileAllOfBadChild covers the allOf recursion error cascade with
+// a malformed nested shape.
+func TestCompileAllOfBadChild(t *testing.T) {
+	v := map[string]any{
+		"allOf": []any{
+			map[string]any{"allOf": "not-an-array"},
+		},
+	}
+	if _, err := CompileValue(v, WithMetaSchemaValidation(false)); err == nil {
+		t.Error("expected error from bad allOf[0] nested shape")
+	}
+}
+
+// TestCompileDependenciesSchemaBadChild covers the dependencies schema-
+// branch cascade with a malformed nested shape.
+func TestCompileDependenciesSchemaBadChild(t *testing.T) {
+	v := map[string]any{
+		"dependencies": map[string]any{
+			"x": map[string]any{
+				"allOf": "not-an-array",
+			},
+		},
+	}
+	if _, err := CompileValue(v, WithMetaSchemaValidation(false)); err == nil {
+		t.Error("expected error from bad dependencies nested shape")
+	}
+}
+
+// TestCompileDependenciesArrayPasses covers the dependencies array branch
+// (no schema, just required-list).
+func TestCompileDependenciesArrayPasses(t *testing.T) {
+	v := map[string]any{
+		"dependencies": map[string]any{
+			"x": []any{"y"},
+		},
+	}
+	s, err := CompileValue(v, WithMetaSchemaValidation(false))
+	if err != nil {
+		t.Fatalf("CompileValue: %v", err)
+	}
+	if _, err := s.Validate([]byte(`{"x":1,"y":2}`)); err != nil {
+		t.Fatalf("Validate: %v", err)
+	}
+}
+
+// TestCompileDefaultBranchBadChild covers bindAndResolveChild's default
+// branch (e.g. "not", "if", "then", "else") with a malformed nested
+// shape.
+func TestCompileDefaultBranchBadChild(t *testing.T) {
+	v := map[string]any{
+		"not": map[string]any{
+			"allOf": "not-an-array",
+		},
+	}
+	if _, err := CompileValue(v, WithMetaSchemaValidation(false)); err == nil {
+		t.Error("expected error from bad not subschema shape")
+	}
+}
+
+// TestCompileMetaSchemaValidationFailure exercises the meta-schema
+// validation path (validateKeywordShape passes; meta-schema rejects).
+func TestCompileMetaSchemaValidationFailure(t *testing.T) {
+	// type:"weirdtype" passes our shape check (any string is fine) but
+	// the draft-2020-12 meta-schema enforces a closed enum.
+	v := map[string]any{
+		"$schema": "https://json-schema.org/draft/2020-12/schema",
+		"type":    "weirdtype",
+	}
+	if _, err := CompileValue(v, WithMetaSchemaValidation(true)); err == nil {
+		t.Error("expected meta-schema validation error")
+	}
+}
+
+// TestCompileMetaSchemaValidationManyErrors exercises the >5-errors
+// truncation branch by stacking many meta-schema-level violations that
+// pass validateKeywordShape.
+func TestCompileMetaSchemaValidationManyErrors(t *testing.T) {
+	// Each property uses an unknown type — passes shape check, fails
+	// meta-schema. >5 properties to exercise truncation.
+	props := map[string]any{}
+	for i, k := range []string{"a", "b", "c", "d", "e", "f", "g", "h"} {
+		props[k] = map[string]any{"type": "weirdtype" + string(rune('0'+i))}
+	}
+	v := map[string]any{
+		"$schema":    "https://json-schema.org/draft/2020-12/schema",
+		"properties": props,
+	}
+	if _, err := CompileValue(v, WithMetaSchemaValidation(true)); err == nil {
+		t.Error("expected error from many meta-schema failures")
+	}
+}
+
+// TestCompileValueIntPathsForLengthBounds exercises toInt's int/int64
+// and float64-truncated paths via CompileValue with native Go ints.
+func TestCompileValueIntPathsForLengthBounds(t *testing.T) {
+	t.Run("int", func(t *testing.T) {
+		v := map[string]any{"minLength": int(5), "maxLength": int(10)}
+		if _, err := CompileValue(v); err != nil {
+			t.Fatalf("int: %v", err)
+		}
+	})
+	t.Run("int64", func(t *testing.T) {
+		v := map[string]any{"minLength": int64(5), "maxLength": int64(10)}
+		if _, err := CompileValue(v); err != nil {
+			t.Fatalf("int64: %v", err)
+		}
+	})
+	t.Run("float-truncated", func(t *testing.T) {
+		v := map[string]any{"minLength": 5.0, "maxLength": 10.0}
+		if _, err := CompileValue(v); err != nil {
+			t.Fatalf("float64: %v", err)
+		}
+	})
+	t.Run("float-non-truncated", func(t *testing.T) {
+		// 5.5 is not an integer — should fail at validateKeywordShape.
+		v := map[string]any{"minLength": 5.5}
+		if _, err := CompileValue(v); err == nil {
+			t.Error("expected error for non-integer minLength")
+		}
+	})
+}
+
+// TestSortMultiEvaluatorsExercisesKeyword forces 2+ evaluators on the
+// same subschema so the sort.SliceStable callback exercises each
+// evaluator's keyword() method.
+func TestSortMultiEvaluatorsExercisesKeyword(t *testing.T) {
+	src := []byte(`{
+		"type":"string",
+		"const":"hello",
+		"enum":["hello"],
+		"minLength":1,
+		"maxLength":10,
+		"pattern":"^h",
+		"format":"email"
+	}`)
+	s, err := Compile(src)
+	if err != nil {
+		t.Fatalf("Compile: %v", err)
+	}
+	if _, err := s.Validate([]byte(`"hello"`)); err != nil {
+		t.Fatalf("Validate: %v", err)
+	}
+}
+
 // TestCompileValueAllOfWrongShape covers the !ok branch in the allOf
 // builder.
 func TestCompileValueAllOfWrongShape(t *testing.T) {

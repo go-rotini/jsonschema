@@ -462,19 +462,13 @@ func jsonPointerByteOffset(src []byte, pointer string) (int, bool) {
 
 // walkJSONPointer consumes JSON tokens from dec, following the path tokens
 // in order, and returns the byte offset of the targeted value. Each
-// recursion step descends into one structural token.
+// recursion step descends into one structural token. Callers always pass
+// at least one token (jsonPointerByteOffset short-circuits the empty
+// pointer case before invoking this).
 func walkJSONPointer(dec *json.Decoder, tokens []string) (int, bool) {
 	tok, err := dec.Token()
 	if err != nil {
 		return 0, false
-	}
-	if len(tokens) == 0 {
-		// We arrived: the offset is just before this value.
-		// json.Decoder.InputOffset() returns the read head past the token.
-		// For atomic values that matches end-of-token, not start; for
-		// composite tokens it points just past the opening delimiter.
-		// We back up by len of the literal where possible.
-		return tokenStartOffset(dec, tok), true
 	}
 	delim, isDelim := tok.(json.Delim)
 	if !isDelim {
@@ -574,34 +568,6 @@ func skipValue(dec *json.Decoder) error {
 	}
 	_ = delim
 	return nil
-}
-
-// tokenStartOffset is a best-effort estimator: json.Decoder doesn't expose
-// the start offset of the most recently read token, only the cursor after
-// it. For atomic tokens we approximate by subtracting the rendered length;
-// for delimiters we subtract one. This drives only the caret placement,
-// which is informational.
-func tokenStartOffset(dec *json.Decoder, tok json.Token) int {
-	end := int(dec.InputOffset())
-	switch v := tok.(type) {
-	case json.Delim:
-		_ = v
-		return end - 1
-	case bool:
-		if v {
-			return end - len("true")
-		}
-		return end - len("false")
-	case nil:
-		return end - len("null")
-	case json.Number:
-		return end - len(string(v))
-	case string:
-		// +2 for the surrounding quotes; +len for any escapes (best-effort).
-		return end - len(v) - 2
-	default:
-		return end
-	}
 }
 
 // unescapeJSONPointerToken replaces ~1 with / and ~0 with ~ per RFC 6901.

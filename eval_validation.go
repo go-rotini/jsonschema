@@ -326,7 +326,7 @@ func init() {
 		// drafts make it a number. The Draft-4 form is folded into the
 		// maximum evaluator, leaving this entry as a no-op.
 		if _, ok := raw.(bool); ok && f.draft <= Draft4 {
-			return &noopEval{name: "exclusiveMaximum"}, nil
+			return nil, nil //nolint:nilnil // Draft 4 boolean form is folded into maximumEval; no standalone evaluator.
 		}
 		r, ok := numberToRat(raw)
 		if !ok {
@@ -336,7 +336,7 @@ func init() {
 	})
 	registerEvaluator("exclusiveMinimum", func(_ *evalBuilder, f *buildFrame, raw any, loc string) (evaluator, error) {
 		if _, ok := raw.(bool); ok && f.draft <= Draft4 {
-			return &noopEval{name: "exclusiveMinimum"}, nil
+			return nil, nil //nolint:nilnil // Draft 4 boolean form is folded into minimumEval; no standalone evaluator.
 		}
 		r, ok := numberToRat(raw)
 		if !ok {

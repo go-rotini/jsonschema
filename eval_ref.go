@@ -306,13 +306,13 @@ func init() {
 		return ev, nil
 	})
 	// These keywords are resolved at compile time; the dispatcher needs
-	// no-op handlers so they don't trip the unknown-key path.
+	// builder entries so they don't trip the unknown-key path. Returning
+	// nil leaves no runtime evaluator (populateSubschema filters nil).
 	for _, name := range []string{"$dynamicAnchor", "$anchor", "$defs", "$id", "id",
 		"$schema", "$vocabulary", "$comment", "definitions",
 		"$recursiveAnchor"} {
-		n := name
-		registerEvaluator(n, func(_ *evalBuilder, _ *buildFrame, _ any, _ string) (evaluator, error) {
-			return &noopEval{name: n}, nil
+		registerEvaluator(name, func(_ *evalBuilder, _ *buildFrame, _ any, _ string) (evaluator, error) {
+			return nil, nil //nolint:nilnil // intentional: compile-time-only keyword has no runtime evaluator.
 		})
 	}
 }
