@@ -1,6 +1,6 @@
 # go-rotini/jsonschema
 
-A Go [JSON Schema](https://json-schema.org/) package that compiles, validates, and generates schemas, with multi-format input (JSON, JSONC, YAML, TOML) and the same operational ergonomics — typed errors, functional options, source-pointer error formatting — as the rest of the rotini package family.
+A Go [JSON Schema](https://json-schema.org/) package that compiles, validates, and generates schemas, with multi-format input (JSON, JSONC, YAML, TOML).
 
 This package is used as the default JSON Schema support package for [rotini](https://github.com/go-rotini/rotini).
 
@@ -20,7 +20,6 @@ This package is used as the default JSON Schema support package for [rotini](htt
 - Bowtie connector for cross-implementation conformance testing
 - `RenderError` for human-readable validation errors with a source pointer into the instance
 - DoS protection: max ref depth, max recursion depth, max document size, ref-loop detection
-- Sister-package format support (JSONC / YAML / TOML) provided by [go-rotini/jsonc](https://github.com/go-rotini/jsonc), [go-rotini/yaml](https://github.com/go-rotini/yaml), and [go-rotini/toml](https://github.com/go-rotini/toml)
 
 ## Installation
 

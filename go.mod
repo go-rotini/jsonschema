@@ -3,9 +3,9 @@ module github.com/go-rotini/jsonschema
 go 1.26.2
 
 require (
-	github.com/go-rotini/jsonc v1.0.0
-	github.com/go-rotini/toml v1.0.1
-	github.com/go-rotini/yaml v1.0.5
+	github.com/go-rotini/jsonc v1.1.0
+	github.com/go-rotini/toml v1.1.0
+	github.com/go-rotini/yaml v1.1.0
 )
 
 tool (
