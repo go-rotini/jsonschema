@@ -28,7 +28,11 @@ func FuzzCompile(f *testing.F) {
 				t.Fatalf("panic during Compile: %v\ninput: %q", r, data)
 			}
 		}()
-		_, _ = Compile(data)
+		// Embedded-meta-only loader so fuzz inputs containing $ref to
+		// external URLs cannot trigger DNS/TCP timeouts that hang the fuzz
+		// worker (and its minimizer). Unknown URIs return a compile error,
+		// which is the desired shape for a fuzz target.
+		_, _ = Compile(data, WithLoader(embeddedMetaMapLoader()))
 	})
 }
 
@@ -43,7 +47,8 @@ func FuzzValidate(f *testing.F) {
 				t.Fatalf("panic during validate: %v\nschema: %q\ninstance: %q", r, schemaBytes, instanceBytes)
 			}
 		}()
-		schema, err := Compile(schemaBytes)
+		// Embedded-meta-only loader: see FuzzCompile.
+		schema, err := Compile(schemaBytes, WithLoader(embeddedMetaMapLoader()))
 		if err != nil {
 			return
 		}
