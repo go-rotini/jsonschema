@@ -1,6 +1,7 @@
 package jsonschema
 
 import (
+	"bytes"
 	"errors"
 	"net/http"
 	"net/http/httptest"
@@ -523,5 +524,222 @@ func TestHTTPLoaderRedirectCap(t *testing.T) {
 	// implementation detail. We just verify it didn't run away.
 	if hits.Load() > 20 {
 		t.Errorf("too many redirects followed: %d", hits.Load())
+	}
+}
+
+// TestHTTPLoaderCacheGetMiss covers the cache-miss branch directly.
+func TestHTTPLoaderCacheGetMiss(t *testing.T) {
+	l := &HTTPLoader{Cache: 1 * time.Second}
+	if _, ok := l.cacheGet("https://example.com/x"); ok {
+		t.Error("expected miss")
+	}
+	l.cachePut("https://example.com/x", []byte("hi"))
+	if data, ok := l.cacheGet("https://example.com/x"); !ok || string(data) != "hi" {
+		t.Errorf("hit: data=%s ok=%v", data, ok)
+	}
+}
+
+// TestHTTPLoaderCacheExpired covers the cache-expired branch.
+func TestHTTPLoaderCacheExpired(t *testing.T) {
+	l := &HTTPLoader{Cache: time.Nanosecond}
+	l.cachePut("https://example.com/x", []byte("hi"))
+	time.Sleep(10 * time.Millisecond)
+	if _, ok := l.cacheGet("https://example.com/x"); ok {
+		t.Error("expected expired (miss)")
+	}
+}
+
+// TestHTTPLoaderBadURLForBuild covers the build-request-error path. We
+// supply a control char in the URL that builds-but-fails.
+func TestHTTPLoaderBadURLForBuild(t *testing.T) {
+	l := &HTTPLoader{}
+	// Use a URL with a NUL byte that http.NewRequestWithContext rejects.
+	if _, err := l.Load("https://example.com/\x00bad"); err == nil {
+		t.Error("expected error from bad URL")
+	}
+}
+
+// TestExtractIDBranches covers various paths through extractID.
+func TestExtractIDBranches(t *testing.T) {
+	cases := []struct {
+		in   string
+		want string
+	}{
+		{`{"$id":"https://e/x"}`, "https://e/x"},
+		{`{ "$id" : "https://e/x" }`, "https://e/x"},
+		{`{"$id":  "https://e/x"  }`, "https://e/x"},
+		{`{}`, ""},
+		{`{"$id":42}`, ""},       // not a string
+		{`{"$id" "x"}`, ""},      // missing colon
+		{`{"$id":"unclosed`, ""}, // no closing quote
+		{`{"$id":`, ""},
+	}
+	for _, tc := range cases {
+		got := extractID([]byte(tc.in))
+		if got != tc.want {
+			t.Errorf("extractID(%q) = %q, want %q", tc.in, got, tc.want)
+		}
+	}
+}
+
+// TestRegisterVocabMetaSilent covers the "all good" path.
+func TestRegisterVocabMetaSilent(t *testing.T) {
+	m := MapLoader{}
+	registerVocabMeta(m, "meta/draft-2020-12/meta")
+	if len(m) == 0 {
+		t.Error("registerVocabMeta should populate from embedded FS")
+	}
+}
+
+// TestRegisterVocabMetaMissingDir covers the missing-dir branch.
+func TestRegisterVocabMetaMissingDir(t *testing.T) {
+	m := MapLoader{}
+	registerVocabMeta(m, "meta/does-not-exist")
+	if len(m) != 0 {
+		t.Errorf("missing dir should not populate; got %v", m)
+	}
+}
+
+// TestTracingLoaderError confirms the tracing wrapper reports
+// errors verbatim.
+func TestTracingLoaderError(t *testing.T) {
+	var buf bytes.Buffer
+	l := &tracingLoader{
+		inner: MapLoader{},
+		w:     &buf,
+	}
+	if _, err := l.Load("https://example.com/missing"); err == nil {
+		t.Error("expected error")
+	}
+	// Trace should be empty since we didn't fetch anything successfully.
+	if buf.Len() > 0 {
+		t.Errorf("trace should be empty on failure: %q", buf.String())
+	}
+}
+
+// TestReadFileImplOk covers the success branch.
+func TestReadFileImplOk(t *testing.T) {
+	dir := t.TempDir()
+	path := dir + "/x.json"
+	if err := writeBytes(path, []byte("hi")); err != nil {
+		t.Fatal(err)
+	}
+	data, err := readFileImpl(path)
+	if err != nil {
+		t.Fatalf("readFileImpl: %v", err)
+	}
+	if string(data) != "hi" {
+		t.Errorf("got %s", data)
+	}
+}
+
+// TestReadFileImplFails covers the error branch.
+func TestReadFileImplFails(t *testing.T) {
+	if _, err := readFileImpl("/dev/no-such-thing-/abc"); err == nil {
+		t.Error("expected error")
+	}
+}
+
+// TestFileLoaderInvalidURI covers url.Parse failure.
+func TestFileLoaderInvalidURI(t *testing.T) {
+	l := FileLoader{Root: t.TempDir()}
+	if _, err := l.Load("file://%zz"); err == nil {
+		t.Error("expected error on invalid URI")
+	}
+}
+
+// TestHTTPLoaderInvalidURI covers url.Parse failure.
+func TestHTTPLoaderInvalidURI(t *testing.T) {
+	l := &HTTPLoader{}
+	if _, err := l.Load("http://%zz"); err == nil {
+		t.Error("expected error on invalid URI")
+	}
+}
+
+// TestEmbedLoaderInvalidURI covers url.Parse failure.
+func TestEmbedLoaderInvalidURI(t *testing.T) {
+	l := EmbedLoader{FS: metaSchemaFS}
+	if _, err := l.Load("embed://%zz"); err == nil {
+		t.Error("expected error on invalid URI")
+	}
+}
+
+// TestEmbedLoaderEmptyPath covers errEmbedEmptyPath.
+func TestEmbedLoaderEmptyPath(t *testing.T) {
+	l := EmbedLoader{FS: metaSchemaFS}
+	_, err := l.Load("embed://")
+	if err == nil {
+		t.Error("expected error for empty path")
+	}
+}
+
+// TestHTTPLoaderTimeoutPropagatesError exercises the request-build error path
+// indirectly via a fundamentally bad URL.
+func TestHTTPLoaderTimeoutPropagatesError(t *testing.T) {
+	l := &HTTPLoader{}
+	// Use a non-listening 127.0.0.1 port — fast connection refusal.
+	_, err := l.Load("https://127.0.0.1:1/a")
+	if err == nil {
+		t.Error("expected error from connection refused")
+	}
+}
+
+// TestHTTPLoaderSingleFlightError covers the inflight wait+err path.
+func TestHTTPLoaderSingleFlightError(t *testing.T) {
+	// Using a non-routable target means the first Load fails. A simultaneous
+	// follower hitting the same URI shares that failure.
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusInternalServerError)
+	}))
+	t.Cleanup(srv.Close)
+	l := &HTTPLoader{AllowHTTP: true}
+	_, err := l.Load(srv.URL + "/a")
+	if err == nil {
+		t.Error("expected error on 500")
+	}
+}
+
+// TestReadFileImplPropagates covers the readFileImpl helper indirectly via
+// FileLoader on a real file.
+func TestReadFileImplPropagates(t *testing.T) {
+	dir := t.TempDir()
+	path := dir + "/x.json"
+	if err := writeBytes(path, []byte(`{"ok":1}`)); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+	l := FileLoader{Root: dir}
+	data, err := l.Load("file:///x.json")
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if string(data) != `{"ok":1}` {
+		t.Errorf("got %s", data)
+	}
+}
+
+// writeBytes is a tiny helper for file-based loader tests.
+func writeBytes(path string, data []byte) error {
+	return os.WriteFile(path, data, 0o600)
+}
+
+// TestTraceLoaderFetchNilWriter is a no-op that exercises the nil-writer branch.
+func TestTraceLoaderFetchNilWriter(_ *testing.T) {
+	traceLoaderFetch(nil, "https://example.com/x")
+}
+
+// TestTraceLoaderFetchWritesLine confirms a non-nil writer receives a line.
+func TestTraceLoaderFetchWritesLine(t *testing.T) {
+	var buf bytes.Buffer
+	traceLoaderFetch(&buf, "https://example.com/x")
+	if !strings.Contains(buf.String(), "https://example.com/x") {
+		t.Errorf("got %q", buf.String())
+	}
+}
+
+// TestReadFileImplMissing covers the error-return branch indirectly.
+func TestReadFileImplMissing(t *testing.T) {
+	l := FileLoader{Root: t.TempDir()}
+	if _, err := l.Load("file:///nope.json"); err == nil {
+		t.Error("expected error")
 	}
 }

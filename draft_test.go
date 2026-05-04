@@ -136,3 +136,22 @@ func TestDraftRoundTrip(t *testing.T) {
 		}
 	}
 }
+
+// TestDraftDefaultBranches covers the default-case fallthrough on Draft
+// methods.
+func TestDraftDefaultBranches(t *testing.T) {
+	// A made-up Draft value falls through to the default branch.
+	d := Draft(99)
+	if got := d.String(); got != "Draft Unknown" {
+		t.Errorf("String() = %q, want Draft Unknown", got)
+	}
+	if got := d.MetaSchemaURL(); got != "" {
+		t.Errorf("MetaSchemaURL() = %q, want empty", got)
+	}
+	if got := d.IDKeyword(); got != "$id" {
+		t.Errorf("IDKeyword() = %q, want $id", got)
+	}
+	if got := d.DefsKeyword(); got != "$defs" {
+		t.Errorf("DefsKeyword() = %q, want $defs", got)
+	}
+}

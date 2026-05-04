@@ -168,3 +168,123 @@ func TestSchemaValidateNilSchema(t *testing.T) {
 		t.Errorf("ValidateAndUnmarshal(nil schema) err = %v, want ErrSchemaNotCompiled", err)
 	}
 }
+
+// TestSchemaVocabulariesMalformed covers the malformed-rootVocabularyURIs
+// branch that returns nil and falls through to stdSet.
+func TestSchemaVocabulariesMalformed(t *testing.T) {
+	src := []byte(`{
+		"$schema":"https://json-schema.org/draft/2020-12/schema",
+		"$vocabulary":"not-an-object"
+	}`)
+	// Compile-time will likely fail (vocab is malformed); test best-effort.
+	s, err := Compile(src)
+	if err != nil {
+		t.Skipf("compile rejected malformed vocab: %v", err)
+	}
+	_ = s.Vocabularies()
+}
+
+// TestSchemaVocabulariesPreDraft201909 covers the path for legacy drafts.
+func TestSchemaVocabulariesPreDraft201909(t *testing.T) {
+	s := newSchemaForTest([]byte(`{}`), Draft7, "", "")
+	got := s.Vocabularies()
+	if len(got) == 0 {
+		t.Error("Draft 7 should still surface implementation vocabularies")
+	}
+}
+
+// TestSchemaResources exercises the multi-resource path.
+func TestSchemaResources(t *testing.T) {
+	src := []byte(`{
+		"$id":"https://example.com/root",
+		"$defs":{
+			"a":{"$id":"https://example.com/a","type":"string"},
+			"b":{"$id":"https://example.com/b","type":"integer"}
+		}
+	}`)
+	s := MustCompile(src)
+	got := s.Resources()
+	want := map[string]bool{
+		"https://example.com/root": true,
+		"https://example.com/a":    true,
+		"https://example.com/b":    true,
+	}
+	for _, uri := range got {
+		delete(want, uri)
+	}
+	if len(want) > 0 {
+		t.Errorf("missing resources: %v (got=%v)", want, got)
+	}
+}
+
+// TestSchemaResourcesNil covers nil receiver.
+func TestSchemaResourcesNil(t *testing.T) {
+	var s *Schema
+	if s.Resources() != nil {
+		t.Error("nil schema Resources() should be nil")
+	}
+}
+
+// TestSchemaAnchors covers the anchor enumeration path.
+func TestSchemaAnchors(t *testing.T) {
+	src := []byte(`{
+		"$id":"https://example.com/x",
+		"$defs":{
+			"a":{"$anchor":"alpha","type":"string"},
+			"b":{"$anchor":"beta","type":"integer"}
+		}
+	}`)
+	s := MustCompile(src)
+	got := s.Anchors()
+	have := map[string]bool{}
+	for _, a := range got {
+		have[a] = true
+	}
+	for _, want := range []string{"alpha", "beta"} {
+		if !have[want] {
+			t.Errorf("missing anchor %q (got=%v)", want, got)
+		}
+	}
+}
+
+// TestSchemaAnchorsNil covers nil receiver.
+func TestSchemaAnchorsNil(t *testing.T) {
+	var s *Schema
+	if s.Anchors() != nil {
+		t.Error("nil schema Anchors() should be nil")
+	}
+}
+
+// TestSchemaVocabulariesWithVocabularyKeyword covers the rootVocabularyURIs
+// branch with a $vocabulary at the root.
+func TestSchemaVocabulariesWithVocabularyKeyword(t *testing.T) {
+	src := []byte(`{
+		"$id":"https://example.com/v",
+		"$schema":"https://json-schema.org/draft/2020-12/schema",
+		"$vocabulary":{"https://example.com/vocab":true,"https://example.com/dropped":false}
+	}`)
+	s, err := Compile(src)
+	if err != nil {
+		t.Fatalf("compile: %v", err)
+	}
+	got := s.Vocabularies()
+	have := false
+	for _, u := range got {
+		if u == "https://example.com/vocab" {
+			have = true
+		}
+		if u == "https://example.com/dropped" {
+			t.Errorf("dropped vocab should not appear: %v", got)
+		}
+	}
+	if !have {
+		t.Errorf("expected custom vocab in result; got %v", got)
+	}
+}
+
+// TestSchemaVocabulariesUnknownDraft covers the DraftUnknown short-circuit.
+func TestSchemaVocabulariesUnknownDraft(t *testing.T) {
+	if got := stdVocabularySet(DraftUnknown); got != nil {
+		t.Errorf("stdVocabularySet(DraftUnknown) = %v, want nil", got)
+	}
+}

@@ -469,3 +469,94 @@ func BenchmarkValidateInvalidWithStopOnFirstError(b *testing.B) {
 		_, _ = s.Validate(instance, WithStopOnFirstError(true))
 	}
 }
+
+// TestOutputUnrecognizedFormat covers the default-case fallthrough.
+func TestOutputUnrecognizedFormat(t *testing.T) {
+	r := &Result{Valid: true}
+	// Use a numeric value outside the known OutputFormat enum.
+	got := r.Output(OutputFormat(999))
+	if string(got) != `{"valid":true}` {
+		t.Errorf("got %s, want flag fallback", got)
+	}
+}
+
+// TestOutputNilResult covers the nil-receiver branch.
+func TestOutputNilResult(t *testing.T) {
+	var r *Result
+	got := r.Output(OutputFlag)
+	if string(got) != `{"valid":false}` {
+		t.Errorf("got %s, want %q", got, `{"valid":false}`)
+	}
+}
+
+// TestOutputBasicErrorWithoutMessage exercises errorMessage's
+// keyword-fallback branch.
+func TestOutputBasicErrorWithoutMessage(t *testing.T) {
+	r := &Result{
+		Valid: false,
+		Errors: []ValidationError{{
+			KeywordLocation: "/x",
+			Keyword:         "type",
+		}},
+	}
+	got := r.Output(OutputBasic)
+	var doc map[string]any
+	if err := json.Unmarshal(got, &doc); err != nil {
+		t.Fatalf("parse: %v", err)
+	}
+	errs, ok := doc["errors"].([]any)
+	if !ok || len(errs) < 2 {
+		t.Fatalf("missing errors: %v", doc)
+	}
+	// 1st is header; 2nd is our entry.
+	entry := errs[1].(map[string]any)
+	msg, _ := entry["error"].(string)
+	if !strings.Contains(msg, "type") {
+		t.Errorf("error msg = %q, want fallback containing 'type'", msg)
+	}
+}
+
+// TestOutputBasicErrorTotallyEmpty exercises the keyword-empty + msg-empty
+// fallback in errorMessage.
+func TestOutputBasicErrorTotallyEmpty(t *testing.T) {
+	r := &Result{
+		Valid:  false,
+		Errors: []ValidationError{{KeywordLocation: "/x"}},
+	}
+	out := r.Output(OutputBasic)
+	if !strings.Contains(string(out), "validation failed") {
+		t.Errorf("missing fallback msg: %s", out)
+	}
+}
+
+// TestOutputDetailedNormalizesKeywordLocation covers the "#"-prefix
+// stripping branch via a populated keywordLocation.
+func TestOutputDetailedNormalizesKeywordLocation(t *testing.T) {
+	r := &Result{
+		Valid: false,
+		Errors: []ValidationError{{
+			KeywordLocation: "#/properties/x/minLength",
+			Keyword:         "minLength",
+			Message:         "x",
+		}},
+	}
+	out := r.Output(OutputDetailed)
+	// "#" should be stripped.
+	if strings.Contains(string(out), `"keywordLocation":"#/`) {
+		t.Errorf("keywordLocation not normalized: %s", out)
+	}
+}
+
+// TestOutputDetailedRootKeywordLocation covers normalizeKeywordLocation
+// for "#" exactly.
+func TestOutputDetailedRootKeywordLocation(t *testing.T) {
+	if got := normalizeKeywordLocation("#"); got != "" {
+		t.Errorf("got %q, want empty", got)
+	}
+	if got := normalizeKeywordLocation(""); got != "" {
+		t.Errorf("got %q, want empty", got)
+	}
+	if got := normalizeKeywordLocation("/foo"); got != "/foo" {
+		t.Errorf("got %q, want /foo", got)
+	}
+}

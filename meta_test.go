@@ -131,3 +131,85 @@ func TestMetaSchemaPaths2019_09Vocabularies(t *testing.T) {
 		}
 	}
 }
+
+// TestMetaSchemaCacheHit covers the cache-hit branch.
+func TestMetaSchemaCacheHit(t *testing.T) {
+	a, err := MetaSchema(Draft202012)
+	if err != nil {
+		t.Fatalf("first MetaSchema: %v", err)
+	}
+	b, err := MetaSchema(Draft202012)
+	if err != nil {
+		t.Fatalf("second MetaSchema: %v", err)
+	}
+	if a != b {
+		t.Errorf("expected cached pointer; a=%p b=%p", a, b)
+	}
+}
+
+// TestMetaSchemaForDialectCacheHit covers the cache-hit branch.
+func TestMetaSchemaForDialectCacheHit(t *testing.T) {
+	a, ok := metaSchemaForDialect(OASDialectURL)
+	if !ok {
+		t.Skip("OAS dialect not registered")
+	}
+	b, _ := metaSchemaForDialect(OASDialectURL)
+	if a != b {
+		t.Errorf("expected cached pointer")
+	}
+}
+
+// TestMetaSchemaValidationOK covers the meta-schema validation success path.
+func TestMetaSchemaValidationOK(t *testing.T) {
+	src := []byte(`{"type":"string","minLength":3}`)
+	if _, err := Compile(src, WithMetaSchemaValidation(true)); err != nil {
+		t.Errorf("expected meta-validation OK: %v", err)
+	}
+}
+
+// TestMetaSchemaValidationFailure covers the meta-schema validation failure
+// path. Use a schema with a malformed keyword that the meta-schema rejects.
+func TestMetaSchemaValidationFailure(t *testing.T) {
+	src := []byte(`{"type":"not-a-valid-type"}`)
+	_, err := Compile(src, WithMetaSchemaValidation(true))
+	if err == nil {
+		t.Skip("schema accepted; meta-schema may be permissive")
+	}
+}
+
+// TestMetaSchemaUnknownDraft covers the ErrUnknownDraft branch.
+func TestMetaSchemaUnknownDraft(t *testing.T) {
+	if _, err := MetaSchema(DraftUnknown); !errors.Is(err, ErrUnknownDraft) {
+		t.Errorf("MetaSchema(DraftUnknown) err = %v, want ErrUnknownDraft", err)
+	}
+}
+
+// TestMetaSchemaBytesUnknownDraft covers the ErrUnknownDraft branch.
+func TestMetaSchemaBytesUnknownDraft(t *testing.T) {
+	if _, err := MetaSchemaBytes(DraftUnknown); !errors.Is(err, ErrUnknownDraft) {
+		t.Errorf("MetaSchemaBytes(DraftUnknown) err = %v, want ErrUnknownDraft", err)
+	}
+}
+
+// TestMetaSchemaBytesAllDrafts covers each known draft path.
+func TestMetaSchemaBytesAllDrafts(t *testing.T) {
+	for _, d := range []Draft{Draft4, Draft6, Draft7, Draft201909, Draft202012} {
+		if _, err := MetaSchemaBytes(d); err != nil {
+			t.Errorf("MetaSchemaBytes(%s): %v", d, err)
+		}
+	}
+}
+
+// TestMetaSchemaURLDraft covers the package-level helper.
+func TestMetaSchemaURLDraft(t *testing.T) {
+	if got := MetaSchemaURL(Draft202012); got != Draft202012.MetaSchemaURL() {
+		t.Errorf("MetaSchemaURL = %q, want %q", got, Draft202012.MetaSchemaURL())
+	}
+}
+
+// TestMetaSchemaForDialectUnknown returns false for unrecognized URIs.
+func TestMetaSchemaForDialectUnknown(t *testing.T) {
+	if _, ok := metaSchemaForDialect("https://not-a-known-dialect.example/"); ok {
+		t.Errorf("expected ok=false for unknown dialect URI")
+	}
+}

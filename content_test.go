@@ -195,3 +195,144 @@ func TestContentConcurrencySmoke(t *testing.T) {
 	}
 	wg.Wait()
 }
+
+// TestContentSchemaAssertion covers the contentSchema validation branch.
+func TestContentSchemaAssertion(t *testing.T) {
+	src := []byte(`{
+		"type":"string",
+		"contentEncoding":"base64",
+		"contentMediaType":"application/json",
+		"contentSchema":{"type":"object","required":["x"]}
+	}`)
+	s := MustCompile(src)
+	// Valid: base64 of {"x":1}
+	res, err := s.Validate(
+		[]byte(`"eyJ4IjoxfQ=="`),
+		WithContentAssertion(true),
+	)
+	if err != nil {
+		t.Fatalf("Validate: %v", err)
+	}
+	if !res.Valid {
+		t.Errorf("expected valid; errors=%v", res.Errors)
+	}
+	// Invalid: base64 of {"y":1} (missing required x)
+	res, err = s.Validate(
+		[]byte(`"eyJ5IjoxfQ=="`),
+		WithContentAssertion(true),
+	)
+	if err != nil {
+		t.Fatalf("Validate: %v", err)
+	}
+	if res.Valid {
+		t.Errorf("expected invalid for missing required field")
+	}
+}
+
+// TestContentEncodingBase32 covers base32 + media-type non-JSON.
+func TestContentEncodingBase32(t *testing.T) {
+	src := []byte(`{"contentEncoding":"base32","contentMediaType":"application/octet-stream"}`)
+	s := MustCompile(src)
+	// Annotation only by default → valid.
+	if _, err := s.Validate([]byte(`"NBSWY3DP"`)); err != nil {
+		t.Fatalf("Validate: %v", err)
+	}
+	// With assertion + bad base32:
+	res, err := s.Validate([]byte(`"!!!"`), WithContentAssertion(true))
+	if err != nil {
+		t.Fatalf("Validate(assert): %v", err)
+	}
+	if res.Valid {
+		t.Error("expected invalid for bad base32")
+	}
+}
+
+// TestContentEncodingQuotedPrintable covers quoted-printable.
+func TestContentEncodingQuotedPrintable(t *testing.T) {
+	src := []byte(`{"contentEncoding":"quoted-printable","contentMediaType":"text/plain"}`)
+	s := MustCompile(src)
+	if _, err := s.Validate([]byte(`"hello=20world"`)); err != nil {
+		t.Fatalf("Validate: %v", err)
+	}
+}
+
+// TestContentEncoding7bit covers the pass-through case.
+func TestContentEncoding7bit(t *testing.T) {
+	for _, enc := range []string{"7bit", "8bit", "binary"} {
+		t.Run(enc, func(t *testing.T) {
+			src := []byte(`{"contentEncoding":"` + enc + `","contentMediaType":"text/plain"}`)
+			s := MustCompile(src)
+			if _, err := s.Validate([]byte(`"plain text"`)); err != nil {
+				t.Errorf("%s: %v", enc, err)
+			}
+		})
+	}
+}
+
+// TestContentUnknownEncoding covers the silent-pass fallback.
+func TestContentUnknownEncoding(t *testing.T) {
+	src := []byte(`{"contentEncoding":"made-up-encoding","contentMediaType":"text/plain"}`)
+	s := MustCompile(src)
+	res, err := s.Validate([]byte(`"x"`), WithContentAssertion(true))
+	if err != nil {
+		t.Fatalf("Validate: %v", err)
+	}
+	if !res.Valid {
+		t.Errorf("unknown encoding should silent-pass; errors=%v", res.Errors)
+	}
+}
+
+// TestContentMediaTypeJSONVariants covers the */+json suffix path.
+func TestContentMediaTypeJSONVariants(t *testing.T) {
+	// application/vnd.api+json
+	src := []byte(`{"contentMediaType":"application/vnd.api+json"}`)
+	s := MustCompile(src)
+	if _, err := s.Validate([]byte(`"{\"a\":1}"`), WithContentAssertion(true)); err != nil {
+		t.Errorf("Validate: %v", err)
+	}
+}
+
+// TestContentBase64Hex covers the base16 (hex) encoding.
+func TestContentBase64Hex(t *testing.T) {
+	src := []byte(`{
+		"contentEncoding":"base16",
+		"contentMediaType":"application/octet-stream"
+	}`)
+	s := MustCompile(src)
+	// valid hex
+	if _, err := s.Validate([]byte(`"AABBCCDD"`)); err != nil {
+		t.Errorf("hex valid: %v", err)
+	}
+	// invalid hex
+	res, err := s.Validate([]byte(`"NOT-HEX"`), WithContentAssertion(true))
+	if err != nil {
+		t.Fatalf("Validate: %v", err)
+	}
+	if res.Valid {
+		t.Errorf("expected invalid for non-hex")
+	}
+}
+
+// TestContentEncodingBadBase64 covers the decodeContent error path: when
+// contentMediaType is set, an undecodable contentEncoding still validates as
+// annotation-only by default.
+func TestContentEncodingBadBase64(t *testing.T) {
+	src := []byte(`{"contentEncoding":"base64","contentMediaType":"application/json"}`)
+	s := MustCompile(src)
+	// Annotation-only by default → should be valid.
+	res, err := s.Validate([]byte(`"!@#"`))
+	if err != nil {
+		t.Fatalf("Validate: %v", err)
+	}
+	if !res.Valid {
+		t.Errorf("default mode: bad base64 should still validate as annotation-only; errors=%v", res.Errors)
+	}
+	// With assertion: should fail.
+	res, err = s.Validate([]byte(`"!@#"`), WithContentAssertion(true))
+	if err != nil {
+		t.Fatalf("Validate(assert): %v", err)
+	}
+	if res.Valid {
+		t.Errorf("WithContentAssertion: expected invalid for bad base64")
+	}
+}

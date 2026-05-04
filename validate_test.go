@@ -664,3 +664,223 @@ func TestValidateRejectsTrailingContent(t *testing.T) {
 		})
 	}
 }
+
+// TestUnevaluatedItemsCounter exercises atoiSafe via the unevaluatedItems
+// counter path. Indirectly via array unevaluated semantics.
+func TestUnevaluatedItemsCounter(t *testing.T) {
+	// A schema with prefixItems then unevaluatedItems false. Each prefix
+	// match increments the unevaluated counter via atoiSafe-shaped logic.
+	src := []byte(`{
+		"prefixItems":[{"type":"integer"},{"type":"string"}],
+		"unevaluatedItems":false
+	}`)
+	s := MustCompile(src)
+	if res, _ := s.Validate([]byte(`[1,"a"]`)); !res.Valid {
+		t.Errorf("expected valid; errors=%v", res.Errors)
+	}
+	if res, _ := s.Validate([]byte(`[1,"a","extra"]`)); res.Valid {
+		t.Error("expected invalid (extra unevaluated item)")
+	}
+}
+
+// TestMaxValidationDepth covers the addErrorWithCause depth-exceeded branch.
+func TestMaxValidationDepth(t *testing.T) {
+	src := []byte(`{"$ref":"#"}`)
+	s := MustCompile(src)
+	res, err := s.Validate([]byte(`null`), WithMaxValidationDepth(3))
+	if err != nil {
+		t.Fatalf("Validate: %v", err)
+	}
+	if res.Valid {
+		t.Fatal("expected invalid")
+	}
+	have := false
+	for _, e := range res.Errors {
+		if errors.Is(&e, ErrMaxValidationDepth) {
+			have = true
+			break
+		}
+	}
+	if !have {
+		t.Errorf("expected ErrMaxValidationDepth in errors")
+	}
+}
+
+// TestDecodeInstanceBytesPartialJunk covers the second-decode non-EOF
+// branch by passing valid JSON followed by partial JSON.
+func TestDecodeInstanceBytesPartialJunk(t *testing.T) {
+	// First decode reads the integer 42; second decode encounters bare
+	// text — surfaces a decode error (not io.EOF).
+	if _, err := decodeInstanceBytes([]byte(`42 garbage`)); err == nil {
+		t.Error("expected error")
+	}
+}
+
+// TestValidateToDecodeFailure covers the post-validate decode error.
+func TestValidateToDecodeFailure(t *testing.T) {
+	type item struct{ N int }
+	s := MustCompile([]byte(`{"type":"object"}`))
+	// {"N":"x"} validates as an object, but unmarshal into item.N (int)
+	// fails.
+	if _, err := ValidateTo[item](s, []byte(`{"N":"x"}`)); err == nil {
+		t.Error("expected decode-after-validate error")
+	}
+}
+
+// TestDecodeInstanceBytesTrailing covers the trailing-content branch.
+func TestDecodeInstanceBytesTrailing(t *testing.T) {
+	s := MustCompile([]byte(`{}`))
+	if _, err := s.Validate([]byte(`{} {}`)); err == nil {
+		t.Error("expected error on trailing content")
+	}
+}
+
+// TestValidateAndUnmarshalSuccessfulDecode confirms the full happy path.
+func TestValidateAndUnmarshalSuccessfulDecode(t *testing.T) {
+	type item struct {
+		Name string `json:"name"`
+	}
+	s := MustCompile([]byte(`{"type":"object","required":["name"]}`))
+	var v item
+	if err := s.ValidateAndUnmarshal([]byte(`{"name":"alice"}`), &v); err != nil {
+		t.Errorf("ValidateAndUnmarshal: %v", err)
+	}
+	if v.Name != "alice" {
+		t.Errorf("got %v", v)
+	}
+}
+
+// TestValidateEmptyInstance covers the empty-bytes decode failure.
+func TestValidateEmptyInstance(t *testing.T) {
+	s := MustCompile([]byte(`{}`))
+	if _, err := s.Validate([]byte("")); err == nil {
+		t.Error("expected decode error on empty bytes")
+	}
+}
+
+// TestValidateReaderNilReader confirms a nil reader returns ErrNilReader.
+func TestValidateReaderNilReader(t *testing.T) {
+	s := MustCompile([]byte(`{}`))
+	if _, err := s.ValidateReader(nil); !errors.Is(err, ErrNilReader) {
+		t.Errorf("ValidateReader(nil) err = %v, want ErrNilReader", err)
+	}
+}
+
+// errReader returns its stored error from Read.
+type errReader struct{ err error }
+
+func (r *errReader) Read([]byte) (int, error) { return 0, r.err }
+
+// TestValidateReaderReadFailure confirms a read error from r is propagated.
+func TestValidateReaderReadFailure(t *testing.T) {
+	s := MustCompile([]byte(`{}`))
+	want := errors.New("boom")
+	_, err := s.ValidateReader(&errReader{err: want})
+	if err == nil {
+		t.Fatal("expected error from reader")
+	}
+	if !strings.Contains(err.Error(), "boom") {
+		t.Errorf("err = %v, want containing 'boom'", err)
+	}
+}
+
+// TestValidateAndUnmarshalNonNilFailure exercises the unmarshal-error branch
+// of ValidateAndUnmarshal: schema valid, but the typed target can't decode
+// the JSON (wrong destination type).
+func TestValidateAndUnmarshalNonNilFailure(t *testing.T) {
+	s := MustCompile([]byte(`{"type":"object"}`))
+	var dst int // wrong type for an object
+	err := s.ValidateAndUnmarshal([]byte(`{"a":1}`), &dst)
+	if err == nil {
+		t.Fatal("expected unmarshal error")
+	}
+	if !strings.Contains(err.Error(), "decode after validate") {
+		t.Errorf("err = %v, want containing 'decode after validate'", err)
+	}
+}
+
+// TestValidateAndUnmarshalNilSchema covers the nil-schema branch.
+func TestValidateAndUnmarshalNilSchema(t *testing.T) {
+	var s *Schema
+	if err := s.ValidateAndUnmarshal([]byte(`{}`), nil); !errors.Is(err, ErrSchemaNotCompiled) {
+		t.Errorf("nil schema err = %v, want ErrSchemaNotCompiled", err)
+	}
+}
+
+// TestValidateAndUnmarshalNilTargetSucceeds covers the v == nil branch.
+func TestValidateAndUnmarshalNilTargetSucceeds(t *testing.T) {
+	s := MustCompile([]byte(`{"type":"string"}`))
+	if err := s.ValidateAndUnmarshal([]byte(`"x"`), nil); err != nil {
+		t.Errorf("ValidateAndUnmarshal with nil target: %v", err)
+	}
+}
+
+// TestValidateAndUnmarshalValidationFailure covers the !res.Valid branch.
+func TestValidateAndUnmarshalValidationFailure(t *testing.T) {
+	s := MustCompile([]byte(`{"type":"string"}`))
+	var dst string
+	err := s.ValidateAndUnmarshal([]byte(`5`), &dst)
+	if err == nil {
+		t.Fatal("expected validation failure")
+	}
+	if !errors.Is(err, ErrValidation) {
+		t.Errorf("err = %v, want ErrValidation", err)
+	}
+}
+
+// TestValidateToNilSchema covers the nil-schema generic branch.
+func TestValidateToNilSchema(t *testing.T) {
+	type item struct{ Name string }
+	var s *Schema
+	_, err := ValidateTo[item](s, []byte(`{}`))
+	if !errors.Is(err, ErrSchemaNotCompiled) {
+		t.Errorf("nil schema err = %v, want ErrSchemaNotCompiled", err)
+	}
+}
+
+// TestValidateToValidationFailure covers the !res.Valid branch.
+func TestValidateToValidationFailure(t *testing.T) {
+	type item struct {
+		Name string `json:"name"`
+	}
+	s := MustCompile([]byte(`{"type":"object","required":["name"]}`))
+	if _, err := ValidateTo[item](s, []byte(`{}`)); err == nil {
+		t.Fatal("expected validation failure")
+	}
+}
+
+// TestValidateToInstanceTooLarge confirms the instance-size cap propagates.
+func TestValidateToInstanceTooLarge(t *testing.T) {
+	type item struct{ Name string }
+	s := MustCompile([]byte(`{}`))
+	big := []byte(`"` + strings.Repeat("x", 100) + `"`)
+	_, err := ValidateTo[item](s, big, WithMaxInstanceSize(10))
+	if !errors.Is(err, ErrInstanceTooLarge) {
+		t.Errorf("err = %v, want ErrInstanceTooLarge", err)
+	}
+}
+
+// TestValidationFailureErrorEmptySlice covers the empty-slice branch of the
+// internal helper. Reachable from public API via Validate-returning-no-errors
+// + a forced validation failure path; instead exercise via direct call.
+func TestValidationFailureErrorEmptySlice(t *testing.T) {
+	if err := validationFailureError(nil); !errors.Is(err, ErrValidationFailed) {
+		t.Errorf("empty errs = %v, want ErrValidationFailed", err)
+	}
+}
+
+// TestValidationFailureErrorMultiCause covers the multi-error branch.
+func TestValidationFailureErrorMultiCause(t *testing.T) {
+	errs := []ValidationError{
+		{Keyword: "minLength", Message: "too short"},
+		{Keyword: "type", Message: "wrong type"},
+	}
+	err := validationFailureError(errs)
+	var ve *ValidationError
+	if !errors.As(err, &ve) {
+		t.Fatalf("err = %v, want *ValidationError", err)
+	}
+	if len(ve.Causes) != 1 {
+		t.Errorf("Causes = %d, want 1", len(ve.Causes))
+	}
+}

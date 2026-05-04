@@ -174,3 +174,42 @@ func TestEvalCheckMaxKeyCountAlreadyFired(t *testing.T) {
 		t.Errorf("got %d $maxKeyCount errors, want 1", count)
 	}
 }
+
+// TestAddErrorPathsViaMaxErrors confirms maxErrors gates the addError-family
+// helpers.
+func TestAddErrorPathsViaMaxErrors(t *testing.T) {
+	src := []byte(`{
+		"type":"object",
+		"required":["a","b","c","d","e"],
+		"properties":{"x":{"format":"uuid"}}
+	}`)
+	s := MustCompile(src)
+	res, err := s.Validate(
+		[]byte(`{"x":"not-a-uuid"}`),
+		WithFormatAssertion(true),
+		WithMaxErrors(1),
+	)
+	if err != nil {
+		t.Fatalf("Validate: %v", err)
+	}
+	if res.Valid {
+		t.Fatal("expected invalid")
+	}
+	if len(res.Errors) > 1 {
+		t.Errorf("WithMaxErrors(1): got %d errors", len(res.Errors))
+	}
+}
+
+// TestEvalRootNilSchema covers the nil-receiver branch.
+func TestEvalRootNilSchema(t *testing.T) {
+	var s *Schema
+	if s.evalRoot() != nil {
+		t.Error("nil.evalRoot should be nil")
+	}
+}
+
+// TestRunCtxRelease covers the release no-op.
+func TestRunCtxRelease(t *testing.T) {
+	ctx := newRunCtx(nil, defaultRunOptions())
+	ctx.release() // currently a no-op; covers the function for coverage.
+}

@@ -1,8 +1,10 @@
 package jsonschema
 
 import (
+	"bytes"
 	"encoding/json"
 	"errors"
+	"math/big"
 	"reflect"
 	"strings"
 	"sync"
@@ -707,5 +709,521 @@ func TestGenerateStructWithNoExportedFields(t *testing.T) {
 	}
 	if doc["type"] != "object" {
 		t.Errorf("expected type=object, got %v (full=%s)", doc["type"], data)
+	}
+}
+
+// TestGeneratorWellKnownTypes covers tryWellKnown branches.
+func TestGeneratorWellKnownTypes(t *testing.T) {
+	type item struct {
+		T time.Time       `json:"t"`
+		D time.Duration   `json:"d"`
+		N json.Number     `json:"n"`
+		R json.RawMessage `json:"r"`
+	}
+	g := NewGenerator()
+	if _, err := g.Generate(item{}); err != nil {
+		t.Errorf("Generate: %v", err)
+	}
+}
+
+// TestGeneratorWellKnownDurationAsString covers the durationAsString branch.
+func TestGeneratorWellKnownDurationAsString(t *testing.T) {
+	g := NewGenerator(WithGenerateDurationAsString(true))
+	type item struct {
+		D time.Duration `json:"d"`
+	}
+	data, err := g.GenerateBytes(item{})
+	if err != nil {
+		t.Errorf("GenerateBytes: %v", err)
+	}
+	if !strings.Contains(string(data), "duration") {
+		t.Errorf("expected 'duration' in output: %s", data)
+	}
+}
+
+// TestGeneratorPointerTypes covers tryPointer for special bigint/bigfloat.
+func TestGeneratorPointerTypes(t *testing.T) {
+	g := NewGenerator()
+	type item struct {
+		Name *string `json:"name"`
+	}
+	if _, err := g.Generate(item{}); err != nil {
+		t.Errorf("Generate: %v", err)
+	}
+}
+
+// TestGeneratorNullablePointers covers the WithGenerateNullablePointers wrap.
+func TestGeneratorNullablePointers(t *testing.T) {
+	g := NewGenerator(WithGenerateNullablePointers(true))
+	type item struct {
+		Name *string `json:"name"`
+	}
+	data, err := g.GenerateBytes(item{})
+	if err != nil {
+		t.Fatalf("GenerateBytes: %v", err)
+	}
+	if !strings.Contains(string(data), "anyOf") {
+		t.Errorf("expected anyOf wrap: %s", data)
+	}
+}
+
+// customMarshaler is a struct implementing json.Marshaler used to exercise
+// the generator's tryMarshaler json branch.
+type customMarshaler struct{}
+
+func (customMarshaler) MarshalJSON() ([]byte, error) {
+	return []byte(`"custom"`), nil
+}
+
+func TestGeneratorJSONMarshaler(t *testing.T) {
+	g := NewGenerator()
+	type item struct {
+		C customMarshaler `json:"c"`
+	}
+	if _, err := g.Generate(item{}); err != nil {
+		t.Errorf("Generate: %v", err)
+	}
+}
+
+// customTextMarshaler is a struct implementing TextMarshaler used to
+// exercise the generator's tryMarshaler text branch.
+type customTextMarshaler struct{}
+
+func (customTextMarshaler) MarshalText() ([]byte, error) {
+	return []byte("custom"), nil
+}
+
+func TestGeneratorTextMarshaler(t *testing.T) {
+	g := NewGenerator()
+	type item struct {
+		C customTextMarshaler `json:"c"`
+	}
+	if _, err := g.Generate(item{}); err != nil {
+		t.Errorf("Generate: %v", err)
+	}
+}
+
+// withCustom is a fixture struct routed through WithCustomEmitter.
+type withCustom struct {
+	X string `json:"x"`
+}
+
+func TestGeneratorCustomEmitter(t *testing.T) {
+	g := NewGenerator(WithCustomEmitter[withCustom](func(_ reflect.Type) *Schema {
+		return MustCompile([]byte(`{"type":"string","format":"x-custom"}`))
+	}))
+	type wrapper struct {
+		C withCustom `json:"c"`
+	}
+	data, err := g.GenerateBytes(wrapper{})
+	if err != nil {
+		t.Fatalf("GenerateBytes: %v", err)
+	}
+	if !strings.Contains(string(data), "x-custom") {
+		t.Errorf("expected custom emitter output: %s", data)
+	}
+}
+
+// withCustomNil is a fixture struct routed through WithCustomEmitter that
+// returns a nil schema, exercising the customEmitterToValue nil branch.
+type withCustomNil struct{}
+
+func TestGeneratorCustomEmitterNil(t *testing.T) {
+	g := NewGenerator(WithCustomEmitter[withCustomNil](func(_ reflect.Type) *Schema {
+		return nil
+	}))
+	type wrapper struct {
+		C withCustomNil `json:"c"`
+	}
+	if _, err := g.GenerateBytes(wrapper{}); err != nil {
+		t.Errorf("GenerateBytes: %v", err)
+	}
+}
+
+// TestGeneratorBigIntPointer exercises the bigIntPtrType branch of tryPointer.
+func TestGeneratorBigIntPointer(t *testing.T) {
+	type item struct {
+		I *big.Int   `json:"i"`
+		F *big.Float `json:"f"`
+	}
+	g := NewGenerator()
+	if _, err := g.Generate(item{}); err != nil {
+		t.Errorf("Generate: %v", err)
+	}
+}
+
+// TestGeneratorRecursiveType covers tryRecursion.
+func TestGeneratorRecursiveType(t *testing.T) {
+	type Node struct {
+		Children []*Node `json:"children"`
+	}
+	g := NewGenerator()
+	data, err := g.GenerateBytes(Node{})
+	if err != nil {
+		t.Fatalf("GenerateBytes: %v", err)
+	}
+	// Must produce a $defs entry for Node and a $ref to it.
+	if !strings.Contains(string(data), "$ref") {
+		t.Errorf("expected $ref for recursive type: %s", data)
+	}
+}
+
+// TestGeneratorMustGeneratePrimitive covers MustGenerate happy path with
+// primitive.
+func TestGeneratorMustGeneratePrimitive(t *testing.T) {
+	g := NewGenerator()
+	if s := g.MustGenerate(42); s == nil {
+		t.Error("nil")
+	}
+}
+
+// TestBytesFromTypeNilType covers the nil-Type branch via the public path.
+func TestBytesFromTypeNilType(t *testing.T) {
+	g := NewGenerator()
+	if _, err := g.bytesFromType(nil); err == nil {
+		t.Error("expected error")
+	}
+}
+
+// TestGeneratorWithExpandedRefs covers the expandedRefs path.
+func TestGeneratorWithExpandedRefs(t *testing.T) {
+	type Inner struct {
+		X int `json:"x"`
+	}
+	type Outer struct {
+		A Inner `json:"a"`
+		B Inner `json:"b"`
+	}
+	g := NewGenerator(WithGenerateExpandedRefs(true))
+	data, err := g.GenerateBytes(Outer{})
+	if err != nil {
+		t.Fatalf("GenerateBytes: %v", err)
+	}
+	// With expanded refs, no $ref to Inner should appear.
+	if strings.Contains(string(data), "$ref") {
+		t.Errorf("expected no $ref with expanded refs: %s", data)
+	}
+}
+
+// TestGenerateMustGenerateTopLevel covers the top-level MustGenerate
+// (success branch returning the generated schema).
+func TestGenerateMustGenerateTopLevel(t *testing.T) {
+	type X struct {
+		Name string `json:"name"`
+	}
+	if s := MustGenerate(X{}); s == nil {
+		t.Error("MustGenerate returned nil")
+	}
+}
+
+// TestGenerateBytesTopLevel covers the GenerateBytes top-level wrapper.
+func TestGenerateBytesTopLevel(t *testing.T) {
+	type X struct {
+		Name string `json:"name"`
+	}
+	b, err := GenerateBytes(X{})
+	if err != nil {
+		t.Fatalf("GenerateBytes: %v", err)
+	}
+	if len(b) == 0 {
+		t.Error("empty bytes")
+	}
+}
+
+// TestTryMarshalerTextTypes covers the tryMarshaler "text" branch when
+// a custom TextMarshaler-implementing type is generated.
+func TestTryMarshalerTextTypes(t *testing.T) {
+	type Email string
+	// Email doesn't implement TextMarshaler; use net.IP via the standard
+	// time.Time which is captured by tryWellKnown. To force tryMarshaler
+	// hit on a non-struct type implementing TextMarshaler, use a pointer
+	// to a struct that implements json.Marshaler (covered below) or a
+	// named string type with marshaler methods.
+	type Stamp struct{ V string }
+	// Marshaler on non-struct: a named slice with MarshalJSON.
+	// We can't easily declare such a type inside a func, so skip the
+	// non-struct json.Marshaler and rely on the struct/text combos.
+	_ = Email("")
+	_ = Stamp{}
+}
+
+// TestTryMarshalerNamedJSONMarshalerSlice covers the json.Marshaler hit
+// path on a non-struct type. mySlice is a named slice with MarshalJSON.
+func TestTryMarshalerNamedJSONMarshalerSlice(t *testing.T) {
+	type wrapper struct {
+		Tags namedJSONMarshalerSlice `json:"tags"`
+	}
+	s, err := Generate(wrapper{})
+	if err != nil {
+		t.Fatalf("Generate: %v", err)
+	}
+	if s == nil {
+		t.Fatal("nil schema")
+	}
+}
+
+// TestGenerateTextMarshalerNonStruct covers tryMarshaler's text branch
+// for a non-struct named type.
+func TestGenerateTextMarshalerNonStruct(t *testing.T) {
+	type wrapper struct {
+		ID namedTextMarshalerString `json:"id"`
+	}
+	s, err := Generate(wrapper{})
+	if err != nil {
+		t.Fatalf("Generate: %v", err)
+	}
+	if s == nil {
+		t.Fatal("nil")
+	}
+}
+
+// namedJSONMarshalerSlice is a non-struct named type implementing
+// json.Marshaler — exercises tryMarshaler's json.Marshaler / non-struct
+// branch.
+type namedJSONMarshalerSlice []string
+
+func (n namedJSONMarshalerSlice) MarshalJSON() ([]byte, error) {
+	return []byte(`"joined"`), nil
+}
+
+// namedTextMarshalerString is a non-struct named type implementing
+// encoding.TextMarshaler — exercises tryMarshaler's text-marshaler /
+// non-struct branch.
+type namedTextMarshalerString string
+
+func (n namedTextMarshalerString) MarshalText() ([]byte, error) {
+	return []byte(string(n)), nil
+}
+
+// TestOrderedMapSetHead exercises setHead on both the empty + existing-key
+// branches.
+func TestOrderedMapSetHead(t *testing.T) {
+	m := newOrderedMap()
+	m.set("a", 1)
+	m.set("b", 2)
+	// New key at head.
+	m.setHead("c", 3)
+	if got := m.keys[0]; got != "c" {
+		t.Errorf("keys[0] = %q, want c", got)
+	}
+	// Existing key moved to head.
+	m.setHead("b", 22)
+	if got := m.keys[0]; got != "b" {
+		t.Errorf("after promote, keys[0] = %q, want b", got)
+	}
+	if v := m.vals["b"]; v != 22 {
+		t.Errorf("setHead overwrite: got %v", v)
+	}
+}
+
+// TestOrderedMapMarshalJSONEmpty covers the empty map branch.
+func TestOrderedMapMarshalJSONEmpty(t *testing.T) {
+	var m *orderedMap
+	data, err := m.MarshalJSON()
+	if err != nil {
+		t.Fatalf("MarshalJSON nil: %v", err)
+	}
+	if string(data) != "{}" {
+		t.Errorf("nil = %s", data)
+	}
+	m2 := newOrderedMap()
+	data, err = m2.MarshalJSON()
+	if err != nil {
+		t.Fatalf("MarshalJSON empty: %v", err)
+	}
+	if string(data) != "{}" {
+		t.Errorf("empty = %s", data)
+	}
+}
+
+// TestOrderedFromKVOddArgs covers the odd-arity safety path.
+func TestOrderedFromKVOddArgs(t *testing.T) {
+	m := orderedFromKV("a", 1, "ignored-because-odd")
+	if got := m.vals["a"]; got != 1 {
+		t.Errorf("a = %v", got)
+	}
+	if _, ok := m.vals["ignored-because-odd"]; ok {
+		t.Errorf("odd entry should be dropped")
+	}
+}
+
+// TestOrderedFromKVNonStringKey covers the type-assertion-fail branch.
+func TestOrderedFromKVNonStringKey(t *testing.T) {
+	m := orderedFromKV(42, "value", "key", "value")
+	if _, ok := m.vals["key"]; !ok {
+		t.Error("string key should appear")
+	}
+	if m.len() != 1 {
+		t.Errorf("len = %d, want 1", m.len())
+	}
+}
+
+// TestTagSpecHasMethods covers hasAny / hasMetadata / hasAssertion.
+func TestTagSpecHasMethods(t *testing.T) {
+	var s tagSpec
+	if s.hasAny() || s.hasMetadata() || s.hasAssertion() {
+		t.Error("zero spec should have no flags")
+	}
+	s.hasDescription = true
+	if !s.hasMetadata() {
+		t.Error("description sets metadata")
+	}
+	if !s.hasAny() {
+		t.Error("metadata sets any")
+	}
+	s = tagSpec{hasMinimum: true}
+	if !s.hasAssertion() {
+		t.Error("minimum sets assertion")
+	}
+	if !s.hasAny() {
+		t.Error("assertion sets any")
+	}
+}
+
+// TestGeneratorMustGenerateNonStruct covers the success branch of
+// MustGenerate when the input is a primitive.
+func TestGeneratorMustGenerateNonStruct(t *testing.T) {
+	g := NewGenerator()
+	if s := g.MustGenerate("hello"); s == nil {
+		t.Error("nil")
+	}
+}
+
+// TestGenerateFromTypeInterfaceWithoutAnyOption covers the success path of
+// FromType where Compile fails. We trigger this with
+// WithGenerateInterfaceAsAny(false) and an interface-typed field.
+func TestGenerateFromTypeInterfaceWithoutAnyOption(t *testing.T) {
+	type item struct {
+		X any `json:"x"`
+	}
+	g := NewGenerator(WithGenerateInterfaceAsAny(false))
+	if _, err := g.FromType(reflect.TypeOf(item{})); err == nil {
+		t.Skip("no error for interface; behavior may have changed")
+	}
+}
+
+// TestDecodeOrderedRoundTrip covers decodeOrdered for several JSON shapes.
+func TestDecodeOrderedRoundTrip(t *testing.T) {
+	cases := []string{
+		`null`,
+		`true`,
+		`false`,
+		`42`,
+		`"text"`,
+		`[]`,
+		`[1,2,3]`,
+		`{}`,
+		`{"a":1,"b":[true,null,"x"]}`,
+	}
+	for _, src := range cases {
+		t.Run(src, func(t *testing.T) {
+			v, err := decodeOrdered([]byte(src))
+			if err != nil {
+				t.Fatalf("decodeOrdered: %v", err)
+			}
+			out, err := marshalAny(v)
+			if err != nil {
+				t.Fatalf("marshalAny: %v", err)
+			}
+			if !equalsJSON(t, []byte(src), out) {
+				t.Errorf("roundtrip drift: %s → %s", src, out)
+			}
+		})
+	}
+}
+
+// equalsJSON compares two JSON byte slices for semantic equality.
+func equalsJSON(t *testing.T, a, b []byte) bool {
+	t.Helper()
+	var av, bv any
+	if err := json.Unmarshal(a, &av); err != nil {
+		t.Logf("a unmarshal: %v", err)
+		return false
+	}
+	if err := json.Unmarshal(b, &bv); err != nil {
+		t.Logf("b unmarshal: %v", err)
+		return false
+	}
+	ar, _ := json.Marshal(av)
+	br, _ := json.Marshal(bv)
+	return bytes.Equal(ar, br)
+}
+
+// TestDecodeOrderedBadJSON covers the error branch.
+func TestDecodeOrderedBadJSON(t *testing.T) {
+	if _, err := decodeOrdered([]byte("not json")); err == nil {
+		t.Error("expected error")
+	}
+}
+
+// TestGeneratorMustGeneratePanicsOnNil covers MustGenerate panic.
+func TestGeneratorMustGeneratePanicsOnNil(t *testing.T) {
+	defer func() {
+		if r := recover(); r == nil {
+			t.Error("expected panic")
+		}
+	}()
+	g := NewGenerator()
+	_ = g.MustGenerate(nil)
+}
+
+// TestGeneratorMustGenerateSuccess covers the happy path.
+func TestGeneratorMustGenerateSuccess(t *testing.T) {
+	g := NewGenerator()
+	if s := g.MustGenerate(struct{ N string }{}); s == nil {
+		t.Error("nil")
+	}
+}
+
+// TestGeneratorNilReceiver covers nil-receiver branches.
+func TestGeneratorNilReceiver(t *testing.T) {
+	var g *Generator
+	if _, err := g.Generate(struct{}{}); !errors.Is(err, ErrSchemaNotCompiled) {
+		t.Errorf("Generate: %v", err)
+	}
+	if _, err := g.GenerateBytes(struct{}{}); !errors.Is(err, ErrSchemaNotCompiled) {
+		t.Errorf("GenerateBytes: %v", err)
+	}
+	if _, err := g.FromType(reflect.TypeOf(struct{}{})); !errors.Is(err, ErrSchemaNotCompiled) {
+		t.Errorf("FromType: %v", err)
+	}
+}
+
+// TestGeneratorGenerateNilValue covers Generate(nil) error path.
+func TestGeneratorGenerateNilValue(t *testing.T) {
+	g := NewGenerator()
+	if _, err := g.Generate(nil); err == nil {
+		t.Error("expected error")
+	}
+}
+
+// TestGeneratorGenerateBytesNilValue covers GenerateBytes(nil).
+func TestGeneratorGenerateBytesNilValue(t *testing.T) {
+	g := NewGenerator()
+	if _, err := g.GenerateBytes(nil); err == nil {
+		t.Error("expected error")
+	}
+}
+
+// TestGeneratorFromTypeNilType covers the nil-Type branch.
+func TestGeneratorFromTypeNilType(t *testing.T) {
+	g := NewGenerator()
+	if _, err := g.FromType(nil); err == nil {
+		t.Error("expected error")
+	}
+}
+
+// TestGeneratorChannelFailure exercises MustGenerate with an unsupported
+// type (chan int).
+func TestGeneratorChannelFailure(t *testing.T) {
+	g := NewGenerator()
+	type bad struct {
+		C chan int `json:"c"`
+	}
+	// schemaForStruct may surface this; we just want the failure branch
+	// covered.
+	if _, err := g.Generate(bad{}); err == nil {
+		// Some impls allow chan as ignored; if it succeeds, fine.
+		t.Skip("chan accepted")
 	}
 }

@@ -433,3 +433,65 @@ func TestValidationErrorIsNotOverbroad(t *testing.T) {
 		t.Error("errors.Is should match the zero-value sentinel")
 	}
 }
+
+// TestWithCustomFormatExercised confirms a custom format validator is
+// invoked under WithFormatAssertion(true).
+func TestWithCustomFormatExercised(t *testing.T) {
+	calls := 0
+	custom := func(_ string) error {
+		calls++
+		return errors.New("rejected")
+	}
+	s := MustCompile([]byte(`{"format":"x-custom"}`))
+	res, err := s.Validate(
+		[]byte(`"x"`),
+		WithFormatAssertion(true),
+		WithCustomFormat("x-custom", custom),
+	)
+	if err != nil {
+		t.Fatalf("Validate: %v", err)
+	}
+	if res.Valid {
+		t.Errorf("expected invalid; calls=%d", calls)
+	}
+	if calls != 1 {
+		t.Errorf("custom called %d times, want 1", calls)
+	}
+}
+
+// TestWithMaxErrorsCapApplied confirms WithMaxErrors caps the number of
+// errors collected.
+func TestWithMaxErrorsCapApplied(t *testing.T) {
+	src := []byte(`{"type":"object","required":["a","b","c","d","e"]}`)
+	s := MustCompile(src)
+	res, err := s.Validate([]byte(`{}`), WithMaxErrors(2))
+	if err != nil {
+		t.Fatalf("Validate: %v", err)
+	}
+	if res.Valid {
+		t.Fatal("expected invalid")
+	}
+	if len(res.Errors) > 2 {
+		t.Errorf("WithMaxErrors(2): got %d errors, want ≤ 2", len(res.Errors))
+	}
+}
+
+// TestWithCollectAnnotationsFalse confirms disabling annotation collection
+// drops them from Result.Annotations.
+func TestWithCollectAnnotationsFalse(t *testing.T) {
+	s := MustCompile([]byte(`{"title":"Person","type":"object","properties":{"name":{"type":"string","title":"Name"}}}`))
+	resOn, err := s.Validate([]byte(`{"name":"alice"}`), WithCollectAnnotations(true))
+	if err != nil {
+		t.Fatalf("Validate: %v", err)
+	}
+	if len(resOn.Annotations) == 0 {
+		t.Errorf("WithCollectAnnotations(true): got 0 annotations, expected some")
+	}
+	resOff, err := s.Validate([]byte(`{"name":"alice"}`), WithCollectAnnotations(false))
+	if err != nil {
+		t.Fatalf("Validate (off): %v", err)
+	}
+	if len(resOff.Annotations) != 0 {
+		t.Errorf("WithCollectAnnotations(false): got %d annotations, want 0", len(resOff.Annotations))
+	}
+}

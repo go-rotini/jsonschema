@@ -172,3 +172,12 @@ func TestResultOutputFlag(t *testing.T) {
 		t.Errorf("nil Result Output should report invalid")
 	}
 }
+
+// TestUnknownFormatPolicyStringExt covers each enum string.
+func TestUnknownFormatPolicyStringExt(t *testing.T) {
+	for _, p := range []UnknownFormatPolicy{UnknownFormatIgnore, UnknownFormatWarn, UnknownFormatError} {
+		if got := p.String(); got == "" {
+			t.Errorf("policy %d: empty string", p)
+		}
+	}
+}
