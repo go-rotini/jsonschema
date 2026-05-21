@@ -12,6 +12,7 @@ require (
 
 tool (
 	github.com/go-gremlins/gremlins/cmd/gremlins
+	github.com/go-rotini/jsonschema/gentypes
 	github.com/golangci/golangci-lint/v2/cmd/golangci-lint
 	github.com/google/go-licenses/v2
 	golang.org/x/vuln/cmd/govulncheck
