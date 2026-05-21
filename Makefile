@@ -47,9 +47,10 @@ test-conformance: clone-test-suite
 	@go tool cover -func=test_conformance.out
 
 test-fuzz:
-	@go test -fuzz=FuzzCompile  -fuzztime=60s -run=^$$ .
-	@go test -fuzz=FuzzValidate -fuzztime=60s -run=^$$ .
-	@go test -fuzz=FuzzGenerate -fuzztime=60s -run=^$$ .
+	@go test -fuzz='^FuzzCompile$$'    -fuzztime=60s -run=^$$ .
+	@go test -fuzz='^FuzzValidate$$'   -fuzztime=60s -run=^$$ .
+	@go test -fuzz='^FuzzGenerate$$'   -fuzztime=60s -run=^$$ .
+	@go test -fuzz='^FuzzGenerateGo$$' -fuzztime=60s -run=^$$ .
 
 test-mutation: clone-test-suite
 	@go tool github.com/go-gremlins/gremlins/cmd/gremlins unleash --config .gremlins.yaml
