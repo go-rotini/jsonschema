@@ -7,7 +7,7 @@ toolchain go1.26.2
 require (
 	github.com/go-rotini/jsonc v1.1.0
 	github.com/go-rotini/toml v1.1.0
-	github.com/go-rotini/yaml v1.1.0
+	github.com/go-rotini/yaml v1.2.0
 )
 
 tool (
