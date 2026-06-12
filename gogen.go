@@ -52,6 +52,13 @@ func WithGoHeaderComment(text string) GoOption {
 // GoGenerator to render many schemas with the same options; option parsing
 // happens once at construction. It is the inverse of [Generator], which
 // produces a schema from a Go type.
+//
+// Nullability is presence: a scalar whose type union admits null
+// ("type": ["number", "null"]) — or the two-branch anyOf form
+// [WithGenerateNullablePointers] emits for a Go pointer — generates a
+// pointer field (*float64), so an absent or null value is distinguishable
+// from the zero value. Requiredness never strips the pointer (null is a
+// legal value); containers stay bare (nil is already their absent state).
 type GoGenerator struct {
 	opts goOptions
 }
@@ -229,15 +236,22 @@ func (b *goBuilder) goType(sch map[string]any, hint string) (string, bool) {
 		b.defineType(hint, stringOf(sch["description"]), sch)
 		return hint, true
 	}
+	if inner, ok := nullableAnyOf(sch); ok {
+		typ, _ := b.goType(inner, hint)
+		if strings.HasPrefix(typ, "*") || typ == "any" {
+			return typ, false
+		}
+		return "*" + typ, false
+	}
 	switch typeName(sch) {
 	case "string":
-		return "string", false
+		return nullable(sch, "string"), false
 	case "integer":
-		return "int", false
+		return nullable(sch, "int"), false
 	case "number":
-		return "float64", false
+		return nullable(sch, "float64"), false
 	case "boolean":
-		return "bool", false
+		return nullable(sch, "bool"), false
 	case "array":
 		return "[]" + b.elemType(sch, hint), false
 	case "object":
@@ -347,7 +361,8 @@ func definitions(root map[string]any) map[string]any {
 }
 
 // typeName returns the schema's "type" as a single name. A type array such
-// as ["string","null"] resolves to its sole non-null member; a union of
+// as ["string","null"] resolves to its sole non-null member (see nullableType
+// for how that nullability reaches the generated Go type); a union of
 // several concrete types resolves to the empty string (meaning "any").
 func typeName(sch map[string]any) string {
 	switch t := sch["type"].(type) {
@@ -369,6 +384,48 @@ func typeName(sch map[string]any) string {
 	default:
 		return ""
 	}
+}
+
+// nullableAnyOf detects the two-branch nullable union [WithGenerateNullablePointers]
+// emits for a Go pointer — anyOf: [{"type":"null"}, <inner>] in either order —
+// and returns the non-null branch. It is the round-trip inverse of that
+// option: a schema generated FROM *T regenerates *T.
+func nullableAnyOf(sch map[string]any) (map[string]any, bool) {
+	anyOf, ok := sch["anyOf"].([]any)
+	if !ok || len(anyOf) != 2 {
+		return nil, false
+	}
+	isNull := func(v any) bool {
+		m := mapOf(v)
+		return len(m) == 1 && stringOf(m["type"]) == "null"
+	}
+	switch {
+	case isNull(anyOf[0]):
+		return mapOf(anyOf[1]), true
+	case isNull(anyOf[1]):
+		return mapOf(anyOf[0]), true
+	}
+	return nil, false
+}
+
+// nullable wraps a scalar Go type in a pointer when the schema's type union
+// admits null — `"type": ["number", "null"]` generates *float64, so an absent
+// (or explicitly null) value is distinguishable from the zero value (the
+// anyOf form is nullableAnyOf's job). This is the presence-carrying mapping
+// for keywords whose zero is meaningful (a declared `minimum: 0` versus no
+// minimum at all). Containers are exempt: slices and maps already have an
+// absent state (nil).
+func nullable(sch map[string]any, goType string) string {
+	types, ok := sch["type"].([]any)
+	if !ok {
+		return goType
+	}
+	for _, e := range types {
+		if s, _ := e.(string); s == "null" {
+			return "*" + goType
+		}
+	}
+	return goType
 }
 
 // enumType infers a Go type from an enum or const value when no explicit
