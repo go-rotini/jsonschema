@@ -1,6 +1,7 @@
 package jsonschema_test
 
 import (
+	"encoding/json"
 	"fmt"
 	"go/ast"
 	"go/parser"
@@ -234,9 +235,27 @@ func TestGenerateGo_typeMatrix(t *testing.T) {
 		{"const_string", `{"const":"x"}`, "string"},
 		{"const_bool", `{"const":true}`, "bool"},
 
-		// Type unions.
-		{"nullable_string", `{"type":["string","null"]}`, "string"},
+		// Type unions. A scalar + null union is the presence-carrying mapping:
+		// the pointer distinguishes "absent (or null)" from the zero value —
+		// the contract keywords like a spec's `minimum` rely on (0 declared
+		// vs no bound at all). Containers stay bare: nil is already absence.
+		{"nullable_string", `{"type":["string","null"]}`, "*string"},
+		{"nullable_integer", `{"type":["integer","null"]}`, "*int"},
+		{"nullable_number", `{"type":["number","null"]}`, "*float64"},
+		{"nullable_boolean", `{"type":["boolean","null"]}`, "*bool"},
+		{"nullable_array", `{"type":["array","null"],"items":{"type":"string"}}`, "[]string"},
+		{"nullable_items", `{"type":"array","items":{"type":["integer","null"]}}`, "[]*int"},
+		{"nullable_map_value", `{"type":"object","additionalProperties":{"type":["string","null"]}}`, "map[string]*string"},
 		{"union_multi", `{"type":["string","integer"]}`, "any"},
+
+		// The anyOf nullable form — what WithGenerateNullablePointers emits
+		// for a Go pointer — round-trips back to the pointer, either order.
+		{"anyof_null_number", `{"anyOf":[{"type":"null"},{"type":"number"}]}`, "*float64"},
+		{"anyof_number_null", `{"anyOf":[{"type":"integer"},{"type":"null"}]}`, "*int"},
+		{"anyof_null_ref", `{"anyOf":[{"type":"null"},{"$ref":"#/definitions/Ref"}]}`, "*Ref"},
+		{"anyof_null_array", `{"anyOf":[{"type":"null"},{"type":"array","items":{"type":"string"}}]}`, "*[]string"},
+		{"anyof_null_any", `{"anyOf":[{"type":"null"},{}]}`, "any"},
+		{"anyof_three_way", `{"anyOf":[{"type":"null"},{"type":"string"},{"type":"integer"}]}`, "any"},
 
 		// Constructs with no faithful Go mapping: degrade to any.
 		{"oneOf", `{"oneOf":[{"type":"string"},{"type":"integer"}]}`, "any"},
@@ -251,6 +270,61 @@ func TestGenerateGo_typeMatrix(t *testing.T) {
 				t.Errorf("type for %s = %q, want %q", tc.prop, got, tc.want)
 			}
 		})
+	}
+}
+
+// TestGenerateGo_nullableScalars pins the presence-carrying contract around
+// requiredness: a nullable scalar is a pointer whether the field is required
+// or not (null is a legal VALUE — requiredness governs the json tag, never
+// strips the pointer), and the optionality rule for objects cannot
+// double-pointer it.
+func TestGenerateGo_nullableScalars(t *testing.T) {
+	schema := []byte(`{
+		"type": "object",
+		"required": ["min"],
+		"properties": {
+			"min": {"type": ["number", "null"]},
+			"max": {"type": ["number", "null"]}
+		}
+	}`)
+	src, err := jsonschema.GenerateGo(schema, jsonschema.WithGoRootType("Root"))
+	if err != nil {
+		t.Fatalf("GenerateGo: %v", err)
+	}
+	if got := structFieldType(t, src, "Root", "Min"); got != "*float64" {
+		t.Errorf("required nullable scalar = %q, want *float64", got)
+	}
+	if got := structFieldType(t, src, "Root", "Max"); got != "*float64" {
+		t.Errorf("optional nullable scalar = %q, want *float64", got)
+	}
+}
+
+// TestGenerateGo_nullableRoundTrip pins the two directions against each
+// other: a Go pointer field, emitted as a schema under
+// WithGenerateNullablePointers (the anyOf:[null, T] shape), regenerates the
+// same pointer field through GenerateGo.
+func TestGenerateGo_nullableRoundTrip(t *testing.T) {
+	type Bounds struct {
+		Minimum *float64 `json:"minimum"`
+		Label   string   `json:"label"`
+	}
+	schema, err := jsonschema.Generate(Bounds{}, jsonschema.WithGenerateNullablePointers(true))
+	if err != nil {
+		t.Fatalf("Generate: %v", err)
+	}
+	raw, err := json.Marshal(schema)
+	if err != nil {
+		t.Fatalf("marshal schema: %v", err)
+	}
+	src, err := jsonschema.GenerateGo(raw, jsonschema.WithGoRootType("Bounds"))
+	if err != nil {
+		t.Fatalf("GenerateGo: %v", err)
+	}
+	if got := structFieldType(t, src, "Bounds", "Minimum"); got != "*float64" {
+		t.Errorf("round-tripped pointer = %q, want *float64", got)
+	}
+	if got := structFieldType(t, src, "Bounds", "Label"); got != "string" {
+		t.Errorf("round-tripped value = %q, want string", got)
 	}
 }
 
