@@ -206,12 +206,8 @@ github.com/go-quicktest/qt v1.101.0 h1:O1K29Txy5P2OK0dGo59b7b0LR6wKfIhttaAhHUyn7
 github.com/go-quicktest/qt v1.101.0/go.mod h1:14Bz/f7NwaXPtdYEgzsx46kqSxVwTbzVZsDC26tQJow=
 github.com/go-rotini/jsonc v1.1.0 h1:rH+QF/pRorrNBqSPUI0L5SHi9pGXor48b5TuTdvVie0=
 github.com/go-rotini/jsonc v1.1.0/go.mod h1:PG7X1If13RRskZfLk8IM0r1RuQwj0q7BLvsXXmoO1n0=
-github.com/go-rotini/toml v1.1.0 h1:zZ0ZSu/IphjnAZ88IxbecI2Jy1dW+SuzjPlEHF6Vg4I=
-github.com/go-rotini/toml v1.1.0/go.mod h1:P7vQl8xZqhGc6wmkGkySHYsWMQmGysF095fSrMQXd2w=
 github.com/go-rotini/toml v1.1.1 h1:oaOmwTYt1j/5g0fQgwu3OS46x9dTHB5sSE88WS83TdY=
 github.com/go-rotini/toml v1.1.1/go.mod h1:P7vQl8xZqhGc6wmkGkySHYsWMQmGysF095fSrMQXd2w=
-github.com/go-rotini/yaml v1.2.0 h1:PdhDsvMlecQZmUea2H6e1agjgaMhI1pB9Md6Wit35To=
-github.com/go-rotini/yaml v1.2.0/go.mod h1:aCxYVUNF3wdysAyVpIRn2j+Uc/2aL3DvNKKQVVsTE6w=
 github.com/go-rotini/yaml v1.2.1 h1:Q+GQlMCRU/yWTay2J9rT+qsOxmJSWrsLd/bsgonK6T8=
 github.com/go-rotini/yaml v1.2.1/go.mod h1:aCxYVUNF3wdysAyVpIRn2j+Uc/2aL3DvNKKQVVsTE6w=
 github.com/go-stack/stack v1.8.0/go.mod h1:v0f6uXyyMGvRgIKkXu+yp6POWl0qKG85gN/melR3HDY=
