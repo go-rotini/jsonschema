@@ -160,11 +160,18 @@
 // Draft 2020-12 plus the OAS-specific annotation keywords (discriminator,
 // xml, externalDocs, example).
 //
-// # Bowtie Connector
+// # Command-Line Tool
 //
-// A standards-conformance connector for the [Bowtie] cross-implementation
-// JSON Schema test harness ships in the bowtie/ sub-package as a
-// `package main` adapter that speaks Bowtie's stdin/stdout protocol.
+// A companion command lives in the cmd/jsonschema sub-package: a single
+// `package main` binary (run via `go tool jsonschema` or `go install`) that
+// dispatches on a subcommand:
+//
+//   - generate — read a JSON Schema (from a file argument or standard input)
+//     and emit Go type declarations via [GenerateGo], suitable for a
+//     //go:generate directive.
+//   - bowtie — a standards-conformance connector for the [Bowtie]
+//     cross-implementation JSON Schema test harness, speaking Bowtie's
+//     stdin/stdout protocol.
 //
 // # DoS Protection
 //

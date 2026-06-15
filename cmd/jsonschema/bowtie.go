@@ -7,7 +7,6 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"os"
 
 	"github.com/go-rotini/jsonschema"
 )
@@ -37,7 +36,7 @@ var supportedDialects = []string{
 }
 
 // errStop is the sentinel returned by the dispatch loop when the harness
-// sends a "stop" command. main treats it as a graceful exit.
+// sends a "stop" command. runBowtie treats it as a graceful exit.
 var errStop = errors.New("bowtie: stop")
 
 // errEmptyCaseSchema is returned by compileCaseSchema when the case
@@ -146,20 +145,40 @@ type state struct {
 	dialect jsonschema.Draft
 }
 
-func main() {
-	os.Exit(run(os.Stdin, os.Stdout, os.Stderr))
-}
-
-// run is the testable core of main: it drives the dispatch loop against
-// the supplied I/O streams and returns the exit code main should pass to
-// os.Exit. Splitting the os.Exit call out keeps main itself a thin
-// shell while letting the package's tests cover the I/O wiring path.
-func run(in io.Reader, out, errOut io.Writer) int {
-	if err := dispatch(in, out); err != nil && !errors.Is(err, errStop) {
-		fmt.Fprintln(errOut, "bowtie:", err)
+// runBowtie is the "bowtie" subcommand: the stdin/stdout adapter that exposes
+// go-rotini/jsonschema to the Bowtie cross-implementation conformance harness
+// (https://bowtie.report). It takes no flags; the harness drives it over a
+// single-line-JSON request/response protocol on stdin/stdout. Recognized
+// commands are "start" (handshake → implementation descriptor), "dialect" (pin
+// a meta-schema URI), "run" (one case: compile + per-test results), and "stop"
+// (exit 0). The dispatch loop is factored out as dispatch(in, out) so tests can
+// drive it over bytes.Buffer pipes.
+func runBowtie(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
+	// bowtie takes no flags, so any argument is either a help request or a
+	// mistake — reject it rather than silently blocking on stdin.
+	if len(args) > 0 {
+		switch args[0] {
+		case "-h", "--help", "help":
+			bowtieUsage(stdout)
+			return 0
+		default:
+			fmt.Fprintf(stderr, "bowtie: unexpected argument %q\n", args[0])
+			bowtieUsage(stderr)
+			return 2
+		}
+	}
+	if err := dispatch(stdin, stdout); err != nil && !errors.Is(err, errStop) {
+		fmt.Fprintln(stderr, "bowtie:", err)
 		return 1
 	}
 	return 0
+}
+
+// bowtieUsage writes the bowtie subcommand summary.
+func bowtieUsage(w io.Writer) {
+	fmt.Fprintln(w, "usage: jsonschema bowtie")
+	fmt.Fprintln(w, "Bowtie conformance-harness connector. Takes no flags; the harness drives")
+	fmt.Fprintln(w, "it over a single-line-JSON request/response protocol on stdin/stdout.")
 }
 
 // dispatch is the read-eval-print loop; tests drive it over bytes.Buffer
@@ -176,9 +195,6 @@ func dispatch(in io.Reader, out io.Writer) error {
 			continue
 		}
 		if err := handleLine(line, st, enc); err != nil {
-			if errors.Is(err, errStop) {
-				return err
-			}
 			return err
 		}
 	}

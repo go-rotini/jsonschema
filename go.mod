@@ -2,17 +2,17 @@ module github.com/go-rotini/jsonschema
 
 go 1.26
 
-toolchain go1.26.2
+toolchain go1.26.4
 
 require (
 	github.com/go-rotini/jsonc v1.1.0
-	github.com/go-rotini/toml v1.1.0
-	github.com/go-rotini/yaml v1.1.0
+	github.com/go-rotini/toml v1.1.1
+	github.com/go-rotini/yaml v1.2.1
 )
 
 tool (
 	github.com/go-gremlins/gremlins/cmd/gremlins
-	github.com/go-rotini/jsonschema/gentypes
+	github.com/go-rotini/jsonschema/cmd/jsonschema
 	github.com/golangci/golangci-lint/v2/cmd/golangci-lint
 	github.com/google/go-licenses/v2
 	golang.org/x/vuln/cmd/govulncheck

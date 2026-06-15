@@ -358,33 +358,6 @@ func TestRunEmptySchema(t *testing.T) {
 	}
 }
 
-// TestRunRegistryAddResourceFailure covers the registry-add failure branch
-// of newCaseCompiler indirectly: with the registry pre-populated with
-// invalid JSON bytes, the failure surfaces as an errored response from
-// handleRun.
-func TestRunRegistryAddResourceFailure(t *testing.T) {
-	// Build the case envelope by hand so we can stuff bare text into the
-	// registry value (json.RawMessage decodes the value as opaque bytes).
-	// The trick: use a JSON string whose content is non-JSON text — that
-	// then gets passed verbatim to AddResource, which fails to decode it.
-	caseRaw := `{` +
-		`"description":"registry fail",` +
-		`"schema":{"type":"string"},` +
-		`"registry":{"https://example.com/x":"not a JSON object"},` +
-		`"tests":[{"description":"x","instance":"y"}]` +
-		`}`
-	var in bytes.Buffer
-	in.WriteString(`{"cmd":"start","version":1}` + "\n")
-	in.WriteString(`{"cmd":"run","seq":1,"case":` + caseRaw + `}` + "\n")
-	in.WriteString(`{"cmd":"stop"}` + "\n")
-	var out bytes.Buffer
-	_ = dispatch(&in, &out)
-	// The actual bytes passed to AddResource for "not a JSON object" are
-	// `"not a JSON object"` — a valid JSON string. AddResource accepts JSON
-	// strings as boolean schemas? Check the response: it should not panic.
-	// Even if the registry add succeeds, the test still exercises the path.
-}
-
 // TestEvaluateOneInstanceDecodeFailure covers the decode-error branch of
 // evaluateOne by calling it directly with a malformed raw message.
 func TestEvaluateOneInstanceDecodeFailure(t *testing.T) {
@@ -477,13 +450,10 @@ func TestDialectStateRecorded(t *testing.T) {
 	}
 }
 
-// TestEvaluateOnePanicRecovery synthesizes a panic mid-validation by passing
-// instance bytes that decode fine but a schema whose evaluator panics. There
-// is no public path that panics on validation; instead we exercise the
-// recover() defense by calling evaluateOne directly with a nil schema.
-func TestEvaluateOnePanicRecovery(t *testing.T) {
-	// Calling ValidateValue on a nil schema returns an error, not a panic;
-	// instead the test confirms the err-return branch within evaluateOne.
+// TestEvaluateOneValidateError covers evaluateOne's ValidateValue-error
+// branch: a nil schema makes ValidateValue return an error (not a panic),
+// which evaluateOne reports as an errored result.
+func TestEvaluateOneValidateError(t *testing.T) {
 	res := evaluateOne(nil, json.RawMessage(`"x"`))
 	if !res.Errored {
 		t.Errorf("expected errored=true, got %+v", res)
@@ -592,20 +562,20 @@ func TestDispatchSkipsBlankLines(t *testing.T) {
 	}
 }
 
-// TestRunHelperHappyPath covers the run() helper's success path.
+// TestRunHelperHappyPath covers the runBowtie helper's success path.
 func TestRunHelperHappyPath(t *testing.T) {
 	in := bytes.NewBufferString(`{"cmd":"stop"}` + "\n")
 	var out, errOut bytes.Buffer
-	if code := run(in, &out, &errOut); code != 0 {
+	if code := runBowtie(nil, in, &out, &errOut); code != 0 {
 		t.Errorf("run = %d, want 0; err=%q", code, errOut.String())
 	}
 }
 
-// TestRunHelperErrorPath covers the run() helper's non-stop-error path.
+// TestRunHelperErrorPath covers the runBowtie helper's non-stop-error path.
 func TestRunHelperErrorPath(t *testing.T) {
 	in := bytes.NewBufferString("not json\n")
 	var out, errOut bytes.Buffer
-	if code := run(in, &out, &errOut); code != 1 {
+	if code := runBowtie(nil, in, &out, &errOut); code != 1 {
 		t.Errorf("run = %d, want 1", code)
 	}
 	if !strings.Contains(errOut.String(), "bowtie:") {
@@ -613,53 +583,30 @@ func TestRunHelperErrorPath(t *testing.T) {
 	}
 }
 
-// TestHandleRunNewCaseCompilerError covers the newCaseCompiler-failure
-// branch of handleRun by directly invoking it with a case envelope whose
-// registry contains malformed JSON.
-func TestHandleRunNewCaseCompilerError(t *testing.T) {
-	// Construct a case envelope with a registry value that's a JSON string
-	// (valid in outer parse) — but stored in the case's Registry field as
-	// a json.RawMessage holding bare-text bytes the schema decoder can
-	// reject.
-	tc := testCase{
-		Description: "x",
-		Schema:      json.RawMessage(`{"type":"string"}`),
-		Registry: map[string]json.RawMessage{
-			"https://example.com/x": json.RawMessage(`not json`),
-		},
-		Tests: []testInstance{{Description: "x", Instance: json.RawMessage(`"y"`)}},
+// TestRunBowtie_help confirms -h/--help/help print the bowtie usage to stdout
+// and exit 0 without blocking on stdin.
+func TestRunBowtie_help(t *testing.T) {
+	for _, arg := range []string{"-h", "--help", "help"} {
+		var out, errOut bytes.Buffer
+		// errReader guarantees the protocol loop is never entered: help must
+		// short-circuit before any stdin read.
+		if code := runBowtie([]string{arg}, errReader{}, &out, &errOut); code != 0 {
+			t.Fatalf("%s: exit=%d, want 0", arg, code)
+		}
+		if !strings.Contains(out.String(), "usage: jsonschema bowtie") {
+			t.Errorf("%s: stdout missing the bowtie usage:\n%s", arg, out.String())
+		}
 	}
-	tcRaw, err := json.Marshal(tc)
-	if err != nil {
-		// json.Marshal will fail for invalid RawMessage; fall back to
-		// constructing the bytes manually.
-		t.Logf("Marshal failed (expected for invalid RawMessage): %v", err)
-		// Construct case bytes by hand: outer JSON is fine; the registry
-		// value is a JSON string (valid).
-		raw := `{"description":"x","schema":{"type":"string"},"registry":{"https://example.com/x":"not json"},"tests":[{"description":"x","instance":"y"}]}`
-		tcRaw = []byte(raw)
-	}
-	var enc bytes.Buffer
-	cmd := command{Cmd: "run", Seq: json.RawMessage(`1`), Case: tcRaw}
-	st := &state{}
-	encoder := json.NewEncoder(&enc)
-	if err := handleRun(cmd, st, encoder); err != nil {
-		t.Logf("handleRun: %v", err)
-	}
-	// We don't assert specific output; the goal is to drive the
-	// newCaseCompiler-failure branch. With a "not json" registry value
-	// stored as a JSON string, AddResource sees `"not json"` (valid JSON
-	// string), which DECODES OK. So instead try a registry value that's
-	// not-quite-valid: e.g. a duplicated value through a custom envelope.
 }
 
-// TestEvaluateOnePanicViaInjectedSchema covers the panic-recovery branch.
-// We directly invoke evaluateOne with a *jsonschema.Schema constructed in
-// a way that triggers a runtime panic. Without source modification, this
-// branch is hard to hit; we accept that coverage on the recovery path may
-// remain uncovered when no public API path provokes a panic.
-func TestEvaluateOnePanicCoverageBestEffort(t *testing.T) {
-	// Best-effort: call with a recursive schema and a deeply nested value
-	// to provoke a stack overflow if any. This rarely panics in practice.
-	t.Skip("evaluateOne panic recovery requires runtime panic to trigger; not reachable from public API")
+// TestRunBowtie_unexpectedArg confirms an unrecognized argument is rejected
+// (exit 2) instead of being ignored and blocking on stdin.
+func TestRunBowtie_unexpectedArg(t *testing.T) {
+	var out, errOut bytes.Buffer
+	if code := runBowtie([]string{"--nope"}, errReader{}, &out, &errOut); code != 2 {
+		t.Fatalf("unexpected arg: exit=%d, want 2", code)
+	}
+	if !strings.Contains(errOut.String(), `unexpected argument "--nope"`) {
+		t.Errorf("unexpected arg: stderr missing the rejection:\n%s", errOut.String())
+	}
 }
