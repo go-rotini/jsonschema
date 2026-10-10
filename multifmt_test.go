@@ -1701,8 +1701,10 @@ func TestTOMLIntegerToNumberBranches(t *testing.T) {
 		{"0x1A", "26", false},
 		{"0o17", "15", false},
 		{"0b101", "5", false},
-		{"1_000", "1000", false},                              // underscores stripped
-		{"0xFFFFFFFFFFFFFFFF", "18446744073709551615", false}, // overflow → uint64
+		// Underscores are stripped.
+		{"1_000", "1000", false},
+		// Too large for int64, so it overflows into a uint64.
+		{"0xFFFFFFFFFFFFFFFF", "18446744073709551615", false},
 		{"not-a-number", "", true},
 	}
 	for _, tc := range cases {
