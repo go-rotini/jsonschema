@@ -1,6 +1,8 @@
-package jsonschema
+package generate
 
 import (
+	"github.com/go-rotini/jsonschema"
+
 	"bytes"
 	"encoding/json"
 	"errors"
@@ -20,9 +22,9 @@ type genUser struct {
 }
 
 func TestGenerateBytesContainsCanonicalShape(t *testing.T) {
-	data, err := GenerateBytes(genUser{})
+	data, err := Bytes(genUser{})
 	if err != nil {
-		t.Fatalf("GenerateBytes: %v", err)
+		t.Fatalf("Bytes: %v", err)
 	}
 	want := []string{
 		`"$schema":"https://json-schema.org/draft/2020-12/schema"`,
@@ -82,9 +84,9 @@ func TestGenerateRoundTripRejectsTypeMismatch(t *testing.T) {
 }
 
 func TestGenerateBoolean(t *testing.T) {
-	data, err := GenerateBytes(true)
+	data, err := Bytes(true)
 	if err != nil {
-		t.Fatalf("GenerateBytes: %v", err)
+		t.Fatalf("Bytes: %v", err)
 	}
 	if !strings.Contains(string(data), `"type":"boolean"`) {
 		t.Errorf("got %s", data)
@@ -95,9 +97,9 @@ func TestGenerateBytesByteSlice(t *testing.T) {
 	type WithBytes struct {
 		Data []byte `json:"data"`
 	}
-	data, err := GenerateBytes(WithBytes{})
+	data, err := Bytes(WithBytes{})
 	if err != nil {
-		t.Fatalf("GenerateBytes: %v", err)
+		t.Fatalf("Bytes: %v", err)
 	}
 	if !strings.Contains(string(data), `"contentEncoding":"base64"`) {
 		t.Errorf("expected base64 contentEncoding, got: %s", data)
@@ -105,13 +107,13 @@ func TestGenerateBytesByteSlice(t *testing.T) {
 }
 
 func TestGenerateBytesNamedByteSlice(t *testing.T) {
-	type Bytes []byte
+	type Blob []byte
 	type Holder struct {
-		Data Bytes `json:"data"`
+		Data Blob `json:"data"`
 	}
-	data, err := GenerateBytes(Holder{})
+	data, err := Bytes(Holder{})
 	if err != nil {
-		t.Fatalf("GenerateBytes: %v", err)
+		t.Fatalf("Bytes: %v", err)
 	}
 	if !strings.Contains(string(data), `"contentEncoding":"base64"`) {
 		t.Errorf("expected base64 contentEncoding, got: %s", data)
@@ -122,9 +124,9 @@ func TestGenerateBytesByteArray(t *testing.T) {
 	type WithArr struct {
 		Hash [16]byte `json:"hash"`
 	}
-	data, err := GenerateBytes(WithArr{})
+	data, err := Bytes(WithArr{})
 	if err != nil {
-		t.Fatalf("GenerateBytes: %v", err)
+		t.Fatalf("Bytes: %v", err)
 	}
 	if !strings.Contains(string(data), `"contentEncoding":"base64"`) {
 		t.Errorf("got %s", data)
@@ -135,9 +137,9 @@ func TestGenerateBytesTimeTime(t *testing.T) {
 	type WithTime struct {
 		At time.Time `json:"at"`
 	}
-	data, err := GenerateBytes(WithTime{})
+	data, err := Bytes(WithTime{})
 	if err != nil {
-		t.Fatalf("GenerateBytes: %v", err)
+		t.Fatalf("Bytes: %v", err)
 	}
 	if !strings.Contains(string(data), `"format":"date-time"`) {
 		t.Errorf("got %s", data)
@@ -148,9 +150,9 @@ func TestGenerateBytesDurationDefault(t *testing.T) {
 	type WithDur struct {
 		D time.Duration `json:"d"`
 	}
-	data, err := GenerateBytes(WithDur{})
+	data, err := Bytes(WithDur{})
 	if err != nil {
-		t.Fatalf("GenerateBytes: %v", err)
+		t.Fatalf("Bytes: %v", err)
 	}
 	if !strings.Contains(string(data), `"d":{"type":"integer"}`) {
 		t.Errorf("expected integer duration, got %s", data)
@@ -161,9 +163,9 @@ func TestGenerateBytesDurationAsString(t *testing.T) {
 	type WithDur struct {
 		D time.Duration `json:"d"`
 	}
-	data, err := GenerateBytes(WithDur{}, WithGenerateDurationAsString(true))
+	data, err := Bytes(WithDur{}, WithDurationAsString(true))
 	if err != nil {
-		t.Fatalf("GenerateBytes: %v", err)
+		t.Fatalf("Bytes: %v", err)
 	}
 	if !strings.Contains(string(data), `"format":"duration"`) {
 		t.Errorf("got %s", data)
@@ -175,9 +177,9 @@ func TestGenerateBytesIntWidthBounds(t *testing.T) {
 		I8  int8   `json:"i8"`
 		U16 uint16 `json:"u16"`
 	}
-	data, err := GenerateBytes(WithInts{})
+	data, err := Bytes(WithInts{})
 	if err != nil {
-		t.Fatalf("GenerateBytes: %v", err)
+		t.Fatalf("Bytes: %v", err)
 	}
 	if !strings.Contains(string(data), `"i8":{"type":"integer","minimum":-128,"maximum":127}`) {
 		t.Errorf("missing i8 bounds: %s", data)
@@ -206,9 +208,9 @@ func TestGenerateIntegerKindBounds(t *testing.T) {
 		U32 uint32 `json:"u32"`
 		U64 uint64 `json:"u64"`
 	}
-	data, err := GenerateBytes(intsAll{})
+	data, err := Bytes(intsAll{})
 	if err != nil {
-		t.Fatalf("GenerateBytes: %v", err)
+		t.Fatalf("Bytes: %v", err)
 	}
 	src := string(data)
 	cases := []struct {
@@ -243,9 +245,9 @@ func TestGenerateBytesPointerInline(t *testing.T) {
 	type Outer struct {
 		I *Inner `json:"i,omitempty"`
 	}
-	data, err := GenerateBytes(Outer{})
+	data, err := Bytes(Outer{})
 	if err != nil {
-		t.Fatalf("GenerateBytes: %v", err)
+		t.Fatalf("Bytes: %v", err)
 	}
 	if !strings.Contains(string(data), `"i":{"type":"object"`) {
 		t.Errorf("expected pointer to inline struct, got %s", data)
@@ -256,9 +258,9 @@ func TestGenerateBytesNullablePointer(t *testing.T) {
 	type Holder struct {
 		Name *string `json:"name"`
 	}
-	data, err := GenerateBytes(Holder{}, WithGenerateNullablePointers(true))
+	data, err := Bytes(Holder{}, WithNullablePointers(true))
 	if err != nil {
-		t.Fatalf("GenerateBytes: %v", err)
+		t.Fatalf("Bytes: %v", err)
 	}
 	if !strings.Contains(string(data), `"anyOf":[{"type":"null"},{"type":"string"}]`) {
 		t.Errorf("expected nullable anyOf, got %s", data)
@@ -269,9 +271,9 @@ func TestGenerateBytesMapStringValue(t *testing.T) {
 	type Holder struct {
 		Tags map[string]string `json:"tags"`
 	}
-	data, err := GenerateBytes(Holder{})
+	data, err := Bytes(Holder{})
 	if err != nil {
-		t.Fatalf("GenerateBytes: %v", err)
+		t.Fatalf("Bytes: %v", err)
 	}
 	if !strings.Contains(string(data), `"additionalProperties":{"type":"string"}`) {
 		t.Errorf("got %s", data)
@@ -282,11 +284,11 @@ func TestGenerateBytesMapNonStringKeyErrors(t *testing.T) {
 	type Holder struct {
 		IDs map[int]string `json:"ids"`
 	}
-	_, err := GenerateBytes(Holder{})
+	_, err := Bytes(Holder{})
 	if err == nil {
 		t.Fatal("expected error for non-string map key")
 	}
-	if !errors.Is(err, ErrCompile) {
+	if !errors.Is(err, jsonschema.ErrCompile) {
 		t.Errorf("got %T (%v); want *CompileError", err, err)
 	}
 }
@@ -295,11 +297,11 @@ func TestGenerateBytesUnsupportedKind(t *testing.T) {
 	type Holder struct {
 		Ch chan int `json:"ch"`
 	}
-	_, err := GenerateBytes(Holder{})
+	_, err := Bytes(Holder{})
 	if err == nil {
 		t.Fatal("expected error for chan field")
 	}
-	if !errors.Is(err, ErrCompile) {
+	if !errors.Is(err, jsonschema.ErrCompile) {
 		t.Errorf("got %T", err)
 	}
 }
@@ -308,9 +310,9 @@ func TestGenerateBytesInterfaceAsAny(t *testing.T) {
 	type Holder struct {
 		V any `json:"v"`
 	}
-	data, err := GenerateBytes(Holder{})
+	data, err := Bytes(Holder{})
 	if err != nil {
-		t.Fatalf("GenerateBytes: %v", err)
+		t.Fatalf("Bytes: %v", err)
 	}
 	if !strings.Contains(string(data), `"v":{}`) {
 		t.Errorf("expected empty schema for any, got %s", data)
@@ -329,7 +331,7 @@ func TestGenerateInterfaceDirect(t *testing.T) {
 		if err == nil {
 			t.Fatal("Generate(nil): expected error, got nil")
 		}
-		var ce *CompileError
+		var ce *jsonschema.CompileError
 		if !errors.As(err, &ce) {
 			t.Fatalf("err = %T %v; want *CompileError", err, err)
 		}
@@ -338,9 +340,9 @@ func TestGenerateInterfaceDirect(t *testing.T) {
 		}
 	})
 	t.Run("generatebytes_nil_errors", func(t *testing.T) {
-		_, err := GenerateBytes(any(nil))
+		_, err := Bytes(any(nil))
 		if err == nil {
-			t.Fatal("GenerateBytes(nil): expected error")
+			t.Fatal("Bytes(nil): expected error")
 		}
 	})
 	t.Run("typed_nil_pointer_succeeds", func(t *testing.T) {
@@ -361,7 +363,7 @@ func TestGenerateBytesInterfaceAsAnyDisabledErrors(t *testing.T) {
 	type Holder struct {
 		V any `json:"v"`
 	}
-	_, err := GenerateBytes(Holder{}, WithGenerateInterfaceAsAny(false))
+	_, err := Bytes(Holder{}, WithInterfaceAsAny(false))
 	if err == nil {
 		t.Fatal("expected error when interfaceAsAny disabled")
 	}
@@ -375,9 +377,9 @@ type genTree struct {
 }
 
 func TestGenerateRecursiveType(t *testing.T) {
-	data, err := GenerateBytes(genTree{})
+	data, err := Bytes(genTree{})
 	if err != nil {
-		t.Fatalf("GenerateBytes: %v", err)
+		t.Fatalf("Bytes: %v", err)
 	}
 	if !strings.Contains(string(data), `"$defs":{"genTree":`) {
 		t.Errorf("expected $defs entry, got %s", data)
@@ -402,11 +404,11 @@ func TestGenerateRecursiveType(t *testing.T) {
 }
 
 func TestGenerateRecursiveTypeWithExpandedRefsErrors(t *testing.T) {
-	_, err := Generate(genTree{}, WithGenerateExpandedRefs(true))
+	_, err := Generate(genTree{}, WithExpandedRefs(true))
 	if err == nil {
 		t.Fatal("expected error inlining recursive type")
 	}
-	var ce *CompileError
+	var ce *jsonschema.CompileError
 	if !errors.As(err, &ce) {
 		t.Errorf("got %T", err)
 	}
@@ -414,15 +416,15 @@ func TestGenerateRecursiveTypeWithExpandedRefsErrors(t *testing.T) {
 
 func TestGenerateCustomEmitterWins(t *testing.T) {
 	type uuidish [16]byte
-	emit := func(_ reflect.Type) *Schema {
-		return MustCompile([]byte(`{"type":"string","format":"uuid"}`))
+	emit := func(_ reflect.Type) *jsonschema.Schema {
+		return jsonschema.MustCompile([]byte(`{"type":"string","format":"uuid"}`))
 	}
 	type Holder struct {
 		ID uuidish `json:"id"`
 	}
-	data, err := GenerateBytes(Holder{}, WithCustomEmitter[uuidish](emit))
+	data, err := Bytes(Holder{}, WithCustomEmitter[uuidish](emit))
 	if err != nil {
-		t.Fatalf("GenerateBytes: %v", err)
+		t.Fatalf("Bytes: %v", err)
 	}
 	if !strings.Contains(string(data), `"id":{"type":"string","format":"uuid"}`) {
 		t.Errorf("custom emitter not applied: %s", data)
@@ -430,15 +432,15 @@ func TestGenerateCustomEmitterWins(t *testing.T) {
 }
 
 func TestGenerateAdditionalPropertiesFalse(t *testing.T) {
-	data, err := GenerateBytes(genUser{}, WithGenerateAdditionalPropertiesFalse(true))
+	data, err := Bytes(genUser{}, WithAdditionalPropertiesFalse(true))
 	if err != nil {
-		t.Fatalf("GenerateBytes: %v", err)
+		t.Fatalf("Bytes: %v", err)
 	}
 	if !strings.Contains(string(data), `"additionalProperties":false`) {
 		t.Errorf("expected additionalProperties: false, got %s", data)
 	}
 	// Validate that extras are now rejected.
-	s, _ := Generate(genUser{}, WithGenerateAdditionalPropertiesFalse(true))
+	s, _ := Generate(genUser{}, WithAdditionalPropertiesFalse(true))
 	res, err := s.Validate([]byte(`{"name":"x","email":"a@b.io","extra":1}`))
 	if err != nil {
 		t.Fatalf("Validate: %v", err)
@@ -452,9 +454,9 @@ func TestGenerateOmitDescriptions(t *testing.T) {
 	type Holder struct {
 		N string `json:"n" jsonschema:"description=hi"`
 	}
-	data, err := GenerateBytes(Holder{}, WithGenerateOmitDescriptions(true))
+	data, err := Bytes(Holder{}, WithOmitDescriptions(true))
 	if err != nil {
-		t.Fatalf("GenerateBytes: %v", err)
+		t.Fatalf("Bytes: %v", err)
 	}
 	if strings.Contains(string(data), `"description"`) {
 		t.Errorf("expected no description; got %s", data)
@@ -467,9 +469,9 @@ func TestGenerateOrderedPropertiesPreservesOrder(t *testing.T) {
 		A string `json:"a"`
 		M string `json:"m"`
 	}
-	data, err := GenerateBytes(Holder{})
+	data, err := Bytes(Holder{})
 	if err != nil {
-		t.Fatalf("GenerateBytes: %v", err)
+		t.Fatalf("Bytes: %v", err)
 	}
 	idxZ := strings.Index(string(data), `"z":`)
 	idxA := strings.Index(string(data), `"a":`)
@@ -480,9 +482,9 @@ func TestGenerateOrderedPropertiesPreservesOrder(t *testing.T) {
 }
 
 func TestGenerateNoSchemaDeclaration(t *testing.T) {
-	data, err := GenerateBytes(genUser{}, WithGenerateSchemaDeclaration(false))
+	data, err := Bytes(genUser{}, WithSchemaDeclaration(false))
 	if err != nil {
-		t.Fatalf("GenerateBytes: %v", err)
+		t.Fatalf("Bytes: %v", err)
 	}
 	if strings.Contains(string(data), `"$schema"`) {
 		t.Errorf("expected no $schema, got %s", data)
@@ -490,9 +492,9 @@ func TestGenerateNoSchemaDeclaration(t *testing.T) {
 }
 
 func TestGenerateID(t *testing.T) {
-	data, err := GenerateBytes(genUser{}, WithGenerateID("https://example.com/user.json"))
+	data, err := Bytes(genUser{}, WithID("https://example.com/user.json"))
 	if err != nil {
-		t.Fatalf("GenerateBytes: %v", err)
+		t.Fatalf("Bytes: %v", err)
 	}
 	if !strings.Contains(string(data), `"$id":"https://example.com/user.json"`) {
 		t.Errorf("expected $id, got %s", data)
@@ -507,9 +509,9 @@ func TestGenerateEmbeddedAnonymousStruct(t *testing.T) {
 		Common
 		Name string `json:"name" jsonschema:"required"`
 	}
-	data, err := GenerateBytes(WithCommon{})
+	data, err := Bytes(WithCommon{})
 	if err != nil {
-		t.Fatalf("GenerateBytes: %v", err)
+		t.Fatalf("Bytes: %v", err)
 	}
 	if !strings.Contains(string(data), `"id":{`) {
 		t.Errorf("expected id embedded at top level: %s", data)
@@ -528,9 +530,9 @@ func TestGenerateJSONTagDash(t *testing.T) {
 		Internal string `json:"-"`
 		Public   string `json:"public"`
 	}
-	data, err := GenerateBytes(Holder{})
+	data, err := Bytes(Holder{})
 	if err != nil {
-		t.Fatalf("GenerateBytes: %v", err)
+		t.Fatalf("Bytes: %v", err)
 	}
 	if strings.Contains(string(data), `"Internal"`) {
 		t.Errorf("Internal should be omitted; got %s", data)
@@ -541,9 +543,9 @@ func TestGenerateOmitemptyStripsRequired(t *testing.T) {
 	type Holder struct {
 		A string `json:"a,omitempty" jsonschema:"required"`
 	}
-	data, err := GenerateBytes(Holder{})
+	data, err := Bytes(Holder{})
 	if err != nil {
-		t.Fatalf("GenerateBytes: %v", err)
+		t.Fatalf("Bytes: %v", err)
 	}
 	if strings.Contains(string(data), `"required"`) {
 		t.Errorf("omitempty should strip required, got %s", data)
@@ -571,14 +573,14 @@ func TestGenerateConcurrentSafe(t *testing.T) {
 	type Holder struct {
 		A string `json:"a" jsonschema:"required"`
 	}
-	gen := NewGenerator()
+	gen := New()
 	var wg sync.WaitGroup
 	for i := 0; i < 16; i++ {
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
-			if _, err := gen.GenerateBytes(Holder{}); err != nil {
-				t.Errorf("GenerateBytes: %v", err)
+			if _, err := gen.Bytes(Holder{}); err != nil {
+				t.Errorf("Bytes: %v", err)
 			}
 		}()
 	}
@@ -590,9 +592,9 @@ func TestGenerateDraftSelectorChangesDefsKey(t *testing.T) {
 		Children []*Tree `json:"children,omitempty"`
 		Name     string  `json:"name"`
 	}
-	data, err := GenerateBytes(Tree{}, WithGenerateDraft(Draft7))
+	data, err := Bytes(Tree{}, WithDraft(jsonschema.Draft7))
 	if err != nil {
-		t.Fatalf("GenerateBytes: %v", err)
+		t.Fatalf("Bytes: %v", err)
 	}
 	if !strings.Contains(string(data), `"definitions":{"Tree":`) {
 		t.Errorf("expected definitions for Draft 7, got %s", data)
@@ -625,7 +627,7 @@ func TestGenerateNilValueErrors(t *testing.T) {
 	if _, err := Generate(nil); err == nil {
 		t.Fatal("expected error for nil value")
 	}
-	if _, err := GenerateBytes(nil); err == nil {
+	if _, err := Bytes(nil); err == nil {
 		t.Fatal("expected error for nil value")
 	}
 }
@@ -634,14 +636,14 @@ func TestGenerateEnumOnString(t *testing.T) {
 	type Holder struct {
 		Role string `json:"role" jsonschema:"enum=admin|editor|viewer"`
 	}
-	data, err := GenerateBytes(Holder{})
+	data, err := Bytes(Holder{})
 	if err != nil {
-		t.Fatalf("GenerateBytes: %v", err)
+		t.Fatalf("Bytes: %v", err)
 	}
 	if !strings.Contains(string(data), `"enum":["admin","editor","viewer"]`) {
 		t.Errorf("got %s", data)
 	}
-	s := MustCompile(data)
+	s := jsonschema.MustCompile(data)
 	bad, _ := json.Marshal(struct {
 		Role string `json:"role"`
 	}{"hacker"})
@@ -655,9 +657,9 @@ func TestGenerateUniqueItems(t *testing.T) {
 	type Holder struct {
 		Tags []string `json:"tags" jsonschema:"uniqueItems"`
 	}
-	data, err := GenerateBytes(Holder{})
+	data, err := Bytes(Holder{})
 	if err != nil {
-		t.Fatalf("GenerateBytes: %v", err)
+		t.Fatalf("Bytes: %v", err)
 	}
 	if !strings.Contains(string(data), `"uniqueItems":true`) {
 		t.Errorf("got %s", data)
@@ -668,9 +670,9 @@ func TestGenerateRefOverridesGeneration(t *testing.T) {
 	type Holder struct {
 		Name string `json:"name" jsonschema:"$ref=https://example.com/name.json"`
 	}
-	data, err := GenerateBytes(Holder{})
+	data, err := Bytes(Holder{})
 	if err != nil {
-		t.Fatalf("GenerateBytes: %v", err)
+		t.Fatalf("Bytes: %v", err)
 	}
 	if !strings.Contains(string(data), `"$ref":"https://example.com/name.json"`) {
 		t.Errorf("got %s", data)
@@ -720,7 +722,7 @@ func TestGeneratorWellKnownTypes(t *testing.T) {
 		N json.Number     `json:"n"`
 		R json.RawMessage `json:"r"`
 	}
-	g := NewGenerator()
+	g := New()
 	if _, err := g.Generate(item{}); err != nil {
 		t.Errorf("Generate: %v", err)
 	}
@@ -728,13 +730,13 @@ func TestGeneratorWellKnownTypes(t *testing.T) {
 
 // TestGeneratorWellKnownDurationAsString covers the durationAsString branch.
 func TestGeneratorWellKnownDurationAsString(t *testing.T) {
-	g := NewGenerator(WithGenerateDurationAsString(true))
+	g := New(WithDurationAsString(true))
 	type item struct {
 		D time.Duration `json:"d"`
 	}
-	data, err := g.GenerateBytes(item{})
+	data, err := g.Bytes(item{})
 	if err != nil {
-		t.Errorf("GenerateBytes: %v", err)
+		t.Errorf("Bytes: %v", err)
 	}
 	if !strings.Contains(string(data), "duration") {
 		t.Errorf("expected 'duration' in output: %s", data)
@@ -743,7 +745,7 @@ func TestGeneratorWellKnownDurationAsString(t *testing.T) {
 
 // TestGeneratorPointerTypes covers tryPointer for special bigint/bigfloat.
 func TestGeneratorPointerTypes(t *testing.T) {
-	g := NewGenerator()
+	g := New()
 	type item struct {
 		Name *string `json:"name"`
 	}
@@ -752,15 +754,15 @@ func TestGeneratorPointerTypes(t *testing.T) {
 	}
 }
 
-// TestGeneratorNullablePointers covers the WithGenerateNullablePointers wrap.
+// TestGeneratorNullablePointers covers the WithNullablePointers wrap.
 func TestGeneratorNullablePointers(t *testing.T) {
-	g := NewGenerator(WithGenerateNullablePointers(true))
+	g := New(WithNullablePointers(true))
 	type item struct {
 		Name *string `json:"name"`
 	}
-	data, err := g.GenerateBytes(item{})
+	data, err := g.Bytes(item{})
 	if err != nil {
-		t.Fatalf("GenerateBytes: %v", err)
+		t.Fatalf("Bytes: %v", err)
 	}
 	if !strings.Contains(string(data), "anyOf") {
 		t.Errorf("expected anyOf wrap: %s", data)
@@ -776,7 +778,7 @@ func (customMarshaler) MarshalJSON() ([]byte, error) {
 }
 
 func TestGeneratorJSONMarshaler(t *testing.T) {
-	g := NewGenerator()
+	g := New()
 	type item struct {
 		C customMarshaler `json:"c"`
 	}
@@ -794,7 +796,7 @@ func (customTextMarshaler) MarshalText() ([]byte, error) {
 }
 
 func TestGeneratorTextMarshaler(t *testing.T) {
-	g := NewGenerator()
+	g := New()
 	type item struct {
 		C customTextMarshaler `json:"c"`
 	}
@@ -809,15 +811,15 @@ type withCustom struct {
 }
 
 func TestGeneratorCustomEmitter(t *testing.T) {
-	g := NewGenerator(WithCustomEmitter[withCustom](func(_ reflect.Type) *Schema {
-		return MustCompile([]byte(`{"type":"string","format":"x-custom"}`))
+	g := New(WithCustomEmitter[withCustom](func(_ reflect.Type) *jsonschema.Schema {
+		return jsonschema.MustCompile([]byte(`{"type":"string","format":"x-custom"}`))
 	}))
 	type wrapper struct {
 		C withCustom `json:"c"`
 	}
-	data, err := g.GenerateBytes(wrapper{})
+	data, err := g.Bytes(wrapper{})
 	if err != nil {
-		t.Fatalf("GenerateBytes: %v", err)
+		t.Fatalf("Bytes: %v", err)
 	}
 	if !strings.Contains(string(data), "x-custom") {
 		t.Errorf("expected custom emitter output: %s", data)
@@ -829,14 +831,14 @@ func TestGeneratorCustomEmitter(t *testing.T) {
 type withCustomNil struct{}
 
 func TestGeneratorCustomEmitterNil(t *testing.T) {
-	g := NewGenerator(WithCustomEmitter[withCustomNil](func(_ reflect.Type) *Schema {
+	g := New(WithCustomEmitter[withCustomNil](func(_ reflect.Type) *jsonschema.Schema {
 		return nil
 	}))
 	type wrapper struct {
 		C withCustomNil `json:"c"`
 	}
-	if _, err := g.GenerateBytes(wrapper{}); err != nil {
-		t.Errorf("GenerateBytes: %v", err)
+	if _, err := g.Bytes(wrapper{}); err != nil {
+		t.Errorf("Bytes: %v", err)
 	}
 }
 
@@ -846,7 +848,7 @@ func TestGeneratorBigIntPointer(t *testing.T) {
 		I *big.Int   `json:"i"`
 		F *big.Float `json:"f"`
 	}
-	g := NewGenerator()
+	g := New()
 	if _, err := g.Generate(item{}); err != nil {
 		t.Errorf("Generate: %v", err)
 	}
@@ -857,10 +859,10 @@ func TestGeneratorRecursiveType(t *testing.T) {
 	type Node struct {
 		Children []*Node `json:"children"`
 	}
-	g := NewGenerator()
-	data, err := g.GenerateBytes(Node{})
+	g := New()
+	data, err := g.Bytes(Node{})
 	if err != nil {
-		t.Fatalf("GenerateBytes: %v", err)
+		t.Fatalf("Bytes: %v", err)
 	}
 	// Must produce a $defs entry for Node and a $ref to it.
 	if !strings.Contains(string(data), "$ref") {
@@ -871,7 +873,7 @@ func TestGeneratorRecursiveType(t *testing.T) {
 // TestGeneratorMustGeneratePrimitive covers MustGenerate happy path with
 // primitive.
 func TestGeneratorMustGeneratePrimitive(t *testing.T) {
-	g := NewGenerator()
+	g := New()
 	if s := g.MustGenerate(42); s == nil {
 		t.Error("nil")
 	}
@@ -879,7 +881,7 @@ func TestGeneratorMustGeneratePrimitive(t *testing.T) {
 
 // TestBytesFromTypeNilType covers the nil-Type branch via the public path.
 func TestBytesFromTypeNilType(t *testing.T) {
-	g := NewGenerator()
+	g := New()
 	if _, err := g.bytesFromType(nil); err == nil {
 		t.Error("expected error")
 	}
@@ -894,10 +896,10 @@ func TestGeneratorWithExpandedRefs(t *testing.T) {
 		A Inner `json:"a"`
 		B Inner `json:"b"`
 	}
-	g := NewGenerator(WithGenerateExpandedRefs(true))
-	data, err := g.GenerateBytes(Outer{})
+	g := New(WithExpandedRefs(true))
+	data, err := g.Bytes(Outer{})
 	if err != nil {
-		t.Fatalf("GenerateBytes: %v", err)
+		t.Fatalf("Bytes: %v", err)
 	}
 	// With expanded refs, no $ref to Inner should appear.
 	if strings.Contains(string(data), "$ref") {
@@ -916,14 +918,14 @@ func TestGenerateMustGenerateTopLevel(t *testing.T) {
 	}
 }
 
-// TestGenerateBytesTopLevel covers the GenerateBytes top-level wrapper.
+// TestGenerateBytesTopLevel covers the Bytes top-level wrapper.
 func TestGenerateBytesTopLevel(t *testing.T) {
 	type X struct {
 		Name string `json:"name"`
 	}
-	b, err := GenerateBytes(X{})
+	b, err := Bytes(X{})
 	if err != nil {
-		t.Fatalf("GenerateBytes: %v", err)
+		t.Fatalf("Bytes: %v", err)
 	}
 	if len(b) == 0 {
 		t.Error("empty bytes")
@@ -1083,7 +1085,7 @@ func TestTagSpecHasMethods(t *testing.T) {
 // TestGeneratorMustGenerateNonStruct covers the success branch of
 // MustGenerate when the input is a primitive.
 func TestGeneratorMustGenerateNonStruct(t *testing.T) {
-	g := NewGenerator()
+	g := New()
 	if s := g.MustGenerate("hello"); s == nil {
 		t.Error("nil")
 	}
@@ -1091,12 +1093,12 @@ func TestGeneratorMustGenerateNonStruct(t *testing.T) {
 
 // TestGenerateFromTypeInterfaceWithoutAnyOption covers the success path of
 // FromType where Compile fails. We trigger this with
-// WithGenerateInterfaceAsAny(false) and an interface-typed field.
+// WithInterfaceAsAny(false) and an interface-typed field.
 func TestGenerateFromTypeInterfaceWithoutAnyOption(t *testing.T) {
 	type item struct {
 		X any `json:"x"`
 	}
-	g := NewGenerator(WithGenerateInterfaceAsAny(false))
+	g := New(WithInterfaceAsAny(false))
 	if _, err := g.FromType(reflect.TypeOf(item{})); err == nil {
 		t.Skip("no error for interface; behavior may have changed")
 	}
@@ -1163,13 +1165,13 @@ func TestGeneratorMustGeneratePanicsOnNil(t *testing.T) {
 			t.Error("expected panic")
 		}
 	}()
-	g := NewGenerator()
+	g := New()
 	_ = g.MustGenerate(nil)
 }
 
 // TestGeneratorMustGenerateSuccess covers the happy path.
 func TestGeneratorMustGenerateSuccess(t *testing.T) {
-	g := NewGenerator()
+	g := New()
 	if s := g.MustGenerate(struct{ N string }{}); s == nil {
 		t.Error("nil")
 	}
@@ -1178,36 +1180,36 @@ func TestGeneratorMustGenerateSuccess(t *testing.T) {
 // TestGeneratorNilReceiver covers nil-receiver branches.
 func TestGeneratorNilReceiver(t *testing.T) {
 	var g *Generator
-	if _, err := g.Generate(struct{}{}); !errors.Is(err, ErrSchemaNotCompiled) {
+	if _, err := g.Generate(struct{}{}); !errors.Is(err, jsonschema.ErrSchemaNotCompiled) {
 		t.Errorf("Generate: %v", err)
 	}
-	if _, err := g.GenerateBytes(struct{}{}); !errors.Is(err, ErrSchemaNotCompiled) {
-		t.Errorf("GenerateBytes: %v", err)
+	if _, err := g.Bytes(struct{}{}); !errors.Is(err, jsonschema.ErrSchemaNotCompiled) {
+		t.Errorf("Bytes: %v", err)
 	}
-	if _, err := g.FromType(reflect.TypeOf(struct{}{})); !errors.Is(err, ErrSchemaNotCompiled) {
+	if _, err := g.FromType(reflect.TypeOf(struct{}{})); !errors.Is(err, jsonschema.ErrSchemaNotCompiled) {
 		t.Errorf("FromType: %v", err)
 	}
 }
 
 // TestGeneratorGenerateNilValue covers Generate(nil) error path.
 func TestGeneratorGenerateNilValue(t *testing.T) {
-	g := NewGenerator()
+	g := New()
 	if _, err := g.Generate(nil); err == nil {
 		t.Error("expected error")
 	}
 }
 
-// TestGeneratorGenerateBytesNilValue covers GenerateBytes(nil).
+// TestGeneratorGenerateBytesNilValue covers Bytes(nil).
 func TestGeneratorGenerateBytesNilValue(t *testing.T) {
-	g := NewGenerator()
-	if _, err := g.GenerateBytes(nil); err == nil {
+	g := New()
+	if _, err := g.Bytes(nil); err == nil {
 		t.Error("expected error")
 	}
 }
 
 // TestGeneratorFromTypeNilType covers the nil-Type branch.
 func TestGeneratorFromTypeNilType(t *testing.T) {
-	g := NewGenerator()
+	g := New()
 	if _, err := g.FromType(nil); err == nil {
 		t.Error("expected error")
 	}
@@ -1216,7 +1218,7 @@ func TestGeneratorFromTypeNilType(t *testing.T) {
 // TestGeneratorChannelFailure exercises MustGenerate with an unsupported
 // type (chan int).
 func TestGeneratorChannelFailure(t *testing.T) {
-	g := NewGenerator()
+	g := New()
 	type bad struct {
 		C chan int `json:"c"`
 	}

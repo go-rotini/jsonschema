@@ -10,9 +10,9 @@ This package is used as the default JSON Schema support package for [rotini](htt
 - Compile/validate split (`Compile` → `*Schema` → `Validate`) so compilation amortizes across many validations
 - All four output formats from Draft 2020-12 §12: Flag, Basic, Detailed, Verbose
 - Generic `ValidateTo[T]` typed-decode in one call
-- Schema generation from Go types via reflection (`Generate`, `GenerateBytes`, `FromType`)
+- Schema generation from Go types via reflection (the `generate` subpackage: `Generate`, `Bytes`, `FromType`), and Go types from a schema (the `gogen` subpackage)
 - Multi-format instance and schema input (JSONC, YAML, TOML) via `LoadJSONC` / `LoadYAML` / `LoadTOML` and their `Validate*` counterparts
-- `$ref`, `$dynamicRef`, `$recursiveRef`, plain-name anchors, and pluggable `Loader` (HTTPS-only by default; opt-in HTTP / file)
+- `$ref`, `$dynamicRef`, `$recursiveRef`, plain-name anchors, and pluggable `Loader` (offline by default; opt-in HTTPS through the `httploader` subpackage, file and embed loaders)
 - Built-in format validators: `date-time`, `date`, `time`, `duration`, `email`, `idn-email`, `hostname`, `idn-hostname`, `ipv4`, `ipv6`, `uri`, `uri-reference`, `iri`, `iri-reference`, `uri-template`, `json-pointer`, `relative-json-pointer`, `uuid`, `regex`
 - Content vocabulary: `contentEncoding`, `contentMediaType`, `contentSchema` (annotation-only by default)
 - Two strict modes: `WithMetaSchemaValidation` (compile-time meta-schema check) and `WithFormatAssertion` (runtime format assertion)
@@ -39,6 +39,7 @@ import (
 	"log"
 
 	"github.com/go-rotini/jsonschema"
+	"github.com/go-rotini/jsonschema/generate"
 )
 
 type User struct {
@@ -80,7 +81,7 @@ func main() {
 	fmt.Printf("%+v\n", user)
 
 	// Generate a schema from a Go type.
-	generated, err := jsonschema.GenerateBytes(User{})
+	generated, err := generate.Bytes(User{})
 	if err != nil {
 		log.Fatal(err)
 	}
@@ -90,7 +91,7 @@ func main() {
 
 ## Schema Generation From Go Types
 
-Two tags drive generation:
+The `generate` subpackage builds a schema from a Go type. Two tags drive generation:
 
 - `json` — standard library semantics: property name, `omitempty`, `-`.
 - `jsonschema` — schema-specific options.
@@ -122,7 +123,7 @@ type Tree struct {
 	Children []*Tree `json:"children,omitempty"`
 }
 
-schema, _ := jsonschema.GenerateBytes(Tree{})
+schema, _ := generate.Bytes(Tree{})
 fmt.Println(string(schema))
 // {"$schema":"https://json-schema.org/draft/2020-12/schema",
 //  "$ref":"#/$defs/Tree",
@@ -130,6 +131,20 @@ fmt.Println(string(schema))
 //    "label":{"type":"string"},
 //    "children":{"type":"array","items":{"$ref":"#/$defs/Tree"}}}}}}
 ```
+
+The `gogen` subpackage goes the other way, from a schema to Go type declarations; `go tool jsonschema generate` wraps it for `go:generate`.
+
+## Remote References
+
+A `$ref` to another document goes through the compiler's `Loader`. The default serves only the embedded standard meta-schemas, so compiling never touches the network and the package does not link `net/http`. Register schemas with `Compiler.AddResource` or a `MapLoader`, read them with `FileLoader` or `EmbedLoader`, or opt into HTTPS:
+
+```go
+import "github.com/go-rotini/jsonschema/httploader"
+
+schema, err := jsonschema.Compile(schemaJSON, jsonschema.WithLoader(httploader.Default()))
+```
+
+`httploader.Default()` keeps meta-schema refs offline and fetches everything else over HTTPS. Build an `httploader.Loader` directly to set the client, timeout, body cap, response cache, plain-http access or request headers.
 
 ## Multi-Format Input
 

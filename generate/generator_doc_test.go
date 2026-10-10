@@ -1,4 +1,4 @@
-package jsonschema
+package generate
 
 import (
 	"strings"
@@ -28,9 +28,9 @@ type docFixture struct {
 	fsys := fstest.MapFS{
 		"fixture.go": &fstest.MapFile{Data: []byte(src)},
 	}
-	data, err := GenerateBytes(docFixture{}, WithDocReader(fsys))
+	data, err := Bytes(docFixture{}, WithDocReader(fsys))
 	if err != nil {
-		t.Fatalf("GenerateBytes: %v", err)
+		t.Fatalf("Bytes: %v", err)
 	}
 	if !strings.Contains(string(data), `"description":"Name is the user's full display name."`) {
 		t.Errorf("missing Name description: %s", data)
@@ -54,9 +54,9 @@ type fixture struct {
 	fsys := fstest.MapFS{
 		"fixture.go": &fstest.MapFile{Data: []byte(src)},
 	}
-	data, err := GenerateBytes(fixture{}, WithDocReader(fsys))
+	data, err := Bytes(fixture{}, WithDocReader(fsys))
 	if err != nil {
-		t.Fatalf("GenerateBytes: %v", err)
+		t.Fatalf("Bytes: %v", err)
 	}
 	if !strings.Contains(string(data), `"description":"tag-wins"`) {
 		t.Errorf("expected tag to win, got %s", data)
@@ -76,8 +76,8 @@ func TestWithDocReaderUnreadableFilesAreIgnored(t *testing.T) {
 	type Holder struct {
 		Name string `json:"name"`
 	}
-	if _, err := GenerateBytes(Holder{}, WithDocReader(fsys)); err != nil {
-		t.Fatalf("GenerateBytes should not fail on bad doc-reader input: %v", err)
+	if _, err := Bytes(Holder{}, WithDocReader(fsys)); err != nil {
+		t.Fatalf("Bytes should not fail on bad doc-reader input: %v", err)
 	}
 }
 
@@ -95,9 +95,9 @@ type fixture struct {
 	type fixture struct {
 		Name string `json:"name"`
 	}
-	data, err := GenerateBytes(fixture{}, WithDocReader(fsys), WithGenerateOmitDescriptions(true))
+	data, err := Bytes(fixture{}, WithDocReader(fsys), WithOmitDescriptions(true))
 	if err != nil {
-		t.Fatalf("GenerateBytes: %v", err)
+		t.Fatalf("Bytes: %v", err)
 	}
 	if strings.Contains(string(data), `"description"`) {
 		t.Errorf("expected no descriptions; got %s", data)

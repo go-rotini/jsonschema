@@ -1,6 +1,8 @@
-package jsonschema
+package generate
 
 import (
+	"github.com/go-rotini/jsonschema"
+
 	"errors"
 	"reflect"
 	"strings"
@@ -83,9 +85,9 @@ func TestTagParseHappyPath(t *testing.T) {
 	type Holder struct {
 		S string `jsonschema:"required,minLength=1,maxLength=100,pattern=^[a-z]+$,format=email,description=user-id"`
 	}
-	data, err := GenerateBytes(Holder{})
+	data, err := Bytes(Holder{})
 	if err != nil {
-		t.Fatalf("GenerateBytes: %v", err)
+		t.Fatalf("Bytes: %v", err)
 	}
 	for _, want := range []string{
 		`"minLength":1`, `"maxLength":100`,
@@ -102,9 +104,9 @@ func TestTagDescriptionEscapedComma(t *testing.T) {
 	type Holder struct {
 		S string `jsonschema:"description=hello\\, world"`
 	}
-	data, err := GenerateBytes(Holder{})
+	data, err := Bytes(Holder{})
 	if err != nil {
-		t.Fatalf("GenerateBytes: %v", err)
+		t.Fatalf("Bytes: %v", err)
 	}
 	if !strings.Contains(string(data), `"description":"hello, world"`) {
 		t.Errorf("got %s", data)
@@ -117,9 +119,9 @@ func TestTagPatternEscapedBackslash(t *testing.T) {
 	}
 	// Value should round-trip to `\d+` after unescape — JSON escapes
 	// the backslash too, so the wire form is "\\d+".
-	data, err := GenerateBytes(Holder{})
+	data, err := Bytes(Holder{})
 	if err != nil {
-		t.Fatalf("GenerateBytes: %v", err)
+		t.Fatalf("Bytes: %v", err)
 	}
 	if !strings.Contains(string(data), `"pattern":"\\d+"`) {
 		t.Errorf("got %s", data)
@@ -130,9 +132,9 @@ func TestTagEnumAndExamples(t *testing.T) {
 	type Holder struct {
 		S string `jsonschema:"enum=a|b|c,examples=x|y"`
 	}
-	data, err := GenerateBytes(Holder{})
+	data, err := Bytes(Holder{})
 	if err != nil {
-		t.Fatalf("GenerateBytes: %v", err)
+		t.Fatalf("Bytes: %v", err)
 	}
 	if !strings.Contains(string(data), `"enum":["a","b","c"]`) {
 		t.Errorf("got %s", data)
@@ -146,9 +148,9 @@ func TestTagEnumIntCoerce(t *testing.T) {
 	type Holder struct {
 		N int `jsonschema:"enum=1|2|3"`
 	}
-	data, err := GenerateBytes(Holder{})
+	data, err := Bytes(Holder{})
 	if err != nil {
-		t.Fatalf("GenerateBytes: %v", err)
+		t.Fatalf("Bytes: %v", err)
 	}
 	if !strings.Contains(string(data), `"enum":[1,2,3]`) {
 		t.Errorf("expected integer enum, got %s", data)
@@ -159,11 +161,11 @@ func TestTagFlagsCannotTakeValue(t *testing.T) {
 	type Holder struct {
 		S string `jsonschema:"required=true"`
 	}
-	_, err := GenerateBytes(Holder{})
+	_, err := Bytes(Holder{})
 	if err == nil {
 		t.Fatal("expected error: required=true should be rejected")
 	}
-	var ce *CompileError
+	var ce *jsonschema.CompileError
 	if !errors.As(err, &ce) {
 		t.Errorf("got %T", err)
 	}
@@ -173,7 +175,7 @@ func TestTagMinLengthOnNonStringErrors(t *testing.T) {
 	type Holder struct {
 		N int `jsonschema:"minLength=3"`
 	}
-	_, err := GenerateBytes(Holder{})
+	_, err := Bytes(Holder{})
 	if err == nil {
 		t.Fatal("expected error")
 	}
@@ -183,7 +185,7 @@ func TestTagMinimumOnNonNumericErrors(t *testing.T) {
 	type Holder struct {
 		S string `jsonschema:"minimum=3"`
 	}
-	_, err := GenerateBytes(Holder{})
+	_, err := Bytes(Holder{})
 	if err == nil {
 		t.Fatal("expected error")
 	}
@@ -193,7 +195,7 @@ func TestTagMalformedNumeric(t *testing.T) {
 	type Holder struct {
 		N int `jsonschema:"minimum=NaN"`
 	}
-	_, err := GenerateBytes(Holder{})
+	_, err := Bytes(Holder{})
 	if err == nil {
 		t.Fatal("expected error")
 	}
@@ -203,7 +205,7 @@ func TestTagUnknownOptionErrors(t *testing.T) {
 	type Holder struct {
 		S string `jsonschema:"frobnicate=yes"`
 	}
-	_, err := GenerateBytes(Holder{})
+	_, err := Bytes(Holder{})
 	if err == nil {
 		t.Fatal("expected error for unknown tag option")
 	}
@@ -215,9 +217,9 @@ func TestTagDeprecatedReadOnlyWriteOnly(t *testing.T) {
 		B string `jsonschema:"readOnly"`
 		C string `jsonschema:"writeOnly"`
 	}
-	data, err := GenerateBytes(Holder{})
+	data, err := Bytes(Holder{})
 	if err != nil {
-		t.Fatalf("GenerateBytes: %v", err)
+		t.Fatalf("Bytes: %v", err)
 	}
 	for _, w := range []string{`"deprecated":true`, `"readOnly":true`, `"writeOnly":true`} {
 		if !strings.Contains(string(data), w) {
@@ -231,9 +233,9 @@ func TestTagDefaultAndConst(t *testing.T) {
 		Name  string `jsonschema:"default=anon"`
 		Count int    `jsonschema:"const=42"`
 	}
-	data, err := GenerateBytes(Holder{})
+	data, err := Bytes(Holder{})
 	if err != nil {
-		t.Fatalf("GenerateBytes: %v", err)
+		t.Fatalf("Bytes: %v", err)
 	}
 	if !strings.Contains(string(data), `"default":"anon"`) {
 		t.Errorf("got %s", data)
@@ -248,9 +250,9 @@ func TestTagBoundsExclusiveAndMultiple(t *testing.T) {
 		N int     `jsonschema:"exclusiveMinimum=0,exclusiveMaximum=100,multipleOf=5"`
 		F float64 `jsonschema:"minimum=0.5"`
 	}
-	data, err := GenerateBytes(Holder{})
+	data, err := Bytes(Holder{})
 	if err != nil {
-		t.Fatalf("GenerateBytes: %v", err)
+		t.Fatalf("Bytes: %v", err)
 	}
 	for _, w := range []string{`"exclusiveMinimum":0`, `"exclusiveMaximum":100`, `"multipleOf":5`, `"minimum":0.5`} {
 		if !strings.Contains(string(data), w) {
@@ -263,9 +265,9 @@ func TestTagAdditionalPropertiesFalseOnMap(t *testing.T) {
 	type Holder struct {
 		M map[string]int `jsonschema:"additionalProperties=false"`
 	}
-	data, err := GenerateBytes(Holder{})
+	data, err := Bytes(Holder{})
 	if err != nil {
-		t.Fatalf("GenerateBytes: %v", err)
+		t.Fatalf("Bytes: %v", err)
 	}
 	// The tag overlay sets the field schema's additionalProperties to
 	// false (overriding the implicit value-type schema). Both shapes
@@ -280,7 +282,7 @@ func TestTagAdditionalPropertiesNonFalseRejected(t *testing.T) {
 	type Holder struct {
 		M map[string]int `jsonschema:"additionalProperties=true"`
 	}
-	_, err := GenerateBytes(Holder{})
+	_, err := Bytes(Holder{})
 	if err == nil {
 		t.Fatal("expected error: only =false supported")
 	}
@@ -290,9 +292,9 @@ func TestTagMinPropertiesOnMap(t *testing.T) {
 	type Holder struct {
 		M map[string]int `jsonschema:"minProperties=1,maxProperties=10"`
 	}
-	data, err := GenerateBytes(Holder{})
+	data, err := Bytes(Holder{})
 	if err != nil {
-		t.Fatalf("GenerateBytes: %v", err)
+		t.Fatalf("Bytes: %v", err)
 	}
 	for _, w := range []string{`"minProperties":1`, `"maxProperties":10`} {
 		if !strings.Contains(string(data), w) {
@@ -305,9 +307,9 @@ func TestTagIDOption(t *testing.T) {
 	type Holder struct {
 		S string `jsonschema:"$id=https://example.com/s"`
 	}
-	data, err := GenerateBytes(Holder{})
+	data, err := Bytes(Holder{})
 	if err != nil {
-		t.Fatalf("GenerateBytes: %v", err)
+		t.Fatalf("Bytes: %v", err)
 	}
 	if !strings.Contains(string(data), `"$id":"https://example.com/s"`) {
 		t.Errorf("got %s", data)
@@ -318,9 +320,9 @@ func TestTagTitleOption(t *testing.T) {
 	type Holder struct {
 		S string `jsonschema:"title=The Name"`
 	}
-	data, err := GenerateBytes(Holder{})
+	data, err := Bytes(Holder{})
 	if err != nil {
-		t.Fatalf("GenerateBytes: %v", err)
+		t.Fatalf("Bytes: %v", err)
 	}
 	if !strings.Contains(string(data), `"title":"The Name"`) {
 		t.Errorf("got %s", data)
@@ -338,15 +340,15 @@ func TestTagUnknownFormatPassesThrough(t *testing.T) {
 	type S struct {
 		X string `json:"x" jsonschema:"format=fictitious-format"`
 	}
-	data, err := GenerateBytes(S{})
+	data, err := Bytes(S{})
 	if err != nil {
-		t.Fatalf("GenerateBytes: %v", err)
+		t.Fatalf("Bytes: %v", err)
 	}
 	if !strings.Contains(string(data), `"format":"fictitious-format"`) {
 		t.Errorf("expected fictitious-format to pass through; got %s", data)
 	}
 	// And the schema compiles cleanly even though the format is unknown.
-	if _, err := Compile(data); err != nil {
+	if _, err := jsonschema.Compile(data); err != nil {
 		t.Errorf("Compile: schema with unknown format must compile cleanly: %v", err)
 	}
 }
@@ -360,9 +362,9 @@ func TestGenerateTagOptionCoverage(t *testing.T) {
 			A string `json:"a" jsonschema:"required,deprecated,readOnly"`
 			B string `json:"b" jsonschema:"writeOnly"`
 		}
-		data, err := GenerateBytes(item{})
+		data, err := Bytes(item{})
 		if err != nil {
-			t.Fatalf("GenerateBytes: %v", err)
+			t.Fatalf("Bytes: %v", err)
 		}
 		for _, want := range []string{"required", "deprecated", "readOnly", "writeOnly"} {
 			if !strings.Contains(string(data), want) {
@@ -375,9 +377,9 @@ func TestGenerateTagOptionCoverage(t *testing.T) {
 		type item struct {
 			A string `json:"a" jsonschema:"description=hello,title=alpha,format=email,pattern=^[a-z]+$"`
 		}
-		data, err := GenerateBytes(item{})
+		data, err := Bytes(item{})
 		if err != nil {
-			t.Fatalf("GenerateBytes: %v", err)
+			t.Fatalf("Bytes: %v", err)
 		}
 		for _, want := range []string{"hello", "alpha", "email", "^[a-z]+$"} {
 			if !strings.Contains(string(data), want) {
@@ -391,9 +393,9 @@ func TestGenerateTagOptionCoverage(t *testing.T) {
 			A int    `json:"a" jsonschema:"default=42"`
 			B string `json:"b" jsonschema:"const=fixed"`
 		}
-		data, err := GenerateBytes(item{})
+		data, err := Bytes(item{})
 		if err != nil {
-			t.Fatalf("GenerateBytes: %v", err)
+			t.Fatalf("Bytes: %v", err)
 		}
 		for _, want := range []string{"default", "42", "const", "fixed"} {
 			if !strings.Contains(string(data), want) {
@@ -407,9 +409,9 @@ func TestGenerateTagOptionCoverage(t *testing.T) {
 			C string `json:"c" jsonschema:"enum=red|green|blue"`
 			D int    `json:"d" jsonschema:"examples=1|2|3"`
 		}
-		data, err := GenerateBytes(item{})
+		data, err := Bytes(item{})
 		if err != nil {
-			t.Fatalf("GenerateBytes: %v", err)
+			t.Fatalf("Bytes: %v", err)
 		}
 		for _, want := range []string{"enum", "red", "green", "blue", "examples", "1"} {
 			if !strings.Contains(string(data), want) {
@@ -423,9 +425,9 @@ func TestGenerateTagOptionCoverage(t *testing.T) {
 			N int     `json:"n" jsonschema:"minimum=0,maximum=100,multipleOf=5"`
 			F float64 `json:"f" jsonschema:"exclusiveMinimum=0,exclusiveMaximum=10"`
 		}
-		data, err := GenerateBytes(item{})
+		data, err := Bytes(item{})
 		if err != nil {
-			t.Fatalf("GenerateBytes: %v", err)
+			t.Fatalf("Bytes: %v", err)
 		}
 		for _, want := range []string{"minimum", "maximum", "multipleOf", "exclusiveMinimum", "exclusiveMaximum"} {
 			if !strings.Contains(string(data), want) {
@@ -440,9 +442,9 @@ func TestGenerateTagOptionCoverage(t *testing.T) {
 			A []int          `json:"a" jsonschema:"minItems=1,maxItems=5"`
 			M map[string]int `json:"m" jsonschema:"minProperties=1,maxProperties=5"`
 		}
-		data, err := GenerateBytes(item{})
+		data, err := Bytes(item{})
 		if err != nil {
-			t.Fatalf("GenerateBytes: %v", err)
+			t.Fatalf("Bytes: %v", err)
 		}
 		for _, want := range []string{"minLength", "maxLength", "minItems", "maxItems", "minProperties", "maxProperties"} {
 			if !strings.Contains(string(data), want) {
@@ -455,9 +457,9 @@ func TestGenerateTagOptionCoverage(t *testing.T) {
 		type item struct {
 			A []int `json:"a" jsonschema:"uniqueItems"`
 		}
-		data, err := GenerateBytes(item{})
+		data, err := Bytes(item{})
 		if err != nil {
-			t.Fatalf("GenerateBytes: %v", err)
+			t.Fatalf("Bytes: %v", err)
 		}
 		if !strings.Contains(string(data), "uniqueItems") {
 			t.Errorf("missing uniqueItems in: %s", data)
@@ -468,9 +470,9 @@ func TestGenerateTagOptionCoverage(t *testing.T) {
 		type item struct {
 			M map[string]string `json:"m" jsonschema:"additionalProperties=false"`
 		}
-		data, err := GenerateBytes(item{})
+		data, err := Bytes(item{})
 		if err != nil {
-			t.Fatalf("GenerateBytes: %v", err)
+			t.Fatalf("Bytes: %v", err)
 		}
 		if !strings.Contains(string(data), "additionalProperties") {
 			t.Errorf("missing additionalProperties in: %s", data)
@@ -482,9 +484,9 @@ func TestGenerateTagOptionCoverage(t *testing.T) {
 			A string `json:"a" jsonschema:"$id=https://e.com/x"`
 			B string `json:"b" jsonschema:"$ref=#/$defs/x"`
 		}
-		data, err := GenerateBytes(item{})
+		data, err := Bytes(item{})
 		if err != nil {
-			t.Fatalf("GenerateBytes: %v", err)
+			t.Fatalf("Bytes: %v", err)
 		}
 		if !strings.Contains(string(data), "$ref") {
 			t.Errorf("missing $ref: %s", data)
@@ -549,7 +551,7 @@ func TestGenerateTagOptionErrors(t *testing.T) {
 	}
 	for name, v := range cases {
 		t.Run(name, func(t *testing.T) {
-			if _, err := GenerateBytes(v); err == nil {
+			if _, err := Bytes(v); err == nil {
 				t.Errorf("expected error for %s", name)
 			}
 		})
@@ -562,24 +564,24 @@ func TestGenerateTagEscaping(t *testing.T) {
 		// Description containing a literal comma + pipe via escaping.
 		A string `json:"a" jsonschema:"description=hello\\, world"`
 	}
-	data, err := GenerateBytes(item{})
+	data, err := Bytes(item{})
 	if err != nil {
-		t.Fatalf("GenerateBytes: %v", err)
+		t.Fatalf("Bytes: %v", err)
 	}
 	if !strings.Contains(string(data), "hello, world") {
 		t.Errorf("escape not unescaped: %s", data)
 	}
 }
 
-// TestGenerateTagOmitDescriptions covers WithGenerateOmitDescriptions.
+// TestGenerateTagOmitDescriptions covers WithOmitDescriptions.
 func TestGenerateTagOmitDescriptions(t *testing.T) {
 	type item struct {
 		// Field has both a Go doc comment via reflection AND a tag.
 		A string `json:"a" jsonschema:"description=tag-set"`
 	}
-	data, err := GenerateBytes(item{}, WithGenerateOmitDescriptions(true))
+	data, err := Bytes(item{}, WithOmitDescriptions(true))
 	if err != nil {
-		t.Fatalf("GenerateBytes: %v", err)
+		t.Fatalf("Bytes: %v", err)
 	}
 	if strings.Contains(string(data), "tag-set") {
 		t.Errorf("description should be omitted: %s", data)
@@ -587,66 +589,66 @@ func TestGenerateTagOmitDescriptions(t *testing.T) {
 }
 
 // TestGenerateAdditionalPropertiesFalseGlobal covers
-// WithGenerateAdditionalPropertiesFalse.
+// WithAdditionalPropertiesFalse.
 func TestGenerateAdditionalPropertiesFalseGlobal(t *testing.T) {
 	type item struct {
 		A string `json:"a"`
 	}
-	data, err := GenerateBytes(item{}, WithGenerateAdditionalPropertiesFalse(true))
+	data, err := Bytes(item{}, WithAdditionalPropertiesFalse(true))
 	if err != nil {
-		t.Fatalf("GenerateBytes: %v", err)
+		t.Fatalf("Bytes: %v", err)
 	}
 	if !strings.Contains(string(data), `"additionalProperties":false`) {
 		t.Errorf("expected additionalProperties:false: %s", data)
 	}
 }
 
-// TestGenerateWithID covers WithGenerateID.
+// TestGenerateWithID covers WithID.
 func TestGenerateWithID(t *testing.T) {
 	type item struct {
 		A string `json:"a"`
 	}
-	data, err := GenerateBytes(item{}, WithGenerateID("https://example.com/i"))
+	data, err := Bytes(item{}, WithID("https://example.com/i"))
 	if err != nil {
-		t.Fatalf("GenerateBytes: %v", err)
+		t.Fatalf("Bytes: %v", err)
 	}
 	if !strings.Contains(string(data), "https://example.com/i") {
 		t.Errorf("expected $id: %s", data)
 	}
 }
 
-// TestGenerateInterfaceAsAnyOff covers WithGenerateInterfaceAsAny(false).
+// TestGenerateInterfaceAsAnyOff covers WithInterfaceAsAny(false).
 func TestGenerateInterfaceAsAnyOff(t *testing.T) {
 	type item struct {
 		A any `json:"a"`
 	}
-	if _, err := GenerateBytes(item{}, WithGenerateInterfaceAsAny(false)); err == nil {
+	if _, err := Bytes(item{}, WithInterfaceAsAny(false)); err == nil {
 		t.Skip("interface accepted; behavior may have changed")
 	}
 }
 
-// TestGenerateMustGenerateBytes covers GenerateBytes happy path.
+// TestGenerateMustGenerateBytes covers Bytes happy path.
 func TestGenerateMustGenerateBytes(t *testing.T) {
 	type item struct {
 		Name string `json:"name"`
 	}
-	data, err := GenerateBytes(item{})
+	data, err := Bytes(item{})
 	if err != nil {
-		t.Fatalf("GenerateBytes: %v", err)
+		t.Fatalf("Bytes: %v", err)
 	}
 	if !strings.Contains(string(data), "name") {
 		t.Errorf("missing 'name': %s", data)
 	}
 }
 
-// TestGenerateAlternateDraft covers WithGenerateDraft(non-default).
+// TestGenerateAlternateDraft covers WithDraft(non-default).
 func TestGenerateAlternateDraft(t *testing.T) {
 	type item struct {
 		Name string `json:"name"`
 	}
-	data, err := GenerateBytes(item{}, WithGenerateDraft(Draft7))
+	data, err := Bytes(item{}, WithDraft(jsonschema.Draft7))
 	if err != nil {
-		t.Fatalf("GenerateBytes: %v", err)
+		t.Fatalf("Bytes: %v", err)
 	}
 	if !strings.Contains(string(data), "draft-07") {
 		t.Errorf("expected draft-07 in $schema: %s", data)
@@ -679,7 +681,7 @@ func TestGenerateTagFlagOptionsRejectValue(t *testing.T) {
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			if _, err := GenerateBytes(tc.struct_); err == nil {
+			if _, err := Bytes(tc.struct_); err == nil {
 				t.Errorf("expected error for %s", tc.name)
 			}
 		})
@@ -714,7 +716,7 @@ func TestGenerateTagStringOptionsMissingValue(t *testing.T) {
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			if _, err := GenerateBytes(tc.struct_); err == nil {
+			if _, err := Bytes(tc.struct_); err == nil {
 				t.Errorf("expected error for %s missing value", tc.name)
 			}
 		})
@@ -726,7 +728,7 @@ func TestGenerateTagDefaultMissingValue(t *testing.T) {
 	type item struct {
 		A int `json:"a" jsonschema:"default"`
 	}
-	if _, err := GenerateBytes(item{}); err == nil {
+	if _, err := Bytes(item{}); err == nil {
 		t.Error("expected error for default without value")
 	}
 }
@@ -736,7 +738,7 @@ func TestGenerateTagConstMissingValue(t *testing.T) {
 	type item struct {
 		A int `json:"a" jsonschema:"const"`
 	}
-	if _, err := GenerateBytes(item{}); err == nil {
+	if _, err := Bytes(item{}); err == nil {
 		t.Error("expected error for const without value")
 	}
 }
@@ -747,7 +749,7 @@ func TestGenerateTagDefaultBadCoercion(t *testing.T) {
 	type item struct {
 		A int `json:"a" jsonschema:"default=not-an-int"`
 	}
-	if _, err := GenerateBytes(item{}); err == nil {
+	if _, err := Bytes(item{}); err == nil {
 		t.Error("expected error for bad default coercion")
 	}
 }
@@ -758,7 +760,7 @@ func TestGenerateTagConstBadCoercion(t *testing.T) {
 	type item struct {
 		A int `json:"a" jsonschema:"const=not-an-int"`
 	}
-	if _, err := GenerateBytes(item{}); err == nil {
+	if _, err := Bytes(item{}); err == nil {
 		t.Error("expected error for bad const coercion")
 	}
 }
@@ -768,7 +770,7 @@ func TestGenerateTagListMissingValue(t *testing.T) {
 	type item struct {
 		A int `json:"a" jsonschema:"enum"`
 	}
-	if _, err := GenerateBytes(item{}); err == nil {
+	if _, err := Bytes(item{}); err == nil {
 		t.Error("expected error for enum without value")
 	}
 }
@@ -778,7 +780,7 @@ func TestGenerateTagListBadCoercion(t *testing.T) {
 	type item struct {
 		A int `json:"a" jsonschema:"enum=alpha|beta"`
 	}
-	if _, err := GenerateBytes(item{}); err == nil {
+	if _, err := Bytes(item{}); err == nil {
 		t.Error("expected error for bad enum coercion")
 	}
 }
@@ -789,7 +791,7 @@ func TestGenerateTagEmptyToken(t *testing.T) {
 	type item struct {
 		A string `json:"a" jsonschema:",,required"`
 	}
-	if _, err := GenerateBytes(item{}); err != nil {
+	if _, err := Bytes(item{}); err != nil {
 		t.Errorf("expected success skipping empty tokens: %v", err)
 	}
 }
@@ -801,7 +803,7 @@ func TestGenerateTagDanglingEscape(t *testing.T) {
 		A string `json:"a" jsonschema:"description=hello\\"`
 	}
 	// Trailing escape produces a dangling backslash. Should still parse.
-	if _, err := GenerateBytes(item{}); err != nil {
+	if _, err := Bytes(item{}); err != nil {
 		t.Logf("dangling-escape err (acceptable): %v", err)
 	}
 }
@@ -812,7 +814,7 @@ func TestGenerateTagEscapedEqualsInName(t *testing.T) {
 	type item struct {
 		A string `json:"a" jsonschema:"description=foo\\=bar"`
 	}
-	if _, err := GenerateBytes(item{}); err != nil {
+	if _, err := Bytes(item{}); err != nil {
 		t.Errorf("escaped equals: %v", err)
 	}
 }

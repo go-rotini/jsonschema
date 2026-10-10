@@ -1,8 +1,8 @@
-// Package jsonschema implements [JSON Schema] validation, schema generation
-// from Go types, and multi-format input via the rotini package family.
+// Package jsonschema implements [JSON Schema] validation and multi-format
+// input via the rotini package family.
 //
 // The package follows the conventions of [encoding/json]: a small set of
-// package-level entry points ([Compile], [Validate], [Generate]) for one-shot
+// package-level entry points ([Compile], [Validate]) for one-shot
 // use, and a compiled [*Schema] value for amortizing compilation across many
 // validations. Functional options shape compile-time and run-time behavior.
 //
@@ -15,69 +15,45 @@
 // # Draft Support
 //
 // The package targets [Draft 2020-12] as its primary draft and supports
-// older drafts via the schema's $schema keyword. Conformance baseline against
-// the official JSON Schema Test Suite at v0.1.0:
+// older drafts via the schema's $schema keyword. Conformance against the
+// official JSON Schema Test Suite (main branch):
 //
 //	Draft        Mode               Test-suite pass rate
-//	Draft 4      read-only          608 / 616  (98.7%)
-//	Draft 6      read-only          829 / 835  (99.3%)
-//	Draft 7      read-only          917 / 923  (99.3%)
-//	Draft 2019-09  read-only        1239 / 1251 (99.0%)
-//	Draft 2020-12  read + write     1274 / 1291 (98.7%)  ← primary target
+//	Draft 4      read-only          610 / 618  (98.7%)
+//	Draft 6      read-only          835 / 841  (99.3%)
+//	Draft 7      read-only          923 / 929  (99.4%)
+//	Draft 2019-09  read-only        1249 / 1261 (99.0%)
+//	Draft 2020-12  read + write     1284 / 1301 (98.7%)  ← primary target
 //
 // "Read-only" means the package compiles and validates schemas authored
-// against that draft; the schema generator ([Generate], [GenerateBytes],
-// [FromType]) always emits Draft 2020-12 output. A schema's effective draft
+// against that draft; the schema generator in the generate subpackage
+// emits Draft 2020-12 output by default. A schema's effective draft
 // is determined by (in order): the $schema keyword at the schema root; the
 // value passed via [WithDefaultDraft]; [DraftDefault].
 //
-// # Type Mapping (Schema Generation)
+// # Subpackages
 //
-// [Generate] walks a Go value (or [reflect.Type] via [FromType]) and emits a
-// JSON Schema describing it.
+// The root package validates; tooling and network access live in
+// subpackages, so a program that only validates links neither the Go
+// toolchain packages nor net/http:
 //
-//	Go kind                          Generated schema
-//	bool                             {"type": "boolean"}
-//	intN, uintN                      {"type": "integer"} (with min/max on width)
-//	float32, float64                 {"type": "number"}
-//	string                           {"type": "string"}
-//	[]byte, [N]byte                  {"type": "string", "contentEncoding": "base64"}
-//	[]T, [N]T                        {"type": "array", "items": <T>}
-//	map[string]V                     {"type": "object", "additionalProperties": <V>}
-//	struct                           {"type": "object", "properties": {...}, "required": [...]}
-//	time.Time                        {"type": "string", "format": "date-time"}
-//	time.Duration                    {"type": "integer"} or "format": "duration" via [WithGenerateDurationAsString]
-//	*T                               <T> by default; anyOf:[null, T] under [WithGenerateNullablePointers]
-//	interface{} / any                {} by default; configurable via [WithGenerateInterfaceAsAny]
-//	json.Number                      {"type": ["number", "string"]}
-//	json.RawMessage                  {} (any)
-//	encoding.TextMarshaler           {"type": "string"}
-//	chan / func / unsafe.Pointer     generation error
+//   - [github.com/go-rotini/jsonschema/generate] — a JSON Schema from a Go
+//     type, driven by `json` and `jsonschema` struct tags.
+//   - [github.com/go-rotini/jsonschema/gogen] — Go type declarations from a
+//     JSON Schema.
+//   - [github.com/go-rotini/jsonschema/httploader] — a [Loader] that fetches
+//     remote $refs over HTTPS.
 //
-// Self-referential and mutually recursive types are emitted via $defs entries
-// with internal $ref links. Custom emitters (registered via
-// [WithCustomEmitter]) override the default kind-based mapping for a
-// specific Go type.
+// # Loading Referenced Schemas
 //
-// # Struct Tags
+// A $ref outside the document is resolved through the compiler's [Loader].
+// The default, [DefaultLoader], serves only the embedded standard
+// meta-schemas ([MetaLoader]); any other URI is rejected with
+// [ErrLoaderRejected]. Register schemas up front with [Compiler.AddResource]
+// or a [MapLoader], read them from disk with [FileLoader] or from an
+// [embed.FS] with [EmbedLoader], or opt into the network:
 //
-// Two tags drive schema generation:
-//
-//   - "json" — standard library semantics: property name, "omitempty"
-//     (excluded from "required"), and "-" (skipped).
-//   - "jsonschema" — schema-specific options.
-//
-// Example:
-//
-//	type User struct {
-//	    Name  string `json:"name" jsonschema:"required,minLength=1,maxLength=100"`
-//	    Email string `json:"email" jsonschema:"required,format=email"`
-//	    Age   int    `json:"age,omitempty" jsonschema:"minimum=0,maximum=150"`
-//	    Roles []string `json:"roles" jsonschema:"minItems=1,uniqueItems,enum=admin|editor|viewer"`
-//	}
-//
-// Options are comma-separated; multi-value options use pipe (`enum=a|b|c`).
-// See [the README] for the complete option vocabulary.
+//	schema, err := jsonschema.Compile(src, jsonschema.WithLoader(httploader.Default()))
 //
 // # Strict Modes
 //
@@ -167,7 +143,7 @@
 // dispatches on a subcommand:
 //
 //   - generate — read a JSON Schema (from a file argument or standard input)
-//     and emit Go type declarations via [GenerateGo], suitable for a
+//     and emit Go type declarations via the gogen package, suitable for a
 //     //go:generate directive.
 //   - bowtie — a standards-conformance connector for the [Bowtie]
 //     cross-implementation JSON Schema test harness, speaking Bowtie's
@@ -186,7 +162,6 @@
 // [JSON Schema]: https://json-schema.org/
 // [Draft 2020-12]: https://json-schema.org/draft/2020-12/schema
 // [Draft 2020-12 §12]: https://json-schema.org/draft/2020-12/json-schema-core#section-12
-// [the README]: https://github.com/go-rotini/jsonschema#struct-tags
 // [go-rotini/jsonc]: https://github.com/go-rotini/jsonc
 // [go-rotini/yaml]: https://github.com/go-rotini/yaml
 // [go-rotini/toml]: https://github.com/go-rotini/toml

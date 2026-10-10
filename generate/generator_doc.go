@@ -1,4 +1,4 @@
-package jsonschema
+package generate
 
 import (
 	"go/ast"
@@ -14,7 +14,7 @@ import (
 // the generator's doc-comment cache. owner is the struct type the field
 // belongs to (so disambiguation is possible across packages).
 //
-// Returns the empty string when [WithGenerateOmitDescriptions] is set, when
+// Returns the empty string when [WithOmitDescriptions] is set, when
 // the generator has no doc reader, or when no comment was found for the
 // field.
 func (c *genCtx) lookupFieldDoc(owner reflect.Type, sf reflect.StructField) string {

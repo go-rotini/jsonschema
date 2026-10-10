@@ -1507,11 +1507,11 @@ func TestValidateTOMLValidationFailure(t *testing.T) {
 // TestLoadURLBytesNilLoader covers the nil-loader branch in loadURLBytes
 // (use no WithLoader option).
 func TestLoadURLBytesNilLoader(t *testing.T) {
-	// No loader option — falls back to DefaultLoader. Since the default
-	// loader's HTTPLoader will fail to fetch a non-existent URL, we expect
-	// an error.
-	if _, err := loadURLBytes("https://nope.example.invalid/x", nil); err == nil {
-		t.Error("expected error from default loader")
+	// No loader option — falls back to DefaultLoader, which serves only the
+	// embedded meta-schemas and rejects every other URL.
+	_, err := loadURLBytes("https://nope.example.invalid/x", nil)
+	if !errors.Is(err, ErrLoaderRejected) {
+		t.Errorf("loadURLBytes err = %v, want ErrLoaderRejected", err)
 	}
 }
 
@@ -1701,7 +1701,7 @@ func TestTOMLIntegerToNumberBranches(t *testing.T) {
 		{"0x1A", "26", false},
 		{"0o17", "15", false},
 		{"0b101", "5", false},
-		{"1_000", "1000", false}, // underscores stripped
+		{"1_000", "1000", false},                              // underscores stripped
 		{"0xFFFFFFFFFFFFFFFF", "18446744073709551615", false}, // overflow → uint64
 		{"not-a-number", "", true},
 	}

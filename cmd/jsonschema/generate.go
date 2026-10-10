@@ -7,7 +7,8 @@ import (
 	"io"
 	"os"
 
-	"github.com/go-rotini/jsonschema"
+	"github.com/go-rotini/jsonschema/gogen"
+	"github.com/go-rotini/jsonschema/httploader"
 )
 
 // runGenerate parses the generate flags, generates Go types from a JSON Schema,
@@ -43,11 +44,11 @@ func runGenerate(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 		return 1
 	}
 
-	opts := []jsonschema.GoOption{jsonschema.WithGoPackage(pkg)}
+	opts := []gogen.Option{gogen.WithPackage(pkg), gogen.WithLoader(httploader.Default())}
 	if root != "" {
-		opts = append(opts, jsonschema.WithGoRootType(root))
+		opts = append(opts, gogen.WithRootType(root))
 	}
-	src, err := jsonschema.GenerateGo(schemaJSON, opts...)
+	src, err := gogen.Generate(schemaJSON, opts...)
 	if err != nil {
 		fmt.Fprintln(stderr, "jsonschema:", err)
 		return 1

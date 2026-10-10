@@ -1,6 +1,8 @@
-package jsonschema
+package generate
 
 import (
+	"github.com/go-rotini/jsonschema"
+
 	"fmt"
 	"reflect"
 	"slices"
@@ -100,9 +102,9 @@ type tagSpec struct {
 	hasRef bool
 }
 
-// parseJSONTag splits a `json:"..."` tag into (name, options). options
+// parseJSONTag splits a `json:"..."` tag into (name, tagOpts). tagOpts
 // is the comma-joined remainder for cheap "omitempty"-style lookup.
-func parseJSONTag(tag string) (name, options string) {
+func parseJSONTag(tag string) (name, tagOpts string) {
 	if before, after, ok := strings.Cut(tag, ","); ok {
 		return before, after
 	}
@@ -317,9 +319,9 @@ func applyTagFlagOption(spec *tagSpec, name string, hasValue bool, path string) 
 // The `format=` value passes through verbatim to the emitted schema; the
 // generator does not validate that the name is a registered or known
 // format. At validation time the standard "format" keyword behaves as an
-// annotation by default (see [WithFormatAssertion]), so unknown format
+// annotation by default (see [jsonschema.WithFormatAssertion]), so unknown format
 // values are tolerated unless the caller explicitly opts into assertion
-// mode and registers a [CustomFormat] for the name.
+// mode and registers a [jsonschema.WithCustomFormat] for the name.
 func applyTagStringOption(spec *tagSpec, name, value string, hasValue bool, path string) (bool, error) {
 	target := struct {
 		set     func(string)
@@ -493,9 +495,9 @@ func applyTagLengthOption(spec *tagSpec, name, value string, ft reflect.Type, pa
 	return true, nil
 }
 
-// tagErr returns a [*CompileError] tagged with "Tag" plus the field path.
+// tagErr returns a [*jsonschema.CompileError] tagged with "Tag" plus the field path.
 func tagErr(fieldPath, msg string) error {
-	return &CompileError{
+	return &jsonschema.CompileError{
 		KeywordLocation: fieldPath,
 		Message:         "jsonschema tag: " + msg,
 	}
@@ -516,13 +518,13 @@ func elemTypeForList(ft reflect.Type) reflect.Type {
 }
 
 // requireStringTarget enforces that minLength / maxLength / pattern apply to
-// string fields. Returns a [*CompileError] for non-string targets.
+// string fields. Returns a [*jsonschema.CompileError] for non-string targets.
 func requireStringTarget(ft reflect.Type, path, name string) error {
 	if ft == nil {
 		return nil
 	}
 	t := ft
-	for t.Kind() == reflect.Ptr {
+	for t.Kind() == reflect.Pointer {
 		t = t.Elem()
 	}
 	if t.Kind() == reflect.String {
@@ -532,13 +534,13 @@ func requireStringTarget(ft reflect.Type, path, name string) error {
 }
 
 // requireArrayTarget enforces that minItems / maxItems apply to slice or
-// array fields. Returns a [*CompileError] otherwise.
+// array fields. Returns a [*jsonschema.CompileError] otherwise.
 func requireArrayTarget(ft reflect.Type, path, name string) error {
 	if ft == nil {
 		return nil
 	}
 	t := ft
-	for t.Kind() == reflect.Ptr {
+	for t.Kind() == reflect.Pointer {
 		t = t.Elem()
 	}
 	switch t.Kind() {
@@ -555,7 +557,7 @@ func requireMapTarget(ft reflect.Type, path, name string) error {
 		return nil
 	}
 	t := ft
-	for t.Kind() == reflect.Ptr {
+	for t.Kind() == reflect.Pointer {
 		t = t.Elem()
 	}
 	switch t.Kind() {
@@ -585,7 +587,7 @@ func coerceFieldValue(ft reflect.Type, value, path, name string) (any, error) {
 		return value, nil
 	}
 	t := ft
-	for t.Kind() == reflect.Ptr {
+	for t.Kind() == reflect.Pointer {
 		t = t.Elem()
 	}
 	switch t.Kind() {
@@ -634,7 +636,7 @@ func coerceNumericValue(ft reflect.Type, value string, hasValue bool, path, name
 		return f, nil
 	}
 	t := ft
-	for t.Kind() == reflect.Ptr {
+	for t.Kind() == reflect.Pointer {
 		t = t.Elem()
 	}
 	switch t.Kind() {

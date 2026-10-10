@@ -200,8 +200,10 @@ var (
 	// ErrInstanceTooLarge indicates an instance document larger than
 	// [WithMaxInstanceSize] was rejected before parsing.
 	ErrInstanceTooLarge = errors.New("jsonschema: instance exceeds size limit")
-	// ErrLoaderRejected indicates a [Loader] declined a URI scheme (e.g.
-	// the default chain rejecting http:// without explicit opt-in).
+	// ErrLoaderRejected indicates a [Loader] declined a URI: it does not
+	// handle the scheme or does not serve that resource (e.g. the
+	// [DefaultLoader] declining an https:// $ref, since it serves only the
+	// embedded meta-schemas).
 	ErrLoaderRejected = errors.New("jsonschema: loader rejected URI scheme")
 	// ErrSchemaNotCompiled indicates a [*Schema] method was called on a
 	// nil receiver, or on a value that was not produced by the compiler
@@ -244,12 +246,10 @@ func RenderError(schemaSrc, instanceSrc []byte, err error, color ...bool) string
 	}
 	useColor := len(color) > 0 && color[0]
 
-	var ve *ValidationError
-	if errors.As(err, &ve) {
+	if ve, ok := errors.AsType[*ValidationError](err); ok {
 		return renderValidationError(schemaSrc, instanceSrc, ve, useColor)
 	}
-	var ce *CompileError
-	if errors.As(err, &ce) {
+	if ce, ok := errors.AsType[*CompileError](err); ok {
 		return renderCompileError(schemaSrc, ce, useColor)
 	}
 	return err.Error()

@@ -337,7 +337,7 @@ type propertiesEval struct {
 	subs map[string]*subschema
 }
 
-func (e *propertiesEval) keyword() string { return "properties" }
+func (e *propertiesEval) keyword() string { return keyProperties }
 
 func (e *propertiesEval) eval(ctx *runCtx, instance any) {
 	obj, ok := instance.(map[string]any)
@@ -372,7 +372,7 @@ type patternProp struct {
 	sub *subschema
 }
 
-func (e *patternPropertiesEval) keyword() string { return "patternProperties" }
+func (e *patternPropertiesEval) keyword() string { return keyPatternProperties }
 
 func (e *patternPropertiesEval) eval(ctx *runCtx, instance any) {
 	obj, ok := instance.(map[string]any)

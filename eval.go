@@ -290,7 +290,7 @@ func evalPriority(name string) int {
 		return 5
 	// properties / patternProperties must run before additionalProperties
 	// (§12.12) so the latter can read their evaluated-keys annotations.
-	case "properties", "patternProperties":
+	case keyProperties, keyPatternProperties:
 		return 8
 	case "prefixItems":
 		return 8

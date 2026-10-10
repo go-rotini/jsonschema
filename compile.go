@@ -245,7 +245,7 @@ func (c *Compiler) CompileURL(uri string) (*Schema, error) {
 	// WithLoader option is supplied, so loader is always non-nil here.
 	data, err := c.opts.loader.Load(uri)
 	if err != nil {
-		flight.err = &CompileError{KeywordLocation: uri, Message: "load", Cause: err}
+		flight.err = &CompileError{KeywordLocation: uri, Message: "load: " + err.Error(), Cause: err}
 		return nil, flight.err
 	}
 	value, err := decodeSchemaBytes(data)
@@ -570,7 +570,7 @@ func (c *Compiler) buildBinding(rm *resourceMap, key string, raw any, baseURI, l
 func (c *Compiler) bindAndResolveChild(rm *resourceMap, raw any, baseURI, location string, draft Draft, refStack []string, key string) ([]keywordBinding, error) {
 	var out []keywordBinding
 	switch key {
-	case "properties", "patternProperties", keyDefs, keyDefinitions, "dependentSchemas":
+	case keyProperties, keyPatternProperties, keyDefs, keyDefinitions, "dependentSchemas":
 		m, ok := raw.(map[string]any)
 		if !ok {
 			return nil, nil

@@ -9,6 +9,7 @@ import (
 	"io"
 
 	"github.com/go-rotini/jsonschema"
+	"github.com/go-rotini/jsonschema/httploader"
 )
 
 // implementationName is the Bowtie identifier reported by the "start"
@@ -291,9 +292,10 @@ func handleRun(cmd command, st *state, enc *json.Encoder) error {
 
 // newCaseCompiler builds a per-case Compiler with the harness-selected
 // dialect as the default draft and any registry entries pre-registered as
-// resources so $ref resolution succeeds without a network loader.
+// resources, so registry refs resolve without the network. Other remote refs
+// are fetched over HTTPS.
 func newCaseCompiler(dialect jsonschema.Draft, registry map[string]json.RawMessage) (*jsonschema.Compiler, error) {
-	opts := []jsonschema.CompileOption{}
+	opts := []jsonschema.CompileOption{jsonschema.WithLoader(httploader.Default())}
 	if dialect != jsonschema.DraftUnknown {
 		opts = append(opts, jsonschema.WithDefaultDraft(dialect))
 	}
