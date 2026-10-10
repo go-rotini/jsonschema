@@ -4,8 +4,6 @@ import (
 	"encoding/json"
 	"errors"
 	"io"
-	"net/http"
-	"net/http/httptest"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -354,49 +352,6 @@ func TestCompilerCompileURLCaches(t *testing.T) {
 	}
 }
 
-func TestCompileURLViaHTTP(t *testing.T) {
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
-		_, _ = w.Write([]byte(`{"type":"string"}`))
-	}))
-	t.Cleanup(srv.Close)
-	c := NewCompiler(WithLoader(&HTTPLoader{AllowHTTP: true}))
-	if _, err := c.CompileURL(srv.URL + "/schema.json"); err != nil {
-		t.Fatalf("CompileURL: %v", err)
-	}
-}
-
-// TestCompileExternalRefViaHTTPLoader exercises an end-to-end remote $ref:
-// the root schema $refs an external document served by an HTTP loader, and
-// the validator correctly resolves the reference at compile time.
-func TestCompileExternalRefViaHTTPLoader(t *testing.T) {
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
-		_, _ = w.Write([]byte(`{
-			"$id":"http://example.invalid/types",
-			"$defs":{"name":{"type":"string","minLength":1}}
-		}`))
-	}))
-	t.Cleanup(srv.Close)
-	src := []byte(`{"$ref":"` + srv.URL + `/types#/$defs/name"}`)
-	s, err := Compile(src, WithLoader(&HTTPLoader{AllowHTTP: true}))
-	if err != nil {
-		t.Fatalf("Compile remote $ref: %v", err)
-	}
-	res, err := s.Validate([]byte(`"alice"`))
-	if err != nil {
-		t.Fatalf("Validate: %v", err)
-	}
-	if !res.Valid {
-		t.Errorf("expected valid; errors=%v", res.Errors)
-	}
-	res, err = s.Validate([]byte(`""`))
-	if err != nil {
-		t.Fatalf("Validate empty: %v", err)
-	}
-	if res.Valid {
-		t.Errorf("expected invalid for empty string")
-	}
-}
-
 func TestCompileExternalRefViaMapLoader(t *testing.T) {
 	loader := MapLoader{
 		"https://example.com/types": []byte(`{"$id":"https://example.com/types","$defs":{"name":{"type":"string"}}}`),
@@ -614,7 +569,7 @@ func TestCompilerConcurrentCompile(t *testing.T) {
 // TestCompilerCompileURLSingleFlight verifies that concurrent CompileURL
 // calls for the same URI share a single fetch+compile pipeline. The Loader
 // records calls with an atomic counter; with N concurrent callers we expect
-// exactly one fetch. The handler holds its response until every caller has
+// exactly one fetch. The loader holds its response until every caller has
 // committed to its CompileURL invocation, so the followers are guaranteed
 // to find the in-flight slot.
 func TestCompilerCompileURLSingleFlight(t *testing.T) {
@@ -625,7 +580,7 @@ func TestCompilerCompileURLSingleFlight(t *testing.T) {
 		release = make(chan struct{})
 	)
 	arrived.Add(N)
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+	loader := loaderFunc(func(string) ([]byte, error) {
 		hits.Add(1)
 		// Block until every test goroutine has signaled it is about to call
 		// CompileURL — by that point the followers have either won (no) or
@@ -633,14 +588,13 @@ func TestCompilerCompileURLSingleFlight(t *testing.T) {
 		// response.
 		arrived.Wait()
 		<-release
-		_, _ = w.Write([]byte(`{"type":"string"}`))
-	}))
-	t.Cleanup(srv.Close)
+		return []byte(`{"type":"string"}`), nil
+	})
 
-	// Use a per-test compiler with an HTTP loader; cache state is isolated
-	// from any other test running in parallel.
-	c := NewCompiler(WithLoader(&HTTPLoader{AllowHTTP: true}))
-	uri := srv.URL + "/schema.json"
+	// Use a per-test compiler; cache state is isolated from any other test
+	// running in parallel.
+	c := NewCompiler(WithLoader(loader))
+	uri := "https://example.com/schema.json"
 
 	var wg sync.WaitGroup
 	wg.Add(N)
@@ -657,7 +611,7 @@ func TestCompilerCompileURLSingleFlight(t *testing.T) {
 			}
 		}()
 	}
-	// Once every goroutine has signaled arrival the handler has unblocked;
+	// Once every goroutine has signaled arrival the loader has unblocked;
 	// release it so the first fetch can complete.
 	arrived.Wait()
 	close(release)
@@ -1285,10 +1239,74 @@ func TestCompileValueExclusiveBoundDraft4Bool(t *testing.T) {
 // which is set in NewCompiler).
 func TestCompileURLNoLoaderDefaults(t *testing.T) {
 	c := NewCompiler()
-	// The default loader cannot resolve an arbitrary scheme — expect an
-	// error, but importantly, we exercised the default-loader path.
-	if _, err := c.CompileURL("https://nope.example.invalid/x"); err == nil {
-		t.Error("expected error from default loader")
+	// The default loader serves only the embedded meta-schemas, so any other
+	// URL is rejected without a network round-trip.
+	_, err := c.CompileURL("https://nope.example.invalid/x")
+	if !errors.Is(err, ErrLoaderRejected) {
+		t.Errorf("CompileURL err = %v, want ErrLoaderRejected", err)
+	}
+}
+
+// TestCompileRemoteRefRejectedByDefault pins that a remote $ref fails to
+// compile without an opted-in network loader, while a meta-schema $schema
+// still resolves offline.
+func TestCompileRemoteRefRejectedByDefault(t *testing.T) {
+	_, err := Compile([]byte(`{"$ref":"https://example.com/types.json"}`))
+	if !errors.Is(err, ErrLoaderRejected) {
+		t.Errorf("Compile err = %v, want ErrLoaderRejected", err)
+	}
+	src := []byte(`{"$schema":"http://json-schema.org/draft-07/schema#","type":"string"}`)
+	if _, err := Compile(src, WithMetaSchemaValidation(true)); err != nil {
+		t.Errorf("Compile with meta-schema: %v", err)
+	}
+}
+
+// TestDefaultLoaderMissNamesFix pins that a default-loader miss says how to
+// load the ref, while still wrapping ErrLoaderRejected in a *LoaderError.
+func TestDefaultLoaderMissNamesFix(t *testing.T) {
+	cases := []struct {
+		ref  string
+		want string
+	}{
+		{
+			"https://example.com/types.json",
+			`jsonschema: loader "https://example.com/types.json": remote $ref not loaded: ` +
+				`the default loader only serves the embedded meta-schemas; ` +
+				`use jsonschema.WithLoader(httploader.Default()) to fetch it`,
+		},
+		{
+			"http://example.com/types.json",
+			"use jsonschema.WithLoader(&httploader.Loader{AllowHTTP: true}) to fetch it over plain HTTP",
+		},
+		{
+			"urn:example:types",
+			`jsonschema: loader "urn:example:types": $ref not loaded: ` +
+				`the default loader only serves the embedded meta-schemas; ` +
+				`register it with Compiler.AddResource or pass a Loader with jsonschema.WithLoader`,
+		},
+	}
+	for _, tc := range cases {
+		_, err := Compile([]byte(`{"$ref":"` + tc.ref + `"}`))
+		if !errors.Is(err, ErrLoaderRejected) {
+			t.Errorf("%s: err = %v, want ErrLoaderRejected", tc.ref, err)
+		}
+		var le *LoaderError
+		if !errors.As(err, &le) || le.URI != tc.ref {
+			t.Errorf("%s: err = %v, want a *LoaderError for the ref", tc.ref, err)
+		}
+		if err == nil || !strings.Contains(err.Error(), tc.want) {
+			t.Errorf("%s: err = %v, want it to contain %q", tc.ref, err, tc.want)
+		}
+	}
+	_, err := CompileURL("https://example.com/types.json")
+	if !errors.Is(err, ErrLoaderRejected) || err == nil ||
+		!strings.Contains(err.Error(), "use jsonschema.WithLoader(httploader.Default())") {
+		t.Errorf("CompileURL err = %v, want ErrLoaderRejected naming httploader", err)
+	}
+	// A ChainLoader still falls through a default-loader miss.
+	chain := ChainLoader{DefaultLoader(), MapLoader{"https://example.com/s.json": []byte(`{"type":"string"}`)}}
+	if _, err := Compile([]byte(`{"$ref":"https://example.com/s.json"}`), WithLoader(chain)); err != nil {
+		t.Errorf("chained Compile: %v", err)
 	}
 }
 

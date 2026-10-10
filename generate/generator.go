@@ -1,6 +1,8 @@
-package jsonschema
+package generate
 
 import (
+	"github.com/go-rotini/jsonschema"
+
 	"bytes"
 	"encoding"
 	"encoding/json"
@@ -13,19 +15,19 @@ import (
 	"time"
 )
 
-// Generate returns a [*Schema] describing the type of v. The walker honors
-// `json` and `jsonschema` struct tags (see §6 of the requirements doc).
+// Generate returns a [*jsonschema.Schema] describing the type of v. The
+// walker honors `json` and `jsonschema` struct tags.
 //
 // Generate accepts any Go value; only its runtime type is consulted, the
 // value itself is not inspected. Pass a nil-typed value (e.g. `(*MyType)(nil)`)
 // to describe a type without constructing one.
-func Generate(v any, opts ...GenerateOption) (*Schema, error) {
-	return NewGenerator(opts...).Generate(v)
+func Generate(v any, opts ...Option) (*jsonschema.Schema, error) {
+	return New(opts...).Generate(v)
 }
 
 // MustGenerate is the panic-on-error variant of [Generate]. Intended for
 // package-init use of static, well-known types.
-func MustGenerate(v any, opts ...GenerateOption) *Schema {
+func MustGenerate(v any, opts ...Option) *jsonschema.Schema {
 	s, err := Generate(v, opts...)
 	if err != nil {
 		panic(err)
@@ -33,17 +35,17 @@ func MustGenerate(v any, opts ...GenerateOption) *Schema {
 	return s
 }
 
-// GenerateBytes returns the JSON-encoded schema for v. Equivalent to
-// [Generate] followed by [Schema.MarshalJSON] but exposes the bytes directly
+// Bytes returns the JSON-encoded schema for v. Equivalent to [Generate]
+// followed by [jsonschema.Schema.MarshalJSON], but exposes the bytes directly
 // for callers that want the wire form (e.g. to write to disk).
-func GenerateBytes(v any, opts ...GenerateOption) ([]byte, error) {
-	return NewGenerator(opts...).GenerateBytes(v)
+func Bytes(v any, opts ...Option) ([]byte, error) {
+	return New(opts...).Bytes(v)
 }
 
 // FromType is the type-only counterpart to [Generate]; useful when the caller
 // has a [reflect.Type] but no value.
-func FromType(t reflect.Type, opts ...GenerateOption) (*Schema, error) {
-	return NewGenerator(opts...).FromType(t)
+func FromType(t reflect.Type, opts ...Option) (*jsonschema.Schema, error) {
+	return New(opts...).FromType(t)
 }
 
 // Generator is the configurable schema-from-Go-types worker. Reuse a single
@@ -54,35 +56,35 @@ func FromType(t reflect.Type, opts ...GenerateOption) (*Schema, error) {
 // configuration plus a lazy doc-comment cache that is built on first use
 // behind a sync.Once.
 type Generator struct {
-	opts *generateOptions
+	opts *options
 
 	docOnce  sync.Once
 	docCache map[string]string
 }
 
-// NewGenerator returns a fresh [*Generator] with the supplied options
+// New returns a fresh [*Generator] with the supplied options
 // applied. Options that are unset inherit their documented defaults
 // (matching the package-level [Generate] entry points).
-func NewGenerator(opts ...GenerateOption) *Generator {
-	go2 := defaultGenerateOptions()
+func New(opts ...Option) *Generator {
+	go2 := defaultOptions()
 	for _, o := range opts {
 		o(go2)
 	}
-	resolveGenerateDefaults(go2)
+	resolveDefaults(go2)
 	return &Generator{opts: go2}
 }
 
-// defaultGenerateOptions returns a freshly-allocated [*generateOptions]; the
+// defaultOptions returns a freshly-allocated [*options]; the
 // caller layers user-supplied options on top.
-func defaultGenerateOptions() *generateOptions {
-	return &generateOptions{}
+func defaultOptions() *options {
+	return &options{}
 }
 
-// resolveGenerateDefaults applies documented defaults to unset options.
+// resolveDefaults applies documented defaults to unset options.
 // The *Set flags distinguish "default" from "user passed false".
-func resolveGenerateDefaults(o *generateOptions) {
+func resolveDefaults(o *options) {
 	if !o.draftSet {
-		o.draft = DraftDefault
+		o.draft = jsonschema.DraftDefault
 	}
 	if !o.orderedPropertiesSet {
 		o.orderedProperties = true
@@ -96,18 +98,18 @@ func resolveGenerateDefaults(o *generateOptions) {
 }
 
 // Generate generates the schema for the runtime type of v.
-func (g *Generator) Generate(v any) (*Schema, error) {
+func (g *Generator) Generate(v any) (*jsonschema.Schema, error) {
 	if g == nil {
-		return nil, ErrSchemaNotCompiled
+		return nil, jsonschema.ErrSchemaNotCompiled
 	}
 	if v == nil {
-		return nil, &CompileError{Message: "Generate: nil value"}
+		return nil, &jsonschema.CompileError{Message: "Generate: nil value"}
 	}
 	return g.FromType(reflect.TypeOf(v))
 }
 
 // MustGenerate is the panic-on-error variant of [*Generator.Generate].
-func (g *Generator) MustGenerate(v any) *Schema {
+func (g *Generator) MustGenerate(v any) *jsonschema.Schema {
 	s, err := g.Generate(v)
 	if err != nil {
 		panic(err)
@@ -115,29 +117,29 @@ func (g *Generator) MustGenerate(v any) *Schema {
 	return s
 }
 
-// GenerateBytes returns the JSON-encoded schema for the runtime type of v.
-func (g *Generator) GenerateBytes(v any) ([]byte, error) {
+// Bytes returns the JSON-encoded schema for the runtime type of v.
+func (g *Generator) Bytes(v any) ([]byte, error) {
 	if g == nil {
-		return nil, ErrSchemaNotCompiled
+		return nil, jsonschema.ErrSchemaNotCompiled
 	}
 	if v == nil {
-		return nil, &CompileError{Message: "GenerateBytes: nil value"}
+		return nil, &jsonschema.CompileError{Message: "Bytes: nil value"}
 	}
 	return g.bytesFromType(reflect.TypeOf(v))
 }
 
 // FromType generates the schema for the named [reflect.Type].
-func (g *Generator) FromType(t reflect.Type) (*Schema, error) {
+func (g *Generator) FromType(t reflect.Type) (*jsonschema.Schema, error) {
 	if g == nil {
-		return nil, ErrSchemaNotCompiled
+		return nil, jsonschema.ErrSchemaNotCompiled
 	}
 	data, err := g.bytesFromType(t)
 	if err != nil {
 		return nil, err
 	}
-	s, err := Compile(data)
+	s, err := jsonschema.Compile(data)
 	if err != nil {
-		return nil, &CompileError{Message: "Generate: compile generated schema", Cause: err}
+		return nil, &jsonschema.CompileError{Message: "Generate: compile generated schema", Cause: err}
 	}
 	return s, nil
 }
@@ -146,7 +148,7 @@ func (g *Generator) FromType(t reflect.Type) (*Schema, error) {
 // variant.
 func (g *Generator) bytesFromType(t reflect.Type) ([]byte, error) {
 	if t == nil {
-		return nil, &CompileError{Message: "Generate: nil reflect.Type"}
+		return nil, &jsonschema.CompileError{Message: "Generate: nil reflect.Type"}
 	}
 	ctx := newGenCtx(g)
 	root, err := ctx.schemaForType(t, "$")
@@ -247,7 +249,7 @@ func (c *genCtx) tryCustomEmitter(t reflect.Type, path string) (any, bool, error
 	}
 	raw, err := customEmitterToValue(fn(t))
 	if err != nil {
-		return nil, true, &CompileError{
+		return nil, true, &jsonschema.CompileError{
 			KeywordLocation: path,
 			Message:         fmt.Sprintf("custom emitter for %s: %v", t, err),
 		}
@@ -256,9 +258,9 @@ func (c *genCtx) tryCustomEmitter(t reflect.Type, path string) (any, bool, error
 }
 
 // tryPointer unwraps a pointer type into its underlying schema, applying
-// the WithGenerateNullablePointers wrapping when configured.
+// the WithNullablePointers wrapping when configured.
 func (c *genCtx) tryPointer(t reflect.Type, path string) (any, bool, error) {
-	if t.Kind() != reflect.Ptr {
+	if t.Kind() != reflect.Pointer {
 		return nil, false, nil
 	}
 	if t == bigIntPtrType || t == bigFloatPtrType {
@@ -340,9 +342,9 @@ func (c *genCtx) tryRecursion(t reflect.Type, path string) (any, bool, error) {
 	}
 	if _, onStack := c.stack[t]; onStack {
 		if c.g.opts.expandedRefs {
-			return nil, true, &CompileError{
+			return nil, true, &jsonschema.CompileError{
 				KeywordLocation: path,
-				Message:         fmt.Sprintf("Generate: cannot inline self-referential type %s with WithGenerateExpandedRefs(true)", t),
+				Message:         fmt.Sprintf("Generate: cannot inline self-referential type %s with WithExpandedRefs(true)", t),
 			}
 		}
 		name := c.allocateDefName(t)
@@ -379,17 +381,17 @@ func (c *genCtx) dispatchKind(t reflect.Type, path string) (any, error) {
 		if c.g.opts.interfaceAsAny {
 			return newOrderedMap(), nil
 		}
-		return nil, &CompileError{
+		return nil, &jsonschema.CompileError{
 			KeywordLocation: path,
 			Message:         fmt.Sprintf("Generate: interface type %s requires WithCustomEmitter (interfaceAsAny disabled)", t),
 		}
 	case reflect.Chan, reflect.Func, reflect.UnsafePointer:
-		return nil, &CompileError{
+		return nil, &jsonschema.CompileError{
 			KeywordLocation: path,
 			Message:         fmt.Sprintf("Generate: unsupported kind %s for type %s", t.Kind(), t),
 		}
 	default:
-		return nil, &CompileError{
+		return nil, &jsonschema.CompileError{
 			KeywordLocation: path,
 			Message:         fmt.Sprintf("Generate: unsupported kind %s for type %s", t.Kind(), t),
 		}
@@ -451,7 +453,7 @@ func (c *genCtx) schemaForArray(t reflect.Type, path string) (any, error) {
 // have non-string keys).
 func (c *genCtx) schemaForMap(t reflect.Type, path string) (any, error) {
 	if t.Key().Kind() != reflect.String {
-		return nil, &CompileError{
+		return nil, &jsonschema.CompileError{
 			KeywordLocation: path,
 			Message:         fmt.Sprintf("Generate: map key must be string-kinded (got %s) for %s", t.Key().Kind(), t),
 		}
@@ -530,7 +532,7 @@ func (c *genCtx) collectStructFields(t reflect.Type, path string, props *ordered
 		// its fields (matches encoding/json semantics).
 		if f.Anonymous && jsonName == "" {
 			ft := f.Type
-			for ft.Kind() == reflect.Ptr {
+			for ft.Kind() == reflect.Pointer {
 				ft = ft.Elem()
 			}
 			if ft.Kind() == reflect.Struct {
@@ -777,13 +779,13 @@ func (c *genCtx) refToDef(name string) *orderedMap {
 
 // customEmitterToValue converts a *Schema returned by a custom emitter
 // into the generator's internal value shape, preserving object key order.
-func customEmitterToValue(s *Schema) (any, error) {
+func customEmitterToValue(s *jsonschema.Schema) (any, error) {
 	if s == nil {
 		return newOrderedMap(), nil
 	}
 	data, err := s.MarshalJSON()
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("custom emitter schema: %w", err)
 	}
 	if bytes.Equal(bytes.TrimSpace(data), []byte("null")) {
 		return newOrderedMap(), nil

@@ -1,4 +1,4 @@
-package jsonschema_test
+package gogen_test
 
 import (
 	"encoding/json"
@@ -11,6 +11,8 @@ import (
 	"testing"
 
 	"github.com/go-rotini/jsonschema"
+	"github.com/go-rotini/jsonschema/generate"
+	"github.com/go-rotini/jsonschema/gogen"
 )
 
 // parseGo fails the test unless src is syntactically valid Go.
@@ -37,7 +39,7 @@ func mustContain(t *testing.T, src []byte, wants ...string) {
 	}
 }
 
-func TestGenerateGo_basicStruct(t *testing.T) {
+func TestGenerate_basicStruct(t *testing.T) {
 	schema := []byte(`{
 		"title": "Person",
 		"type": "object",
@@ -48,9 +50,9 @@ func TestGenerateGo_basicStruct(t *testing.T) {
 			"tags": {"type": "array", "items": {"type": "string"}}
 		}
 	}`)
-	src, err := jsonschema.GenerateGo(schema, jsonschema.WithGoPackage("people"))
+	src, err := gogen.Generate(schema, gogen.WithPackage("people"))
 	if err != nil {
-		t.Fatalf("GenerateGo: %v", err)
+		t.Fatalf("Generate: %v", err)
 	}
 	parseGo(t, src)
 	mustContain(t, src,
@@ -64,7 +66,7 @@ func TestGenerateGo_basicStruct(t *testing.T) {
 	)
 }
 
-func TestGenerateGo_refsDefinitionsAndPointers(t *testing.T) {
+func TestGenerate_refsDefinitionsAndPointers(t *testing.T) {
 	schema := []byte(`{
 		"type": "object",
 		"properties": {
@@ -82,9 +84,9 @@ func TestGenerateGo_refsDefinitionsAndPointers(t *testing.T) {
 			}
 		}
 	}`)
-	src, err := jsonschema.GenerateGo(schema, jsonschema.WithGoRootType("Doc"))
+	src, err := gogen.Generate(schema, gogen.WithRootType("Doc"))
 	if err != nil {
-		t.Fatalf("GenerateGo: %v", err)
+		t.Fatalf("Generate: %v", err)
 	}
 	parseGo(t, src)
 	mustContain(t, src,
@@ -97,7 +99,7 @@ func TestGenerateGo_refsDefinitionsAndPointers(t *testing.T) {
 	)
 }
 
-func TestGenerateGo_allOfEmbedding(t *testing.T) {
+func TestGenerate_allOfEmbedding(t *testing.T) {
 	schema := []byte(`{
 		"type": "object",
 		"definitions": {
@@ -113,9 +115,9 @@ func TestGenerateGo_allOfEmbedding(t *testing.T) {
 			}
 		}
 	}`)
-	src, err := jsonschema.GenerateGo(schema)
+	src, err := gogen.Generate(schema)
 	if err != nil {
-		t.Fatalf("GenerateGo: %v", err)
+		t.Fatalf("Generate: %v", err)
 	}
 	parseGo(t, src)
 	mustContain(t, src,
@@ -125,19 +127,19 @@ func TestGenerateGo_allOfEmbedding(t *testing.T) {
 	)
 }
 
-func TestGenerateGo_invalidSchema(t *testing.T) {
-	if _, err := jsonschema.GenerateGo([]byte("not a schema")); err == nil {
+func TestGenerate_invalidSchema(t *testing.T) {
+	if _, err := gogen.Generate([]byte("not a schema")); err == nil {
 		t.Fatal("expected error for malformed schema, got nil")
 	}
 }
 
-func ExampleGenerateGo() {
+func ExampleGenerate() {
 	schema := []byte(`{
 		"title": "Point",
 		"type": "object",
 		"properties": {"x": {"type": "number"}, "y": {"type": "number"}}
 	}`)
-	src, err := jsonschema.GenerateGo(schema)
+	src, err := gogen.Generate(schema)
 	if err != nil {
 		fmt.Println("error:", err)
 		return
@@ -188,19 +190,19 @@ func optionalFieldType(t *testing.T, propSchema string) string {
 		"definitions": {"Ref": {"type": "object", "properties": {"a": {"type": "string"}}}},
 		"properties": {"field": ` + propSchema + `}
 	}`
-	src, err := jsonschema.GenerateGo([]byte(schema), jsonschema.WithGoRootType("Root"))
+	src, err := gogen.Generate([]byte(schema), gogen.WithRootType("Root"))
 	if err != nil {
-		t.Fatalf("GenerateGo(%s): %v", propSchema, err)
+		t.Fatalf("Generate(%s): %v", propSchema, err)
 	}
 	return structFieldType(t, src, "Root", "Field")
 }
 
-// TestGenerateGo_typeMatrix exercises the type mapping across the full range
+// TestGenerate_typeMatrix exercises the type mapping across the full range
 // of JSON Schema constructs the generator recognizes, plus the constructs it
 // deliberately degrades to any (unions, oneOf/anyOf/not, conditionals,
 // boolean schemas, empty schemas). Fields here are optional, so scalars are
 // value types and object references are pointers.
-func TestGenerateGo_typeMatrix(t *testing.T) {
+func TestGenerate_typeMatrix(t *testing.T) {
 	cases := []struct {
 		name string
 		prop string
@@ -248,7 +250,7 @@ func TestGenerateGo_typeMatrix(t *testing.T) {
 		{"nullable_map_value", `{"type":"object","additionalProperties":{"type":["string","null"]}}`, "map[string]*string"},
 		{"union_multi", `{"type":["string","integer"]}`, "any"},
 
-		// The anyOf nullable form — what WithGenerateNullablePointers emits
+		// The anyOf nullable form — what generate.WithNullablePointers emits
 		// for a Go pointer — round-trips back to the pointer, either order.
 		{"anyof_null_number", `{"anyOf":[{"type":"null"},{"type":"number"}]}`, "*float64"},
 		{"anyof_number_null", `{"anyOf":[{"type":"integer"},{"type":"null"}]}`, "*int"},
@@ -273,12 +275,12 @@ func TestGenerateGo_typeMatrix(t *testing.T) {
 	}
 }
 
-// TestGenerateGo_nullableScalars pins the presence-carrying contract around
+// TestGenerate_nullableScalars pins the presence-carrying contract around
 // requiredness: a nullable scalar is a pointer whether the field is required
 // or not (null is a legal VALUE — requiredness governs the json tag, never
 // strips the pointer), and the optionality rule for objects cannot
 // double-pointer it.
-func TestGenerateGo_nullableScalars(t *testing.T) {
+func TestGenerate_nullableScalars(t *testing.T) {
 	schema := []byte(`{
 		"type": "object",
 		"required": ["min"],
@@ -287,9 +289,9 @@ func TestGenerateGo_nullableScalars(t *testing.T) {
 			"max": {"type": ["number", "null"]}
 		}
 	}`)
-	src, err := jsonschema.GenerateGo(schema, jsonschema.WithGoRootType("Root"))
+	src, err := gogen.Generate(schema, gogen.WithRootType("Root"))
 	if err != nil {
-		t.Fatalf("GenerateGo: %v", err)
+		t.Fatalf("Generate: %v", err)
 	}
 	if got := structFieldType(t, src, "Root", "Min"); got != "*float64" {
 		t.Errorf("required nullable scalar = %q, want *float64", got)
@@ -299,16 +301,16 @@ func TestGenerateGo_nullableScalars(t *testing.T) {
 	}
 }
 
-// TestGenerateGo_nullableRoundTrip pins the two directions against each
+// TestGenerate_nullableRoundTrip pins the two directions against each
 // other: a Go pointer field, emitted as a schema under
-// WithGenerateNullablePointers (the anyOf:[null, T] shape), regenerates the
-// same pointer field through GenerateGo.
-func TestGenerateGo_nullableRoundTrip(t *testing.T) {
+// generate.WithNullablePointers (the anyOf:[null, T] shape), regenerates the
+// same pointer field through Generate.
+func TestGenerate_nullableRoundTrip(t *testing.T) {
 	type Bounds struct {
 		Minimum *float64 `json:"minimum"`
 		Label   string   `json:"label"`
 	}
-	schema, err := jsonschema.Generate(Bounds{}, jsonschema.WithGenerateNullablePointers(true))
+	schema, err := generate.Generate(Bounds{}, generate.WithNullablePointers(true))
 	if err != nil {
 		t.Fatalf("Generate: %v", err)
 	}
@@ -316,9 +318,9 @@ func TestGenerateGo_nullableRoundTrip(t *testing.T) {
 	if err != nil {
 		t.Fatalf("marshal schema: %v", err)
 	}
-	src, err := jsonschema.GenerateGo(raw, jsonschema.WithGoRootType("Bounds"))
+	src, err := gogen.Generate(raw, gogen.WithRootType("Bounds"))
 	if err != nil {
-		t.Fatalf("GenerateGo: %v", err)
+		t.Fatalf("Generate: %v", err)
 	}
 	if got := structFieldType(t, src, "Bounds", "Minimum"); got != "*float64" {
 		t.Errorf("round-tripped pointer = %q, want *float64", got)
@@ -328,10 +330,10 @@ func TestGenerateGo_nullableRoundTrip(t *testing.T) {
 	}
 }
 
-// TestGenerateGo_requiredFields verifies that required scalars are value
+// TestGenerate_requiredFields verifies that required scalars are value
 // types without omitempty and that a required object reference is a value
 // (not a pointer).
-func TestGenerateGo_requiredFields(t *testing.T) {
+func TestGenerate_requiredFields(t *testing.T) {
 	schema := []byte(`{
 		"type": "object",
 		"required": ["name", "ref"],
@@ -342,9 +344,9 @@ func TestGenerateGo_requiredFields(t *testing.T) {
 			"ref": {"$ref": "#/definitions/Ref"}
 		}
 	}`)
-	src, err := jsonschema.GenerateGo(schema, jsonschema.WithGoRootType("Root"))
+	src, err := gogen.Generate(schema, gogen.WithRootType("Root"))
 	if err != nil {
-		t.Fatalf("GenerateGo: %v", err)
+		t.Fatalf("Generate: %v", err)
 	}
 	parseGo(t, src)
 	// A required object reference is a value type, not a pointer.
@@ -357,9 +359,9 @@ func TestGenerateGo_requiredFields(t *testing.T) {
 	)
 }
 
-// TestGenerateGo_recursive ensures self-referential schemas terminate and
+// TestGenerate_recursive ensures self-referential schemas terminate and
 // produce valid Go (the slice breaks the type cycle).
-func TestGenerateGo_recursive(t *testing.T) {
+func TestGenerate_recursive(t *testing.T) {
 	schema := []byte(`{
 		"type": "object",
 		"properties": {"root": {"$ref": "#/definitions/Node"}},
@@ -373,9 +375,9 @@ func TestGenerateGo_recursive(t *testing.T) {
 			}
 		}
 	}`)
-	src, err := jsonschema.GenerateGo(schema)
+	src, err := gogen.Generate(schema)
 	if err != nil {
-		t.Fatalf("GenerateGo: %v", err)
+		t.Fatalf("Generate: %v", err)
 	}
 	parseGo(t, src)
 	mustContain(t, src,
@@ -384,9 +386,9 @@ func TestGenerateGo_recursive(t *testing.T) {
 	)
 }
 
-// TestGenerateGo_inlineObjectHoisting checks that an inline object property
+// TestGenerate_inlineObjectHoisting checks that an inline object property
 // is hoisted into a named type derived from the parent and field names.
-func TestGenerateGo_inlineObjectHoisting(t *testing.T) {
+func TestGenerate_inlineObjectHoisting(t *testing.T) {
 	schema := []byte(`{
 		"type": "object",
 		"properties": {
@@ -396,9 +398,9 @@ func TestGenerateGo_inlineObjectHoisting(t *testing.T) {
 			}
 		}
 	}`)
-	src, err := jsonschema.GenerateGo(schema, jsonschema.WithGoRootType("Config"))
+	src, err := gogen.Generate(schema, gogen.WithRootType("Config"))
 	if err != nil {
-		t.Fatalf("GenerateGo: %v", err)
+		t.Fatalf("Generate: %v", err)
 	}
 	parseGo(t, src)
 	if got := structFieldType(t, src, "Config", "Server"); got != "*ConfigServer" {
@@ -411,26 +413,26 @@ func TestGenerateGo_inlineObjectHoisting(t *testing.T) {
 	)
 }
 
-// TestGenerateGo_definitionsAndDefs verifies both "definitions" and "$defs"
+// TestGenerate_definitionsAndDefs verifies both "definitions" and "$defs"
 // yield named types.
-func TestGenerateGo_definitionsAndDefs(t *testing.T) {
+func TestGenerate_definitionsAndDefs(t *testing.T) {
 	schema := []byte(`{
 		"$schema": "https://json-schema.org/draft/2020-12/schema",
 		"type": "object",
 		"definitions": {"FromDefinitions": {"type": "object", "properties": {"a": {"type": "string"}}}},
 		"$defs": {"FromDefs": {"type": "object", "properties": {"b": {"type": "integer"}}}}
 	}`)
-	src, err := jsonschema.GenerateGo(schema)
+	src, err := gogen.Generate(schema)
 	if err != nil {
-		t.Fatalf("GenerateGo: %v", err)
+		t.Fatalf("Generate: %v", err)
 	}
 	parseGo(t, src)
 	mustContain(t, src, "type FromDefinitions struct", "type FromDefs struct")
 }
 
-// TestGenerateGo_nonObjectDefinitionAlias verifies that a non-object
+// TestGenerate_nonObjectDefinitionAlias verifies that a non-object
 // definition becomes a type alias rather than an empty struct.
-func TestGenerateGo_nonObjectDefinitionAlias(t *testing.T) {
+func TestGenerate_nonObjectDefinitionAlias(t *testing.T) {
 	schema := []byte(`{
 		"type": "object",
 		"definitions": {
@@ -438,17 +440,17 @@ func TestGenerateGo_nonObjectDefinitionAlias(t *testing.T) {
 			"Ports": {"type": "array", "items": {"type": "integer"}}
 		}
 	}`)
-	src, err := jsonschema.GenerateGo(schema)
+	src, err := gogen.Generate(schema)
 	if err != nil {
-		t.Fatalf("GenerateGo: %v", err)
+		t.Fatalf("Generate: %v", err)
 	}
 	parseGo(t, src)
 	mustContain(t, src, "type ID string", "type Ports []int")
 }
 
-// TestGenerateGo_keyNamingAndTags checks identifier derivation and that json
+// TestGenerate_keyNamingAndTags checks identifier derivation and that json
 // tags preserve the original keys verbatim.
-func TestGenerateGo_keyNamingAndTags(t *testing.T) {
+func TestGenerate_keyNamingAndTags(t *testing.T) {
 	schema := []byte(`{
 		"type": "object",
 		"properties": {
@@ -458,9 +460,9 @@ func TestGenerateGo_keyNamingAndTags(t *testing.T) {
 			"camelCase": {"type": "string"}
 		}
 	}`)
-	src, err := jsonschema.GenerateGo(schema, jsonschema.WithGoRootType("Keys"))
+	src, err := gogen.Generate(schema, gogen.WithRootType("Keys"))
 	if err != nil {
-		t.Fatalf("GenerateGo: %v", err)
+		t.Fatalf("Generate: %v", err)
 	}
 	parseGo(t, src)
 	mustContain(t, src,
@@ -471,18 +473,18 @@ func TestGenerateGo_keyNamingAndTags(t *testing.T) {
 	)
 }
 
-// TestGenerateGo_options exercises the package name, root type name, and
+// TestGenerate_options exercises the package name, root type name, and
 // header comment options (including suppressing the header).
-func TestGenerateGo_options(t *testing.T) {
+func TestGenerate_options(t *testing.T) {
 	schema := []byte(`{"type":"object","properties":{"x":{"type":"string"}}}`)
 
-	src, err := jsonschema.GenerateGo(schema,
-		jsonschema.WithGoPackage("custompkg"),
-		jsonschema.WithGoRootType("MyRoot"),
-		jsonschema.WithGoHeaderComment(""),
+	src, err := gogen.Generate(schema,
+		gogen.WithPackage("custompkg"),
+		gogen.WithRootType("MyRoot"),
+		gogen.WithHeaderComment(""),
 	)
 	if err != nil {
-		t.Fatalf("GenerateGo: %v", err)
+		t.Fatalf("Generate: %v", err)
 	}
 	parseGo(t, src)
 	got := string(src)
@@ -507,31 +509,32 @@ var corpus = []string{
 	`{"type":"object","definitions":{"A":{"allOf":[{"$ref":"#/definitions/B"},{"type":"object","properties":{"x":{"type":"string"}}}]},"B":{"type":"object","properties":{"y":{"type":"integer"}}}}}`,
 	`{"type":"object","properties":{"u":{"oneOf":[{"type":"string"},{"type":"integer"}]},"v":{"type":["boolean","null"]}}}`,
 	`{"type":"object","properties":{"deep":{"type":"object","properties":{"deeper":{"type":"object","properties":{"x":{"type":"string"}}}}}}}`,
+	`{"type":"object","properties":{"a":{"$ref":"#/definitions/foo-bar"},"b":{"$ref":"#"},"c":{"$ref":"#/properties/a"}},"definitions":{"foo-bar":{"type":"string"}}}`,
 }
 
-// TestGenerateGo_corpusAlwaysValidGo asserts every corpus schema generates
+// TestGenerate_corpusAlwaysValidGo asserts every corpus schema generates
 // parseable Go.
-func TestGenerateGo_corpusAlwaysValidGo(t *testing.T) {
+func TestGenerate_corpusAlwaysValidGo(t *testing.T) {
 	for i, s := range corpus {
-		src, err := jsonschema.GenerateGo([]byte(s))
+		src, err := gogen.Generate([]byte(s))
 		if err != nil {
-			t.Errorf("corpus[%d]: GenerateGo: %v", i, err)
+			t.Errorf("corpus[%d]: Generate: %v", i, err)
 			continue
 		}
 		parseGo(t, src)
 	}
 }
 
-// FuzzGenerateGo asserts the generator never panics on arbitrary input and,
+// FuzzGenerate asserts the generator never panics on arbitrary input and,
 // whenever it succeeds, emits syntactically valid Go.
-func FuzzGenerateGo(f *testing.F) {
+func FuzzGenerate(f *testing.F) {
 	for _, s := range corpus {
 		f.Add([]byte(s))
 	}
 	f.Add([]byte(`{"type":"string"}`))
 	f.Add([]byte(`not json`))
 	f.Fuzz(func(t *testing.T, data []byte) {
-		src, err := jsonschema.GenerateGo(data)
+		src, err := gogen.Generate(data)
 		if err != nil {
 			return
 		}
@@ -539,4 +542,78 @@ func FuzzGenerateGo(f *testing.F) {
 			t.Fatalf("generated invalid Go for input %q: %v\n%s", data, perr, src)
 		}
 	})
+}
+
+// typeCheck fails the test unless src type-checks as a Go package.
+func typeCheck(t *testing.T, src []byte) {
+	t.Helper()
+	fset := token.NewFileSet()
+	f, err := parser.ParseFile(fset, "gen.go", src, 0)
+	if err != nil {
+		t.Fatalf("generated source is not valid Go: %v\n---\n%s", err, src)
+	}
+	if _, err := (&types.Config{}).Check("gen", fset, []*ast.File{f}, nil); err != nil {
+		t.Fatalf("generated source does not compile: %v\n---\n%s", err, src)
+	}
+}
+
+// TestGenerate_rootRemoteRef pins that a schema whose root is only a $ref to
+// another document generates compiling Go: gogen generates no types for the
+// referenced document, so the root maps to any.
+func TestGenerate_rootRemoteRef(t *testing.T) {
+	loader := jsonschema.ChainLoader{jsonschema.MetaLoader(), jsonschema.MapLoader{
+		"https://example.com/github-workflow.json": []byte(`{"type":"object","properties":{"name":{"type":"string"}}}`),
+	}}
+	src, err := gogen.Generate([]byte(`{"$ref":"https://example.com/github-workflow.json"}`), gogen.WithLoader(loader))
+	if err != nil {
+		t.Fatalf("Generate: %v", err)
+	}
+	typeCheck(t, src)
+	mustContain(t, src, "type Root any")
+}
+
+// TestGenerate_refNaming pins how each kind of $ref maps to a Go type, and
+// that the result compiles.
+func TestGenerate_refNaming(t *testing.T) {
+	loader := jsonschema.ChainLoader{jsonschema.MetaLoader(), jsonschema.MapLoader{
+		"https://example.com/base.json": []byte(`{"type":"object","properties":{"id":{"type":"string"}}}`),
+		"https://example.com/x.json":    []byte(`{"type":"string"}`),
+	}}
+	schema := `{
+		"title": "T",
+		"type": "object",
+		"allOf": [
+			{"$ref": "https://example.com/base.json"},
+			{"$ref": "#/definitions/Base"},
+			{"type": "object", "properties": {
+				"remote": {"$ref": "https://example.com/x.json"},
+				"self": {"$ref": "#"},
+				"dashed": {"$ref": "#/definitions/foo-bar"},
+				"escaped": {"$ref": "#/$defs/a~1b"},
+				"deep": {"$ref": "#/definitions/Base/properties/n"}
+			}}
+		],
+		"definitions": {
+			"Base": {"type": "object", "properties": {"n": {"type": "integer"}}},
+			"foo-bar": {"type": "string"}
+		},
+		"$defs": {"a/b": {"type": "boolean"}}
+	}`
+	src, err := gogen.Generate([]byte(schema), gogen.WithLoader(loader))
+	if err != nil {
+		t.Fatalf("Generate: %v", err)
+	}
+	typeCheck(t, src)
+	mustContain(t, src, "type T struct { Base", "type FooBar string", "type AB bool")
+	for field, want := range map[string]string{
+		"Remote":  "any",
+		"Self":    "*T",
+		"Dashed":  "*FooBar",
+		"Escaped": "*AB",
+		"Deep":    "any",
+	} {
+		if got := structFieldType(t, src, "T", field); got != want {
+			t.Errorf("T.%s = %s, want %s", field, got, want)
+		}
+	}
 }

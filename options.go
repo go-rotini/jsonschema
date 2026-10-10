@@ -2,8 +2,6 @@ package jsonschema
 
 import (
 	"io"
-	"io/fs"
-	"reflect"
 )
 
 // CompileOption configures how [Compile], [CompileURL], [CompileValue], and
@@ -50,8 +48,10 @@ func WithDefaultDraft(d Draft) CompileOption {
 	}
 }
 
-// WithLoader sets the [Loader] used to fetch external $refs. Default: a
-// [ChainLoader] of the embedded meta-schemas plus an HTTPS-only [HTTPLoader].
+// WithLoader sets the [Loader] used to fetch external $refs. Default:
+// [DefaultLoader], which serves only the embedded meta-schemas. For https://
+// refs, pass the loader from the github.com/go-rotini/jsonschema/httploader
+// package.
 func WithLoader(l Loader) CompileOption {
 	return func(o *compileOptions) {
 		o.loader = l
@@ -272,120 +272,4 @@ func WithWriteOnly(b bool) Option {
 // accumulated in [Result.Annotations]. Default: true.
 func WithCollectAnnotations(b bool) Option {
 	return func(o *runOptions) { o.collectAnnotations = b }
-}
-
-// GenerateOption configures the schema generator. Pass options to [Generate],
-// [GenerateBytes], [FromType], or [NewGenerator]; later constructors return a
-// reusable [*Generator] that amortizes option parsing across many types.
-type GenerateOption func(*generateOptions)
-
-// generateOptions carries the generator's configuration.
-type generateOptions struct {
-	draft                     Draft
-	id                        string
-	expandedRefs              bool
-	omitDescriptions          bool
-	durationAsString          bool
-	nullablePointers          bool
-	orderedProperties         bool
-	additionalPropertiesFalse bool
-	emitSchemaDeclaration     bool
-	interfaceAsAny            bool
-	customEmitters            map[reflect.Type]func(reflect.Type) *Schema
-	docReaderFS               fs.FS
-	draftSet                  bool
-	orderedPropertiesSet      bool
-	emitSchemaDeclarationSet  bool
-	interfaceAsAnySet         bool
-}
-
-// WithGenerateDraft sets the schema draft to emit. Default: Draft 2020-12.
-func WithGenerateDraft(d Draft) GenerateOption {
-	return func(o *generateOptions) {
-		o.draft = d
-		o.draftSet = true
-	}
-}
-
-// WithGenerateID sets the $id of the generated root schema.
-func WithGenerateID(id string) GenerateOption {
-	return func(o *generateOptions) { o.id = id }
-}
-
-// WithGenerateExpandedRefs inlines all referenced types instead of using
-// $ref + $defs. Default: false.
-func WithGenerateExpandedRefs(b bool) GenerateOption {
-	return func(o *generateOptions) { o.expandedRefs = b }
-}
-
-// WithGenerateOmitDescriptions suppresses extracting Go doc comments as
-// description strings. Default: false.
-func WithGenerateOmitDescriptions(b bool) GenerateOption {
-	return func(o *generateOptions) { o.omitDescriptions = b }
-}
-
-// WithGenerateDurationAsString emits time.Duration as
-// {"type":"string","format":"duration"} instead of integer nanoseconds.
-func WithGenerateDurationAsString(b bool) GenerateOption {
-	return func(o *generateOptions) { o.durationAsString = b }
-}
-
-// WithGenerateNullablePointers emits *T as anyOf:[null, T]. Default: false.
-func WithGenerateNullablePointers(b bool) GenerateOption {
-	return func(o *generateOptions) { o.nullablePointers = b }
-}
-
-// WithGenerateOrderedProperties controls whether emitted struct schemas
-// preserve Go field declaration order. When true (default), `properties`
-// keys are emitted in declaration order. When false, the generator emits a
-// plain map[string]any whose key order is unspecified.
-func WithGenerateOrderedProperties(b bool) GenerateOption {
-	return func(o *generateOptions) {
-		o.orderedProperties = b
-		o.orderedPropertiesSet = true
-	}
-}
-
-// WithGenerateAdditionalPropertiesFalse emits "additionalProperties": false
-// on every generated struct schema. Default: false.
-func WithGenerateAdditionalPropertiesFalse(b bool) GenerateOption {
-	return func(o *generateOptions) { o.additionalPropertiesFalse = b }
-}
-
-// WithGenerateSchemaDeclaration emits "$schema" on the root of generated
-// schemas. Default: true.
-func WithGenerateSchemaDeclaration(b bool) GenerateOption {
-	return func(o *generateOptions) {
-		o.emitSchemaDeclaration = b
-		o.emitSchemaDeclarationSet = true
-	}
-}
-
-// WithGenerateInterfaceAsAny controls how interface{} / any is rendered.
-// true (default): {} (any-value). false: error at generation time so the
-// caller is forced to register a custom emitter.
-func WithGenerateInterfaceAsAny(b bool) GenerateOption {
-	return func(o *generateOptions) {
-		o.interfaceAsAny = b
-		o.interfaceAsAnySet = true
-	}
-}
-
-// WithCustomEmitter registers a function that emits the schema for values of
-// type T, overriding the default kind-based mapping.
-func WithCustomEmitter[T any](fn func(reflect.Type) *Schema) GenerateOption {
-	return func(o *generateOptions) {
-		if o.customEmitters == nil {
-			o.customEmitters = make(map[reflect.Type]func(reflect.Type) *Schema)
-		}
-		o.customEmitters[reflect.TypeFor[T]()] = fn
-	}
-}
-
-// WithDocReader extracts Go doc comments from src files (passed as an
-// [fs.FS]) and uses them as the description annotation for matching struct
-// fields. The generator parses the source files lazily on first use; if the
-// FS contains no Go sources the option is a no-op.
-func WithDocReader(src fs.FS) GenerateOption {
-	return func(o *generateOptions) { o.docReaderFS = src }
 }

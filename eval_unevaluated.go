@@ -75,7 +75,7 @@ func (e *unevaluatedPropertiesEval) eval(ctx *runCtx, instance any) {
 		return
 	}
 	covered := evaluatedKeys{}
-	for _, key := range []string{"properties", "patternProperties", "additionalProperties", "unevaluatedProperties"} {
+	for _, key := range []string{keyProperties, keyPatternProperties, "additionalProperties", "unevaluatedProperties"} {
 		if v, ok := ctx.getAnnotation(key); ok {
 			if k, ok := v.(evaluatedKeys); ok {
 				for kk := range k {
