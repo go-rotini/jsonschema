@@ -32,10 +32,15 @@ func TestImportOnlyLinksLittle(t *testing.T) {
 	}
 	for line := range strings.Lines(string(out)) {
 		fields := strings.Fields(line)
-		if len(fields) == 0 {
+		if len(fields) < 2 {
 			continue
 		}
-		sym := fields[len(fields)-1]
+		// Only code counts. An imported package's init and its data stay linked whatever
+		// the program calls (on amd64, math/big's init records a CPU feature), so skip them.
+		sym, kind := fields[len(fields)-1], fields[len(fields)-2]
+		if (kind != "T" && kind != "t") || strings.HasSuffix(sym, ".init") || strings.Contains(sym, ".init.") {
+			continue
+		}
 		for _, f := range forbidden {
 			if strings.HasPrefix(sym, f) {
 				t.Errorf("linked: %s", sym)
