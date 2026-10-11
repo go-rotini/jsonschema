@@ -8,7 +8,6 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"mime"
 	"mime/quotedprintable"
 	"strings"
 )
@@ -157,14 +156,11 @@ func decodeContent(encoding, s string) ([]byte, error) {
 }
 
 // isJSONMediaType reports whether mt is application/json, text/json, or a
-// */*+json subtype.
+// */*+json subtype. Only the type before any parameters counts, and an
+// input that isn't strictly mime-shaped is read the same way.
 func isJSONMediaType(mt string) bool {
-	main, _, err := mime.ParseMediaType(mt)
-	if err != nil {
-		// Tolerate inputs that aren't strictly mime-shaped.
-		main = strings.TrimSpace(strings.ToLower(strings.SplitN(mt, ";", 2)[0]))
-	}
-	main = strings.ToLower(main)
+	main, _, _ := strings.Cut(mt, ";")
+	main = strings.TrimSpace(strings.ToLower(main))
 	if main == "application/json" || main == "text/json" {
 		return true
 	}
