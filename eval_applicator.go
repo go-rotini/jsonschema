@@ -102,8 +102,7 @@ func (e *notEval) eval(ctx *runCtx, instance any) {
 	}
 }
 
-//nolint:gochecknoinits // evaluator registry is built at package init by design.
-func init() {
+func registerCombinatorKeywords() {
 	registerEvaluator("allOf", func(b *evalBuilder, f *buildFrame, raw any, loc string) (evaluator, error) {
 		arr, ok := raw.([]any)
 		if !ok {
@@ -185,8 +184,7 @@ func (e *ifThenElseEval) eval(ctx *runCtx, instance any) {
 	}
 }
 
-//nolint:gochecknoinits // evaluator registry is built at package init by design.
-func init() {
+func registerConditionalKeywords() {
 	registerEvaluator("if", func(b *evalBuilder, f *buildFrame, raw any, loc string) (evaluator, error) {
 		// then / else are read off the parent map and folded into this
 		// ifThenElseEval (the dispatcher sees them as no-ops).
@@ -284,8 +282,7 @@ func (e *dependenciesEval) eval(ctx *runCtx, instance any) {
 	}
 }
 
-//nolint:gochecknoinits // evaluator registry is built at package init by design.
-func init() {
+func registerDependencyKeywords() {
 	registerEvaluator("dependentSchemas", func(b *evalBuilder, f *buildFrame, raw any, loc string) (evaluator, error) {
 		m, ok := raw.(map[string]any)
 		if !ok {
@@ -459,8 +456,7 @@ func (e *propertyNamesEval) eval(ctx *runCtx, instance any) {
 	}
 }
 
-//nolint:gochecknoinits // evaluator registry is built at package init by design.
-func init() {
+func registerObjectApplicatorKeywords() {
 	registerEvaluator("properties", func(b *evalBuilder, f *buildFrame, raw any, loc string) (evaluator, error) {
 		m, ok := raw.(map[string]any)
 		if !ok {
@@ -728,8 +724,7 @@ func recordItemsAnno(ctx *runCtx, keyword, loc string, value any) {
 	})
 }
 
-//nolint:gochecknoinits // evaluator registry is built at package init by design.
-func init() {
+func registerArrayApplicatorKeywords() {
 	registerEvaluator("prefixItems", func(b *evalBuilder, f *buildFrame, raw any, loc string) (evaluator, error) {
 		arr, ok := raw.([]any)
 		if !ok {

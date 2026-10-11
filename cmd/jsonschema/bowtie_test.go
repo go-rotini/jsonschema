@@ -378,7 +378,8 @@ func TestDispatchScannerError(t *testing.T) {
 	// surfaces an error.
 	big := strings.Repeat("a", maxScanBufferBytes+10)
 	var in bytes.Buffer
-	in.WriteString(big + "\n")
+	in.WriteString(big)
+	in.WriteString("\n")
 	var out bytes.Buffer
 	err := dispatch(&in, &out)
 	if err == nil {

@@ -66,8 +66,7 @@ func (e *formatEval) eval(ctx *runCtx, instance any) {
 	}
 }
 
-//nolint:gochecknoinits // evaluator registry is built at package init by design.
-func init() {
+func registerFormatAndContentKeywords() {
 	registerEvaluator("format", func(_ *evalBuilder, _ *buildFrame, raw any, loc string) (evaluator, error) {
 		s, ok := raw.(string)
 		if !ok {

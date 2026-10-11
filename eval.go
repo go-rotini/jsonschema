@@ -59,11 +59,52 @@ type evaluator interface {
 // state on evalBuilder.
 type builderFn func(b *evalBuilder, f *buildFrame, raw any, loc string) (evaluator, error)
 
-var keywordBuilders = map[string]builderFn{}
+// keywordBuilders maps keyword names to their builders. It is filled on
+// first use rather than at package init, so a program that imports the
+// package without compiling a schema pays nothing for it and the linker
+// can drop every evaluator.
+var (
+	keywordBuilders     map[string]builderFn
+	keywordBuildersOnce sync.Once
+)
 
-// registerEvaluator wires builder b under keyword name. Called from
-// per-file init blocks to keep the keyword table distributed.
+// lookupBuilder returns the builder registered for keyword name.
+func lookupBuilder(name string) (builderFn, bool) {
+	keywordBuildersOnce.Do(registerBuiltinKeywords)
+	b, ok := keywordBuilders[name]
+	return b, ok
+}
+
+// registerBuiltinKeywords fills the keyword table. The per-file
+// register* functions keep the table distributed next to the evaluators.
+func registerBuiltinKeywords() {
+	registerRefKeywords()
+	registerCombinatorKeywords()
+	registerConditionalKeywords()
+	registerDependencyKeywords()
+	registerObjectApplicatorKeywords()
+	registerArrayApplicatorKeywords()
+	registerUnevaluatedKeywords()
+	registerTypeKeyword()
+	registerEnumConstKeywords()
+	registerNumericKeywords()
+	registerStringKeywords()
+	registerArrayKeywords()
+	registerObjectKeywords()
+	registerFormatAndContentKeywords()
+	registerOpenAPIKeywords()
+}
+
+// registerEvaluator wires builder b under keyword name. A name that is
+// already registered keeps its builder, so an entry added before the
+// built-ins are filled in is not overwritten.
 func registerEvaluator(name string, b builderFn) {
+	if keywordBuilders == nil {
+		keywordBuilders = make(map[string]builderFn, 64)
+	}
+	if _, taken := keywordBuilders[name]; taken {
+		return
+	}
 	keywordBuilders[name] = b
 }
 
@@ -242,7 +283,7 @@ func (b *evalBuilder) populateSubschema(sub *subschema, node any, baseURI, resou
 				continue
 			}
 			sub.keywords[key] = struct{}{}
-			builder, ok := keywordBuilders[key]
+			builder, ok := lookupBuilder(key)
 			if !ok {
 				continue
 			}

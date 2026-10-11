@@ -408,8 +408,7 @@ func TestGenerateRecursiveTypeWithExpandedRefsErrors(t *testing.T) {
 	if err == nil {
 		t.Fatal("expected error inlining recursive type")
 	}
-	var ce *jsonschema.CompileError
-	if !errors.As(err, &ce) {
+	if _, ok := errors.AsType[*jsonschema.CompileError](err); !ok {
 		t.Errorf("got %T", err)
 	}
 }
@@ -575,14 +574,12 @@ func TestGenerateConcurrentSafe(t *testing.T) {
 	}
 	gen := New()
 	var wg sync.WaitGroup
-	for i := 0; i < 16; i++ {
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
+	for range 16 {
+		wg.Go(func() {
 			if _, err := gen.Bytes(Holder{}); err != nil {
 				t.Errorf("Bytes: %v", err)
 			}
-		}()
+		})
 	}
 	wg.Wait()
 }
@@ -1099,7 +1096,7 @@ func TestGenerateFromTypeInterfaceWithoutAnyOption(t *testing.T) {
 		X any `json:"x"`
 	}
 	g := New(WithInterfaceAsAny(false))
-	if _, err := g.FromType(reflect.TypeOf(item{})); err == nil {
+	if _, err := g.FromType(reflect.TypeFor[item]()); err == nil {
 		t.Skip("no error for interface; behavior may have changed")
 	}
 }

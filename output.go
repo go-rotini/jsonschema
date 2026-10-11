@@ -531,9 +531,14 @@ func marshalCompact(v any) []byte {
 	return out
 }
 
-// outputMetaSchema lazily compiles the embedded Draft 2020-12 output
-// meta-schema. Memoized via sync.OnceValue.
-var outputMetaSchema = sync.OnceValue(func() *Schema {
+var (
+	outputMetaSchema     *Schema
+	outputMetaSchemaOnce sync.Once
+)
+
+// compileOutputMetaSchema compiles the embedded Draft 2020-12 output
+// meta-schema.
+func compileOutputMetaSchema() *Schema {
 	data, err := metaSchemaFS.ReadFile("meta/output-2020-12.json")
 	if err != nil {
 		return nil
@@ -544,11 +549,12 @@ var outputMetaSchema = sync.OnceValue(func() *Schema {
 		return nil
 	}
 	return s
-})
+}
 
 // OutputMetaSchema returns the compiled Draft 2020-12 output-format
 // meta-schema (memoized; embedded). It returns nil only when the embedded
 // bytes fail to compile, which would indicate a build-time mistake.
 func OutputMetaSchema() *Schema {
-	return outputMetaSchema()
+	outputMetaSchemaOnce.Do(func() { outputMetaSchema = compileOutputMetaSchema() })
+	return outputMetaSchema
 }

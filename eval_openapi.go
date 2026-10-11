@@ -1,12 +1,10 @@
 package jsonschema
 
-// Registers the OpenAPI 3.1 base vocabulary keywords (discriminator, xml,
-// externalDocs, example) as annotation-only evaluators so schemas using
-// the OAS dialect ([OASDialectURL]) compile cleanly under strict-keyword
-// mode without producing validation errors.
-
-//nolint:gochecknoinits // evaluator registry is built at package init by design.
-func init() {
+// registerOpenAPIKeywords registers the OpenAPI 3.1 base vocabulary
+// keywords (discriminator, xml, externalDocs, example) as annotation-only
+// evaluators so schemas using the OAS dialect ([OASDialectURL]) compile
+// cleanly under strict-keyword mode without producing validation errors.
+func registerOpenAPIKeywords() {
 	for _, n := range []string{
 		"discriminator",
 		"xml",

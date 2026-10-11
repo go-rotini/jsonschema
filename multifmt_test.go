@@ -403,7 +403,7 @@ score = 0.3
 	var wg sync.WaitGroup
 	wg.Add(goroutines * 3)
 	errCh := make(chan error, goroutines*3)
-	for i := 0; i < goroutines; i++ {
+	for range goroutines {
 		go func() {
 			defer wg.Done()
 			res, err := ValidateJSONC(s, jsonInstance)

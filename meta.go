@@ -15,25 +15,42 @@ import (
 //go:embed meta
 var metaSchemaFS embed.FS
 
-// metaSchemaPaths maps every recognized draft to its embedded file path
+// metaSchemaPaths lists every recognized draft with its embedded file path
 // inside [metaSchemaFS]. New drafts must be added here AND in [Draft] /
-// [Draft.MetaSchemaURL].
-var metaSchemaPaths = map[Draft]string{
-	Draft4:      "meta/draft-04.json",
-	Draft6:      "meta/draft-06.json",
-	Draft7:      "meta/draft-07.json",
-	Draft201909: "meta/draft-2019-09.json",
-	Draft202012: "meta/draft-2020-12.json",
+// [Draft.MetaSchemaURL]. It is an array rather than a map so that it costs
+// nothing at package init.
+var metaSchemaPaths = [...]struct {
+	draft Draft
+	path  string
+}{
+	{Draft4, "meta/draft-04.json"},
+	{Draft6, "meta/draft-06.json"},
+	{Draft7, "meta/draft-07.json"},
+	{Draft201909, "meta/draft-2019-09.json"},
+	{Draft202012, "meta/draft-2020-12.json"},
 }
 
-// dialectMetaSchemaPaths maps known dialect meta-schema URIs (those that
+// metaSchemaPath returns the embedded file path of d's meta-schema.
+func metaSchemaPath(d Draft) (string, bool) {
+	for _, e := range metaSchemaPaths {
+		if e.draft == d {
+			return e.path, true
+		}
+	}
+	return "", false
+}
+
+// dialectMetaSchemaPath maps known dialect meta-schema URIs (those that
 // are not one of the canonical draft URLs) to embedded files in
-// [metaSchemaFS]. The package consults this map before falling back to the
+// [metaSchemaFS]. The package consults it before falling back to the
 // draft-keyed meta-schema in [validateAgainstMetaSchema] so that schemas
 // declaring `$schema: "https://spec.openapis.org/oas/3.1/dialect/base"`
 // validate against the correct dialect rather than plain Draft 2020-12.
-var dialectMetaSchemaPaths = map[string]string{
-	OASDialectURL: "meta/openapi-3.1-dialect.json",
+func dialectMetaSchemaPath(uri string) (string, bool) {
+	if uri == OASDialectURL {
+		return "meta/openapi-3.1-dialect.json", true
+	}
+	return "", false
 }
 
 // MetaSchemaBytes returns the JSON bytes of the canonical meta-schema for
@@ -42,7 +59,7 @@ var dialectMetaSchemaPaths = map[string]string{
 //
 // Returns [ErrUnknownDraft] for [DraftUnknown] or any unrecognized value.
 func MetaSchemaBytes(d Draft) ([]byte, error) {
-	path, ok := metaSchemaPaths[d]
+	path, ok := metaSchemaPath(d)
 	if !ok {
 		return nil, fmt.Errorf("%w: %s", ErrUnknownDraft, d.String())
 	}
@@ -65,10 +82,10 @@ func MetaSchemaURL(d Draft) string {
 // MapLoader so it never touches the network.
 var (
 	metaSchemaCacheMu sync.Mutex
-	metaSchemaCache   = make(map[Draft]*Schema)
+	metaSchemaCache   map[Draft]*Schema
 
 	dialectMetaSchemaCacheMu sync.Mutex
-	dialectMetaSchemaCache   = make(map[string]*Schema)
+	dialectMetaSchemaCache   map[string]*Schema
 )
 
 // MetaSchema returns the compiled [*Schema] for the canonical meta-schema
@@ -78,7 +95,7 @@ var (
 // [MapLoader] so refs into the per-vocabulary meta-schemas resolve without
 // network access.
 func MetaSchema(d Draft) (*Schema, error) {
-	if _, ok := metaSchemaPaths[d]; !ok {
+	if _, ok := metaSchemaPath(d); !ok {
 		return nil, fmt.Errorf("%w: %s", ErrUnknownDraft, d.String())
 	}
 	metaSchemaCacheMu.Lock()
@@ -95,6 +112,9 @@ func MetaSchema(d Draft) (*Schema, error) {
 	if err != nil {
 		return nil, err
 	}
+	if metaSchemaCache == nil {
+		metaSchemaCache = make(map[Draft]*Schema)
+	}
 	metaSchemaCache[d] = s
 	return s, nil
 }
@@ -105,7 +125,7 @@ func MetaSchema(d Draft) (*Schema, error) {
 // pointer. Used by [validateAgainstMetaSchema] when a schema's `$schema`
 // names a dialect rather than a canonical draft URL.
 func metaSchemaForDialect(uri string) (*Schema, bool) {
-	path, ok := dialectMetaSchemaPaths[uri]
+	path, ok := dialectMetaSchemaPath(uri)
 	if !ok {
 		return nil, false
 	}
@@ -122,6 +142,9 @@ func metaSchemaForDialect(uri string) (*Schema, bool) {
 	s, err := c.Compile(data)
 	if err != nil {
 		return nil, false
+	}
+	if dialectMetaSchemaCache == nil {
+		dialectMetaSchemaCache = make(map[string]*Schema)
 	}
 	dialectMetaSchemaCache[uri] = s
 	return s, true

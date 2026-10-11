@@ -220,8 +220,7 @@ func TestResolveRefMalformed(t *testing.T) {
 	if err == nil {
 		t.Error("expected error for missing anchor")
 	}
-	var refErr *RefError
-	if !errors.As(err, &refErr) {
+	if _, ok := errors.AsType[*RefError](err); !ok {
 		t.Errorf("err type = %T, want *RefError", err)
 	}
 }
@@ -936,10 +935,10 @@ func TestConcurrentLazyRefValidate(t *testing.T) {
 	var mismatches []mismatch
 
 	wg.Add(workers)
-	for w := 0; w < workers; w++ {
+	for w := range workers {
 		go func(id int) {
 			defer wg.Done()
-			for i := 0; i < iterations; i++ {
+			for i := range iterations {
 				c := cases[(id+i)%len(cases)]
 				// Decode each iteration so the runtime path actually
 				// works against a fresh instance — defends against any

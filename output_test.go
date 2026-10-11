@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 )
@@ -386,10 +387,8 @@ func hasErrorLeaf(doc any) bool {
 			}
 		}
 	case []any:
-		for _, item := range v {
-			if hasErrorLeaf(item) {
-				return true
-			}
+		if slices.ContainsFunc(v, hasErrorLeaf) {
+			return true
 		}
 	}
 	return false
@@ -440,8 +439,7 @@ func BenchmarkValidateInvalid(b *testing.B) {
 		b.Fatal(err)
 	}
 	instance := []byte(`{"x": 1, "y": 2, "z": 3}`)
-	b.ResetTimer()
-	for range b.N {
+	for b.Loop() {
 		_, _ = s.Validate(instance)
 	}
 }
@@ -464,8 +462,7 @@ func BenchmarkValidateInvalidWithStopOnFirstError(b *testing.B) {
 		b.Fatal(err)
 	}
 	instance := []byte(`{"x": 1, "y": 2, "z": 3}`)
-	b.ResetTimer()
-	for range b.N {
+	for b.Loop() {
 		_, _ = s.Validate(instance, WithStopOnFirstError(true))
 	}
 }

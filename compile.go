@@ -387,7 +387,7 @@ func (c *Compiler) compile(value any, rawSource []byte, baseURI string) (*Schema
 
 // validateAgainstMetaSchema validates value (the user schema) against the
 // embedded meta-schema for draft, or — when metaSchemaURI names a known
-// dialect ([dialectMetaSchemaPaths]) — against the dialect's meta-schema.
+// dialect ([dialectMetaSchemaPath]) — against the dialect's meta-schema.
 // Failures are returned as a [*CompileError] with the validation errors as
 // a cause.
 func validateAgainstMetaSchema(_ *Schema, value any, draft Draft, metaSchemaURI string) error {

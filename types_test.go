@@ -143,7 +143,6 @@ func TestValidationErrorUnwrapCauses(t *testing.T) {
 		t.Fatalf("Unwrap() len = %d, want 2", len(un))
 	}
 	// errors.Is must reach the cause chain via the multi-error Unwrap.
-	probe := &ValidationError{Keyword: "minLength"}
 	if !errors.Is(e, ErrValidation) {
 		t.Errorf("errors.Is sentinel: false")
 	}
@@ -153,7 +152,6 @@ func TestValidationErrorUnwrapCauses(t *testing.T) {
 			t.Errorf("Unwrap()[%d] is not *ValidationError", i)
 		}
 	}
-	_ = probe
 }
 
 func TestResultOutputFlag(t *testing.T) {
