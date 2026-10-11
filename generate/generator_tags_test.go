@@ -165,8 +165,7 @@ func TestTagFlagsCannotTakeValue(t *testing.T) {
 	if err == nil {
 		t.Fatal("expected error: required=true should be rejected")
 	}
-	var ce *jsonschema.CompileError
-	if !errors.As(err, &ce) {
+	if _, ok := errors.AsType[*jsonschema.CompileError](err); !ok {
 		t.Errorf("got %T", err)
 	}
 }
@@ -821,13 +820,13 @@ func TestGenerateTagEscapedEqualsInName(t *testing.T) {
 
 // TestRequireStringTargetBranches covers the kind switch.
 func TestRequireStringTargetBranches(t *testing.T) {
-	if err := requireStringTarget(reflect.TypeOf(""), "/x", "minLength"); err != nil {
+	if err := requireStringTarget(reflect.TypeFor[string](), "/x", "minLength"); err != nil {
 		t.Errorf("string target should pass: %v", err)
 	}
-	if err := requireStringTarget(reflect.TypeOf((*string)(nil)), "/x", "minLength"); err != nil {
+	if err := requireStringTarget(reflect.TypeFor[*string](), "/x", "minLength"); err != nil {
 		t.Errorf("ptr-to-string target should pass: %v", err)
 	}
-	if err := requireStringTarget(reflect.TypeOf(0), "/x", "minLength"); err == nil {
+	if err := requireStringTarget(reflect.TypeFor[int](), "/x", "minLength"); err == nil {
 		t.Error("int target should fail")
 	}
 	// nil target → no error
@@ -838,16 +837,16 @@ func TestRequireStringTargetBranches(t *testing.T) {
 
 // TestRequireArrayTargetBranches covers the kind switch.
 func TestRequireArrayTargetBranches(t *testing.T) {
-	if err := requireArrayTarget(reflect.TypeOf([]int{}), "/x", "minItems"); err != nil {
+	if err := requireArrayTarget(reflect.TypeFor[[]int](), "/x", "minItems"); err != nil {
 		t.Errorf("slice target should pass: %v", err)
 	}
-	if err := requireArrayTarget(reflect.TypeOf([3]int{}), "/x", "minItems"); err != nil {
+	if err := requireArrayTarget(reflect.TypeFor[[3]int](), "/x", "minItems"); err != nil {
 		t.Errorf("array target should pass: %v", err)
 	}
-	if err := requireArrayTarget(reflect.TypeOf((*[]int)(nil)), "/x", "minItems"); err != nil {
+	if err := requireArrayTarget(reflect.TypeFor[*[]int](), "/x", "minItems"); err != nil {
 		t.Errorf("ptr-to-slice should pass: %v", err)
 	}
-	if err := requireArrayTarget(reflect.TypeOf(""), "/x", "minItems"); err == nil {
+	if err := requireArrayTarget(reflect.TypeFor[string](), "/x", "minItems"); err == nil {
 		t.Error("string target should fail")
 	}
 	if err := requireArrayTarget(nil, "/x", "minItems"); err != nil {
@@ -857,13 +856,13 @@ func TestRequireArrayTargetBranches(t *testing.T) {
 
 // TestRequireMapTargetBranches covers the kind switch.
 func TestRequireMapTargetBranches(t *testing.T) {
-	if err := requireMapTarget(reflect.TypeOf(map[string]int{}), "/x", "minProperties"); err != nil {
+	if err := requireMapTarget(reflect.TypeFor[map[string]int](), "/x", "minProperties"); err != nil {
 		t.Errorf("map target should pass: %v", err)
 	}
 	if err := requireMapTarget(reflect.TypeOf(struct{}{}), "/x", "minProperties"); err != nil {
 		t.Errorf("struct target should pass: %v", err)
 	}
-	if err := requireMapTarget(reflect.TypeOf(""), "/x", "minProperties"); err == nil {
+	if err := requireMapTarget(reflect.TypeFor[string](), "/x", "minProperties"); err == nil {
 		t.Error("string target should fail")
 	}
 	if err := requireMapTarget(nil, "/x", "minProperties"); err != nil {
@@ -892,16 +891,16 @@ func TestCoerceFieldValueBranches(t *testing.T) {
 		want any
 		err  bool
 	}{
-		{reflect.TypeOf(""), "hello", "hello", false},
+		{reflect.TypeFor[string](), "hello", "hello", false},
 		{reflect.TypeOf(true), "true", true, false},
 		{reflect.TypeOf(true), "false", false, false},
 		{reflect.TypeOf(true), "yes", nil, true},
-		{reflect.TypeOf(0), "42", int64(42), false},
-		{reflect.TypeOf(0), "x", nil, true},
-		{reflect.TypeOf(0.0), "3.14", 3.14, false},
-		{reflect.TypeOf(0.0), "x", nil, true},
+		{reflect.TypeFor[int](), "42", int64(42), false},
+		{reflect.TypeFor[int](), "x", nil, true},
+		{reflect.TypeFor[float64](), "3.14", 3.14, false},
+		{reflect.TypeFor[float64](), "x", nil, true},
 		// fallthrough — slice unaffected; returns string verbatim
-		{reflect.TypeOf([]int{}), "anything", "anything", false},
+		{reflect.TypeFor[[]int](), "anything", "anything", false},
 	}
 	for _, tc := range cases {
 		got, err := coerceFieldValue(tc.ft, tc.val, "/p", "name")
@@ -926,7 +925,7 @@ func TestCoerceNumericValueBranches(t *testing.T) {
 		t.Errorf("got %v", got)
 	}
 	// int ft
-	got, err = coerceNumericValue(reflect.TypeOf(0), "42", true, "/x", "minimum")
+	got, err = coerceNumericValue(reflect.TypeFor[int](), "42", true, "/x", "minimum")
 	if err != nil {
 		t.Errorf("int: %v", err)
 	}
@@ -934,19 +933,19 @@ func TestCoerceNumericValueBranches(t *testing.T) {
 		t.Errorf("got %v", got)
 	}
 	// non-numeric ft
-	if _, err := coerceNumericValue(reflect.TypeOf(""), "1", true, "/x", "minimum"); err == nil {
+	if _, err := coerceNumericValue(reflect.TypeFor[string](), "1", true, "/x", "minimum"); err == nil {
 		t.Error("string field should reject numeric option")
 	}
 	// hasValue false
-	if _, err := coerceNumericValue(reflect.TypeOf(0), "", false, "/x", "minimum"); err == nil {
+	if _, err := coerceNumericValue(reflect.TypeFor[int](), "", false, "/x", "minimum"); err == nil {
 		t.Error("missing value should error")
 	}
 	// invalid int
-	if _, err := coerceNumericValue(reflect.TypeOf(0), "x", true, "/x", "minimum"); err == nil {
+	if _, err := coerceNumericValue(reflect.TypeFor[int](), "x", true, "/x", "minimum"); err == nil {
 		t.Error("bad int should error")
 	}
 	// invalid float
-	if _, err := coerceNumericValue(reflect.TypeOf(0.0), "x", true, "/x", "minimum"); err == nil {
+	if _, err := coerceNumericValue(reflect.TypeFor[float64](), "x", true, "/x", "minimum"); err == nil {
 		t.Error("bad float should error")
 	}
 	// invalid float for nil ft
@@ -960,10 +959,10 @@ func TestElemTypeForListBranches(t *testing.T) {
 	if got := elemTypeForList(nil); got != nil {
 		t.Errorf("nil: %v", got)
 	}
-	if got := elemTypeForList(reflect.TypeOf([]int{})); got != reflect.TypeOf(0) {
+	if got := elemTypeForList(reflect.TypeFor[[]int]()); got != reflect.TypeFor[int]() {
 		t.Errorf("slice: %v", got)
 	}
-	if got := elemTypeForList(reflect.TypeOf("")); got != reflect.TypeOf("") {
+	if got := elemTypeForList(reflect.TypeFor[string]()); got != reflect.TypeFor[string]() {
 		t.Errorf("scalar: %v", got)
 	}
 }

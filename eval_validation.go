@@ -85,8 +85,7 @@ func isJSONInteger(v any) bool {
 	return false
 }
 
-//nolint:gochecknoinits // evaluator registry is built at package init by design.
-func init() {
+func registerTypeKeyword() {
 	registerEvaluator("type", buildType)
 }
 
@@ -136,8 +135,7 @@ func (e *constEval) eval(ctx *runCtx, instance any) {
 	}
 }
 
-//nolint:gochecknoinits // evaluator registry is built at package init by design.
-func init() {
+func registerEnumConstKeywords() {
 	registerEvaluator("enum", func(_ *evalBuilder, _ *buildFrame, raw any, loc string) (evaluator, error) {
 		arr, ok := raw.([]any)
 		if !ok {
@@ -295,8 +293,7 @@ func (e *rangeEval) eval(ctx *runCtx, instance any) {
 	}
 }
 
-//nolint:gochecknoinits // evaluator registry is built at package init by design.
-func init() {
+func registerNumericKeywords() {
 	registerEvaluator("multipleOf", func(_ *evalBuilder, _ *buildFrame, raw any, loc string) (evaluator, error) {
 		r, ok := numberToRat(raw)
 		if !ok {
@@ -387,8 +384,7 @@ func (e *patternEval) eval(ctx *runCtx, instance any) {
 	}
 }
 
-//nolint:gochecknoinits // evaluator registry is built at package init by design.
-func init() {
+func registerStringKeywords() {
 	registerEvaluator("maxLength", func(_ *evalBuilder, _ *buildFrame, raw any, loc string) (evaluator, error) {
 		n, ok := toInt(raw)
 		if !ok || n < 0 {
@@ -494,8 +490,7 @@ func (e *uniqueItemsEval) eval(ctx *runCtx, instance any) {
 	}
 }
 
-//nolint:gochecknoinits // evaluator registry is built at package init by design.
-func init() {
+func registerArrayKeywords() {
 	registerEvaluator("maxItems", func(_ *evalBuilder, _ *buildFrame, raw any, loc string) (evaluator, error) {
 		n, ok := toInt(raw)
 		if !ok || n < 0 {
@@ -604,8 +599,7 @@ func (e *dependentRequiredEval) eval(ctx *runCtx, instance any) {
 	}
 }
 
-//nolint:gochecknoinits // evaluator registry is built at package init by design.
-func init() {
+func registerObjectKeywords() {
 	registerEvaluator("maxProperties", func(_ *evalBuilder, _ *buildFrame, raw any, loc string) (evaluator, error) {
 		n, ok := toInt(raw)
 		if !ok || n < 0 {

@@ -239,8 +239,7 @@ func (e *recursiveRefEval) subschemaFor(target any) *subschema {
 	return sub
 }
 
-//nolint:gochecknoinits // evaluator registry is built at package init by design.
-func init() {
+func registerRefKeywords() {
 	registerEvaluator("$ref", func(b *evalBuilder, f *buildFrame, raw any, loc string) (evaluator, error) {
 		ref, ok := raw.(string)
 		if !ok {

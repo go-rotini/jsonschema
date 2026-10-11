@@ -80,8 +80,7 @@ func TestCompileMalformedJSON(t *testing.T) {
 	if err == nil {
 		t.Fatal("expected error")
 	}
-	var ce *CompileError
-	if !errors.As(err, &ce) {
+	if _, ok := errors.AsType[*CompileError](err); !ok {
 		t.Errorf("err type = %T, want *CompileError", err)
 	}
 }
@@ -101,8 +100,7 @@ func TestCompileNegativeMinLength(t *testing.T) {
 	if err == nil {
 		t.Fatal("expected error")
 	}
-	var ce *CompileError
-	if !errors.As(err, &ce) {
+	if ce, ok := errors.AsType[*CompileError](err); !ok {
 		t.Errorf("err type = %T, want *CompileError", err)
 	} else if ce.KeywordLocation == "" {
 		t.Errorf("CompileError.KeywordLocation empty: %+v", ce)
@@ -114,8 +112,7 @@ func TestCompileTypeMustBeStringOrArray(t *testing.T) {
 	if err == nil {
 		t.Fatal("expected error for numeric type")
 	}
-	var ce *CompileError
-	if !errors.As(err, &ce) {
+	if ce, ok := errors.AsType[*CompileError](err); !ok {
 		t.Errorf("err type = %T, want *CompileError", err)
 	} else if ce.KeywordLocation == "" {
 		t.Errorf("CompileError.KeywordLocation empty: %+v", ce)
@@ -127,8 +124,7 @@ func TestCompileRequiredMustBeStrings(t *testing.T) {
 	if err == nil {
 		t.Fatal("expected error")
 	}
-	var ce *CompileError
-	if !errors.As(err, &ce) {
+	if ce, ok := errors.AsType[*CompileError](err); !ok {
 		t.Errorf("err type = %T, want *CompileError", err)
 	} else if ce.KeywordLocation == "" {
 		t.Errorf("CompileError.KeywordLocation empty: %+v", ce)
@@ -140,8 +136,7 @@ func TestCompileEmptyAllOf(t *testing.T) {
 	if err == nil {
 		t.Fatal("expected error for empty allOf")
 	}
-	var ce *CompileError
-	if !errors.As(err, &ce) {
+	if ce, ok := errors.AsType[*CompileError](err); !ok {
 		t.Errorf("err type = %T, want *CompileError", err)
 	} else if ce.KeywordLocation == "" {
 		t.Errorf("CompileError.KeywordLocation empty: %+v", ce)
@@ -153,8 +148,7 @@ func TestCompileTrailingContent(t *testing.T) {
 	if err == nil {
 		t.Fatal("expected error for trailing content")
 	}
-	var ce *CompileError
-	if !errors.As(err, &ce) {
+	if _, ok := errors.AsType[*CompileError](err); !ok {
 		t.Errorf("err type = %T, want *CompileError", err)
 	}
 	if !errors.Is(err, errTrailingContent) {
@@ -430,8 +424,7 @@ func TestValidateTopLevelPropagatesCompileError(t *testing.T) {
 	if err == nil {
 		t.Fatal("expected error")
 	}
-	var ce *CompileError
-	if !errors.As(err, &ce) {
+	if _, ok := errors.AsType[*CompileError](err); !ok {
 		t.Errorf("err = %T, want *CompileError", err)
 	}
 }
@@ -534,8 +527,7 @@ func TestCompileEmptyInput(t *testing.T) {
 			if err == nil {
 				t.Fatalf("Compile(%q): expected error", tc.input)
 			}
-			var ce *CompileError
-			if !errors.As(err, &ce) {
+			if _, ok := errors.AsType[*CompileError](err); !ok {
 				t.Errorf("Compile(%q): err type = %T, want *CompileError", tc.input, err)
 			}
 			if !errors.Is(err, io.EOF) {
@@ -555,7 +547,7 @@ func TestCompilerConcurrentCompile(t *testing.T) {
 	const N = 32
 	var wg sync.WaitGroup
 	wg.Add(N)
-	for i := 0; i < N; i++ {
+	for range N {
 		go func() {
 			defer wg.Done()
 			if _, err := c.Compile(schema); err != nil {
@@ -598,7 +590,7 @@ func TestCompilerCompileURLSingleFlight(t *testing.T) {
 
 	var wg sync.WaitGroup
 	wg.Add(N)
-	for i := 0; i < N; i++ {
+	for range N {
 		go func() {
 			defer wg.Done()
 			// Mark this goroutine as committed to its CompileURL call

@@ -82,7 +82,7 @@ func generateShape(choice uint8) any {
 // is exercised at least once on a fresh corpus.
 func seedFuzzGenerate(f *testing.F) {
 	f.Helper()
-	for i := uint8(0); i < 6; i++ {
+	for i := range uint8(6) {
 		f.Add(i)
 	}
 }

@@ -246,11 +246,8 @@ func printSuiteFailures(t *testing.T, failByCase map[string]int) {
 		}
 		return top[i].k < top[j].k
 	})
-	limit := 30
-	if len(top) < limit {
-		limit = len(top)
-	}
-	for i := 0; i < limit; i++ {
+	limit := min(len(top), 30)
+	for i := range limit {
 		t.Logf("  failing: %s (%d)", top[i].k, top[i].v)
 	}
 }

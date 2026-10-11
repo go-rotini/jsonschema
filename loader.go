@@ -202,10 +202,14 @@ func (c ChainLoader) Load(uri string) ([]byte, error) {
 //
 //	jsonschema.ChainLoader{jsonschema.MetaLoader(), myLoader}
 func MetaLoader() Loader {
-	return metaLoader()
+	metaLoaderOnce.Do(func() { metaLoader = embeddedMetaMapLoader() })
+	return metaLoader
 }
 
-var metaLoader = sync.OnceValue(func() Loader { return embeddedMetaMapLoader() })
+var (
+	metaLoader     Loader
+	metaLoaderOnce sync.Once
+)
 
 // DefaultLoader returns the package's default [Loader], used when no
 // [WithLoader] option is given: the embedded standard meta-schemas only
@@ -265,7 +269,8 @@ func (defaultLoaderMissError) Unwrap() error { return ErrLoaderRejected }
 // to the embedded copy without flipping schemes.
 func embeddedMetaMapLoader() MapLoader {
 	m := MapLoader{}
-	for d, path := range metaSchemaPaths {
+	for _, e := range metaSchemaPaths {
+		d, path := e.draft, e.path
 		data, err := fs.ReadFile(metaSchemaFS, path)
 		if err != nil {
 			continue

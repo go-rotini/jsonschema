@@ -69,7 +69,7 @@ func TestLoaderCacheHit(t *testing.T) {
 	}))
 	t.Cleanup(srv.Close)
 	l := &Loader{AllowHTTP: true, Cache: time.Minute}
-	for i := 0; i < 3; i++ {
+	for range 3 {
 		if _, err := l.Load(srv.URL + "/a"); err != nil {
 			t.Fatalf("Load: %v", err)
 		}
@@ -101,7 +101,7 @@ func TestLoaderSingleFlight(t *testing.T) {
 	l := &Loader{AllowHTTP: true}
 	var wg sync.WaitGroup
 	wg.Add(N)
-	for i := 0; i < N; i++ {
+	for range N {
 		go func() {
 			defer wg.Done()
 			arrived.Done()

@@ -193,10 +193,10 @@ func TestStdlibCompatConcurrentValidate(t *testing.T) {
 		[]byte(`{"items":[1]}`), // expected invalid (missing name)
 		[]byte(`{"name":"","items":[1]}`),
 	}
-	for w := 0; w < workers; w++ {
+	for w := range workers {
 		go func(id int) {
 			defer wg.Done()
-			for i := 0; i < iterations; i++ {
+			for i := range iterations {
 				inst := instances[(id+i)%len(instances)]
 				res, err := schema.Validate(inst)
 				if err != nil {

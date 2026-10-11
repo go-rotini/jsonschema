@@ -26,7 +26,7 @@ func TestRootPackageDependencies(t *testing.T) {
 		if err != nil {
 			t.Fatalf("go list -deps (GOOS=%s): %v", goos, err)
 		}
-		for _, dep := range strings.Fields(string(out)) {
+		for dep := range strings.FieldsSeq(string(out)) {
 			for _, pkg := range forbidden {
 				if dep == pkg || strings.HasPrefix(dep, pkg+"/") {
 					t.Errorf("GOOS=%s: the root package depends on %s", goos, dep)

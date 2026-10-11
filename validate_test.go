@@ -528,8 +528,7 @@ func TestValidateAgainstMetaSchema_FailureSurfacesCompileError(t *testing.T) {
 		t.Errorf("CompileError.Message = %q; want it to contain meta-schema diagnostic prefix", ce.Message)
 	}
 	// The cause should be a ValidationError so callers can inspect it.
-	var ve *ValidationError
-	if !errors.As(err, &ve) {
+	if _, ok := errors.AsType[*ValidationError](err); !ok {
 		t.Errorf("expected ValidationError in cause chain; got %v", err)
 	}
 }
@@ -569,8 +568,7 @@ func TestValidateAgainstMetaSchema_UnknownDialectFallsBack(t *testing.T) {
 	if err == nil {
 		t.Fatal("expected meta-schema validation failure even with unknown $schema URI")
 	}
-	var ce *CompileError
-	if !errors.As(err, &ce) {
+	if _, ok := errors.AsType[*CompileError](err); !ok {
 		t.Fatalf("err = %T %v; want *CompileError", err, err)
 	}
 }

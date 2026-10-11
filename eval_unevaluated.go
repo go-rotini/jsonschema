@@ -97,8 +97,7 @@ func (e *unevaluatedPropertiesEval) eval(ctx *runCtx, instance any) {
 	}
 }
 
-//nolint:gochecknoinits // evaluator registry is built at package init by design.
-func init() {
+func registerUnevaluatedKeywords() {
 	registerEvaluator("unevaluatedItems", func(b *evalBuilder, f *buildFrame, raw any, loc string) (evaluator, error) {
 		sub, err := b.buildSubschemaFrame(f, raw, loc, f.base, f.resource)
 		if err != nil {
