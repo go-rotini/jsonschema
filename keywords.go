@@ -15,9 +15,9 @@ type Keyword interface {
 	RetiredInDraft() Draft
 }
 
-// Vocabulary groups a set of keywords under a single URI per Draft 2019-09's
-// vocabulary mechanism. The standard vocabularies are registered at package
-// init time; custom-vocabulary registration is reserved for v0.2.
+// Vocabulary groups a set of keywords under a single URI, following the
+// vocabulary mechanism introduced in Draft 2019-09. [Vocabularies] lists the
+// built-in set; custom vocabularies cannot be registered.
 type Vocabulary struct {
 	// URI is the canonical identifier for the vocabulary (e.g.
 	// VocabApplicator).
@@ -54,10 +54,9 @@ const (
 	VocabMetaData = "https://json-schema.org/draft/2020-12/vocab/meta-data"
 	// VocabOAS identifies the OpenAPI 3.1 base vocabulary that ships with
 	// the OAS dialect ([OASDialectURL]). It contributes the four annotation-
-	// only keywords [discriminator], [xml], [externalDocs], and [example].
-	// The package registers this vocabulary unconditionally so OpenAPI 3.1
-	// schemas compile cleanly whether or not their $schema points at the
-	// OAS dialect.
+	// only keywords discriminator, xml, externalDocs, and example. The
+	// package recognizes these keywords in every Draft 2020-12 schema,
+	// whether or not its $schema points at the OAS dialect.
 	VocabOAS = "https://spec.openapis.org/oas/3.1/vocab/base"
 )
 
@@ -98,7 +97,7 @@ func kw(name string, since, retired Draft) Keyword {
 
 // stdVocabularies is the registered list of standard 2020-12 vocabularies
 // plus the historical-draft keyword aliases that this package recognizes.
-// Built once at package init and exposed read-only by [Vocabularies].
+// Exposed through copies by [Vocabularies].
 var stdVocabularies = []Vocabulary{
 	{
 		URI: VocabCore,
@@ -221,9 +220,10 @@ var stdVocabularies = []Vocabulary{
 	},
 }
 
-// Vocabularies returns the registered standard vocabularies in declaration
-// order. The returned slice is a defensive copy; the underlying Keyword
-// values are immutable so the per-element copy does not deep-copy them.
+// Vocabularies returns the built-in vocabularies: the Draft 2020-12 standard
+// set, with each vocabulary's retired keywords from earlier drafts (such as
+// "definitions" and "dependencies"), plus [VocabOAS]. The slices are fresh
+// copies.
 func Vocabularies() []Vocabulary {
 	out := make([]Vocabulary, len(stdVocabularies))
 	for i, v := range stdVocabularies {

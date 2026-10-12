@@ -61,9 +61,9 @@ func (r *suiteResults) record(name string, pass, total int) {
 }
 
 // TestJSONSchemaTestSuite runs the cloned JSON Schema Test Suite against the
-// validator. We currently target Draft 2020-12 (primary) and report per-draft
-// pass rates; the optional/ subdirectory is excluded (formats / content
-// assertion live in Phase 6).
+// validator and reports per-draft pass rates. The optional/ subdirectory
+// (format and content assertion, among others) is excluded; those behaviors
+// have their own tests in this package.
 func TestJSONSchemaTestSuite(t *testing.T) {
 	if _, err := os.Stat(suiteRoot); os.IsNotExist(err) {
 		t.Skipf("test suite not cloned at %s; run `make clone-test-suite`", suiteRoot)
@@ -197,7 +197,7 @@ func runSuiteDraft(t *testing.T, dir string, draft Draft, results *suiteResults)
 			return err
 		}
 		if info.IsDir() {
-			// Skip the optional/ tree (formats + content assertion = Phase 6).
+			// Skip the optional/ tree (format and content assertion, among others).
 			if info.Name() == "optional" {
 				return filepath.SkipDir
 			}
@@ -328,8 +328,8 @@ func buildSuiteLoader(t *testing.T) Loader {
 	return chain
 }
 
-// TestJSONSchemaEdgeCases is a small set of bespoke conformance probes that
-// the official suite doesn't cover but our spec § matrix calls for.
+// TestJSONSchemaEdgeCases is a small set of conformance probes that the
+// official suite doesn't cover.
 func TestJSONSchemaEdgeCases(t *testing.T) {
 	cases := []struct {
 		name   string

@@ -51,8 +51,8 @@ func Compile(schemaJSON []byte, opts ...CompileOption) (*Schema, error) {
 	return c.Compile(schemaJSON)
 }
 
-// MustCompile is the panic-on-error variant of [Compile]. Intended for
-// package-init use of static, well-known schemas.
+// MustCompile is the panic-on-error variant of [Compile], for static,
+// known-good schemas such as package-level variables.
 func MustCompile(schemaJSON []byte, opts ...CompileOption) *Schema {
 	s, err := Compile(schemaJSON, opts...)
 	if err != nil {
@@ -78,8 +78,8 @@ func MustCompileValue(schemaValue any, opts ...CompileOption) *Schema {
 	return s
 }
 
-// CompileURL fetches the schema at uri using the configured Loader (or the
-// default chain) and compiles it.
+// CompileURL fetches the schema at uri with the [WithLoader] loader (default
+// [DefaultLoader]) and compiles it, using uri as the base URI.
 func CompileURL(uri string, opts ...CompileOption) (*Schema, error) {
 	c := NewCompiler(opts...)
 	return c.CompileURL(uri)
@@ -94,10 +94,9 @@ func MustCompileURL(uri string, opts ...CompileOption) *Schema {
 	return s
 }
 
-// Validate compiles schemaJSON and validates instanceJSON against it in one
-// call. This is a convenience for one-shot use; callers performing multiple
-// validations against the same schema should call [Compile] once and use
-// [*Schema.Validate] to amortize compilation cost.
+// Validate compiles schemaJSON with default compile options and validates
+// instanceJSON against it in one call. To validate many instances, call
+// [Compile] once and reuse the [*Schema].
 func Validate(schemaJSON, instanceJSON []byte, opts ...Option) (*Result, error) {
 	s, err := Compile(schemaJSON)
 	if err != nil {
@@ -106,13 +105,14 @@ func Validate(schemaJSON, instanceJSON []byte, opts ...Option) (*Result, error) 
 	return s.Validate(instanceJSON, opts...)
 }
 
-// Compiler holds compile-time configuration and a cache of compiled remote
-// schemas. Reuse a Compiler when compiling many schemas that share remote
-// references — the cache amortizes loader I/O.
+// Compiler holds compile-time configuration, resources registered with
+// [Compiler.AddResource], and a cache of the schemas compiled by
+// [Compiler.CompileURL], keyed by URI. External $refs fetched while
+// compiling are not cached across calls; to fetch a remote document once,
+// pass a caching [Loader] (such as an httploader.Loader with Cache set).
 //
-// A Compiler is safe for concurrent use after construction. The cache is
-// keyed by absolute URI; concurrent [*Compiler.CompileURL] calls for the
-// same URI share a single fetch+compile pipeline via an inline single-flight.
+// A Compiler is safe for concurrent use. Concurrent CompileURL calls for the
+// same URI share one fetch and compile.
 type Compiler struct {
 	opts      *compileOptions
 	cache     sync.Map // map[string]*Schema
@@ -162,8 +162,8 @@ func (l *tracingLoader) Load(uri string) ([]byte, error) {
 	return data, nil
 }
 
-// Compile parses and compiles schemaJSON. The result is cached by $id so
-// subsequent calls referencing the same document via $ref short-circuit.
+// Compile parses and compiles schemaJSON. Each call compiles afresh; the
+// result is not cached.
 func (c *Compiler) Compile(schemaJSON []byte) (*Schema, error) {
 	if c == nil {
 		return nil, ErrSchemaNotCompiled
@@ -203,9 +203,9 @@ func (c *Compiler) MustCompileValue(v any) *Schema {
 }
 
 // CompileURL fetches uri via the compiler's loader and compiles the
-// resulting bytes. Concurrent calls for the same URI share a single
-// fetch+compile pipeline (single-flight); the result is cached so subsequent
-// calls return immediately.
+// resulting bytes. A successful result is cached by uri, so later calls
+// return it without fetching; concurrent calls for the same uri share one
+// fetch and compile.
 func (c *Compiler) CompileURL(uri string) (*Schema, error) {
 	if c == nil {
 		return nil, ErrSchemaNotCompiled
@@ -272,10 +272,10 @@ func (c *Compiler) MustCompileURL(uri string) *Schema {
 	return s
 }
 
-// AddResource registers a schema document under uri so subsequent
-// compilations resolving that URI can find it without invoking the Loader.
-// The bytes are validated as JSON; the document is parsed lazily when first
-// referenced.
+// AddResource registers a schema document under uri so later compilations
+// on this Compiler resolve $refs to that URI without invoking the Loader.
+// The bytes must be valid JSON; they are copied. It does not affect
+// [Compiler.CompileURL], which always fetches through the Loader.
 func (c *Compiler) AddResource(uri string, schemaJSON []byte) error {
 	if c == nil {
 		return ErrSchemaNotCompiled

@@ -214,7 +214,7 @@ func openResourceIfNeeded(rm *resourceMap, current *resource, obj map[string]any
 	if existing, dup := rm.byURI[absID]; dup && existing != nil && !sameMap(existing.root, obj) {
 		// Duplicate $id would silently shadow the earlier resource; the
 		// sameMap guard lets the root walk re-enter its own $id without
-		// tripping. Other [RefCollisionPolicy] values are reserved for v0.2.
+		// tripping. [RefCollisionPolicy] is not consulted here.
 		return nil, false, &CompileError{
 			KeywordLocation: idKey,
 			Message:         fmt.Sprintf("duplicate $id %q", absID),

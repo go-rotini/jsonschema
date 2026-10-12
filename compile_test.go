@@ -467,8 +467,8 @@ func TestNewCompilerWithLoaderTrace(t *testing.T) {
 	if c == nil {
 		t.Fatal("nil compiler")
 	}
-	// The trace writer is stored but unused in Phase 3; this test just
-	// confirms the option does not error out at construction.
+	// This test only confirms construction succeeds with a trace writer;
+	// TestWithLoaderTrace covers the trace output.
 }
 
 func TestCompileURLAfterAddResource(t *testing.T) {

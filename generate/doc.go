@@ -28,7 +28,9 @@
 //	interface{} / any                {} by default; configurable via [WithInterfaceAsAny]
 //	json.Number                      {"type": ["number", "string"]}
 //	json.RawMessage                  {} (any)
-//	encoding.TextMarshaler           {"type": "string"}
+//	*big.Int, *big.Float             {"type": "string"}
+//	encoding.TextMarshaler           {"type": "string"} (non-struct types)
+//	json.Marshaler                   {} (non-struct types)
 //	chan / func / unsafe.Pointer     generation error
 //
 // Self-referential and mutually recursive types are emitted via $defs entries

@@ -9,9 +9,10 @@ import (
 	"strings"
 )
 
-// CompileError is returned when a schema document is malformed, references a
-// non-existent vocabulary, or violates a keyword's value constraints (e.g.
-// minLength is a string instead of a non-negative integer).
+// CompileError is returned when a schema document is malformed or violates a
+// keyword's value constraints (e.g. minLength is a string instead of a
+// non-negative integer). An unresolvable $ref is reported as a [*RefError]
+// instead.
 type CompileError struct {
 	// KeywordLocation is the JSON Pointer (or URL with fragment) to the
 	// position in the schema where the problem was found.
@@ -157,9 +158,8 @@ func (e *FormatError) Is(target error) bool {
 func (e *FormatError) Unwrap() error { return e.Cause }
 
 // Sentinel errors. The pointer-typed sentinels (ErrCompile, ErrValidation,
-// ErrRef, ErrLoader, ErrFormat) match instances of their concrete error
-// type via [errors.Is]; the package-level errors.New sentinels surface
-// specific failure conditions that do not warrant a structured type.
+// ErrRef, ErrLoader, ErrFormat) match any error of their concrete type via
+// [errors.Is]; the others mark specific failure conditions.
 var (
 	// ErrCompile matches any [*CompileError].
 	ErrCompile = &CompileError{}
@@ -180,22 +180,24 @@ var (
 	ErrUnknownKeyword = errors.New("jsonschema: unknown keyword")
 	// ErrUnknownFormat indicates a "format" value with no registered
 	// validator while the unknown-format policy is [UnknownFormatError].
-	// Surfaced as the [FormatError.Cause] inside the wrapping
-	// [*ValidationError.Cause].
+	// It is the Cause of the [*FormatError] held in [ValidationError.Cause].
 	ErrUnknownFormat = errors.New("jsonschema: unknown format")
-	// ErrRefCycle indicates a cyclic $ref chain that the compiler could
-	// not turn into a lazy edge. Reserved for future use; v0.1's compile
-	// path resolves every cycle into a lazy edge bounded at run time by
-	// [WithMaxRefDepth] (which surfaces as [ErrMaxRefDepth]).
+	// ErrRefCycle is reserved for a $ref cycle the compiler cannot resolve.
+	// No function returns it today: every cycle becomes a lazy edge that
+	// validation follows, bounded by [WithMaxRefDepth].
 	ErrRefCycle = errors.New("jsonschema: ref cycle detected")
-	// ErrMaxRefDepth indicates a single keyword evaluation followed more
-	// than [WithMaxRefDepth] hops.
+	// ErrMaxRefDepth indicates validation nested more than [WithMaxRefDepth]
+	// $ref, $dynamicRef or $recursiveRef hops. Its text is used as the
+	// Message of the resulting [ValidationError]; it is not set as the
+	// Cause, so [errors.Is] does not match it.
 	ErrMaxRefDepth = errors.New("jsonschema: max ref depth exceeded")
-	// ErrMaxValidationDepth indicates the validator recursed past
-	// [WithMaxValidationDepth] levels into nested instances.
+	// ErrMaxValidationDepth indicates subschema evaluation nested deeper
+	// than [WithMaxValidationDepth]. It is the Cause of the resulting
+	// [ValidationError].
 	ErrMaxValidationDepth = errors.New("jsonschema: max validation depth exceeded")
 	// ErrMaxKeyCount indicates an object instance had more keys than the
-	// [WithMaxKeyCount] cap allows.
+	// [WithMaxKeyCount] cap allows. It is the Cause of the resulting
+	// [ValidationError].
 	ErrMaxKeyCount = errors.New("jsonschema: max key count exceeded")
 	// ErrInstanceTooLarge indicates an instance document larger than
 	// [WithMaxInstanceSize] was rejected before parsing.
@@ -205,41 +207,36 @@ var (
 	// [DefaultLoader] declining an https:// $ref, since it serves only the
 	// embedded meta-schemas).
 	ErrLoaderRejected = errors.New("jsonschema: loader rejected URI scheme")
-	// ErrSchemaNotCompiled indicates a [*Schema] method was called on a
-	// nil receiver, or on a value that was not produced by the compiler
-	// (e.g. a zero-value [Schema] literal).
+	// ErrSchemaNotCompiled indicates a nil [*Schema] or [*Compiler] (or a
+	// nil generator in a subpackage) was used, including a nil schema passed
+	// to [ValidateTo] or the multi-format Validate functions.
 	ErrSchemaNotCompiled = errors.New("jsonschema: schema not compiled")
-	// ErrValidationFailed is returned when validation produced no
-	// structured [*ValidationError] but the instance was nevertheless
-	// rejected.
+	// ErrValidationFailed is returned by [ValidateTo] and
+	// [Schema.ValidateAndUnmarshal] when the instance was rejected without
+	// a structured [*ValidationError] to return.
 	ErrValidationFailed = errors.New("jsonschema: validation failed")
 	// ErrNilReader indicates a nil [io.Reader] was passed to
 	// [*Schema.ValidateReader].
 	ErrNilReader = errors.New("jsonschema: nil reader")
-	// ErrUnsupportedSchemaShape indicates a schema slot held a value the
-	// compiler/runtime cannot evaluate (neither a JSON object nor a
-	// boolean schema). Surfaced as the [CompileError.Cause].
+	// ErrUnsupportedSchemaShape is reserved for a schema slot holding
+	// neither a JSON object nor a boolean. No function returns it today.
 	ErrUnsupportedSchemaShape = errors.New("jsonschema: unsupported schema shape")
 )
 
-// RenderError produces a human-readable error string.
+// RenderError produces a human-readable, multi-line error string.
 //
-// When err is a [*ValidationError] (single or multi-cause), the output
-// emits one structured block per leaf cause with the schema keyword
-// location, the instance pointer, the human-readable message, and — when
-// schemaSrc / instanceSrc are non-empty and the JSON pointer can be
-// resolved against them — a snippet of the offending source line with a
-// caret pointer. When err is a [*CompileError], only the schema side is
-// rendered. For other error types the function falls through to err.Error().
+// When err wraps a [*ValidationError], the output has one block per leaf
+// failure in its cause tree, giving the message, keyword, schema location
+// and instance location, plus — when schemaSrc / instanceSrc are non-empty
+// JSON and the location resolves in them — the offending source line with
+// a caret. When err wraps a [*CompileError], only the schema side is
+// rendered, followed by its cause. Any other error renders as err.Error().
 //
-// Set color to true to wrap error text and the caret in ANSI escape
-// sequences (red for errors; bold for the line snippet header). Color is
-// off by default.
+// Pass true for color to add ANSI escapes (red error labels and caret,
+// bold snippet headers). Color is off by default.
 //
-// Programmatic callers should not parse the returned string — use
-// [errors.Is] / [errors.As] against the typed errors ([*CompileError],
-// [*ValidationError], [*RefError], [*LoaderError], [*FormatError]) and
-// switch on [ValidationError.Keyword] for stable classification.
+// Do not parse the returned string; use [errors.Is] / [errors.As] with the
+// typed errors and switch on [ValidationError.Keyword].
 func RenderError(schemaSrc, instanceSrc []byte, err error, color ...bool) string {
 	if err == nil {
 		return ""

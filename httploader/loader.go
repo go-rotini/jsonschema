@@ -50,20 +50,24 @@ var (
 )
 
 // Loader is a [jsonschema.Loader] that resolves http:// and https:// URIs
-// over the network. It is HTTPS-only by default; AllowHTTP must be set to
-// true to follow plain http:// URLs. Concurrent requests for the same URI
-// share a single network round-trip via an inline single-flight.
+// over the network. It is HTTPS-only unless AllowHTTP is set. Concurrent
+// requests for the same URI share one round-trip, and a non-2xx response
+// is an error.
 //
 // Set the exported fields at construction; treat the value as read-only
 // afterwards. Pass *Loader (not a copy) so the cache and in-flight state
 // are shared across goroutines.
 type Loader struct {
-	// Client is the http.Client used to perform requests. nil falls back
-	// to a per-call client built from Timeout.
+	// Client is the http.Client used to perform requests. nil uses a
+	// built-in client that caps redirects at 5 and strips headers added by
+	// RequestDecorator when a redirect crosses to another host; a custom
+	// Client keeps its own redirect policy.
 	Client *http.Client
-	// Timeout caps the duration of a single Load. Default: 10 s.
+	// Timeout caps the duration of a single fetch, with either client.
+	// Default: 10 s.
 	Timeout time.Duration
-	// MaxBodySize caps the response body size in bytes. Default: 10 MiB.
+	// MaxBodySize caps the response body size in bytes; a larger body
+	// fails the fetch. Default: 10 MiB.
 	MaxBodySize int64
 	// AllowHTTP, when true, permits http:// URLs in addition to https://.
 	// Default: false.

@@ -809,12 +809,11 @@ func TestResolveURIBranches(t *testing.T) {
 // readOnly/writeOnly scan) so any per-call build state read off the wrong
 // frame surfaces as an incorrect validity verdict — not just a race-flag.
 //
-// The bug Phase 2.5 fixed was that evalBuilder kept compile-time scratch
-// state (currentParent / currentLoc / currentBase / currentResource /
-// draft) on the shared struct. Two goroutines validating concurrently
-// would trample each other's scratch state mid-build at runtime, producing
-// observably wrong validation outputs in 5-15% of runs. Per-call frames
-// (buildFrame) eliminate the shared mutable state entirely.
+// Lazy refs build subschemas at validation time, so the per-build state
+// (parent, location, base URI, resource, draft) must live in a per-call
+// buildFrame rather than on the shared evalBuilder; shared state would let
+// concurrent validations corrupt each other's builds and return wrong
+// verdicts.
 //
 // The test asserts that every goroutine's verdict matches the expected
 // verdict computed up front against a single-threaded validation.

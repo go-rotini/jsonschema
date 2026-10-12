@@ -48,10 +48,10 @@ func WithDefaultDraft(d Draft) CompileOption {
 	}
 }
 
-// WithLoader sets the [Loader] used to fetch external $refs. Default:
-// [DefaultLoader], which serves only the embedded meta-schemas. For https://
-// refs, pass the loader from the github.com/go-rotini/jsonschema/httploader
-// package.
+// WithLoader sets the [Loader] used to fetch external $refs and the
+// documents named by [CompileURL]. Default: [DefaultLoader], which serves
+// only the embedded meta-schemas. For https:// refs, pass the loader from
+// the github.com/go-rotini/jsonschema/httploader package.
 func WithLoader(l Loader) CompileOption {
 	return func(o *compileOptions) {
 		o.loader = l
@@ -66,8 +66,10 @@ func WithBaseURI(uri string) CompileOption {
 	return func(o *compileOptions) { o.baseURI = uri }
 }
 
-// WithMaxRefDepth limits how many $ref hops a single keyword evaluation may
-// follow. Guards against pathological recursive schemas. Default: 100.
+// WithMaxRefDepth limits how many $ref, $dynamicRef and $recursiveRef hops
+// validation may nest. Exceeding it records a [ValidationError] for the
+// ref keyword whose Message is the text of [ErrMaxRefDepth]. Guards against
+// pathological recursive schemas. Default: 100.
 func WithMaxRefDepth(n int) CompileOption {
 	return func(o *compileOptions) {
 		o.maxRefDepth = n
@@ -75,15 +77,14 @@ func WithMaxRefDepth(n int) CompileOption {
 	}
 }
 
-// WithStrictKeywords causes unknown keywords to raise a [*CompileError] at
-// compile time. Default: unknown keywords are kept as annotations and ignored
-// at validation.
+// WithStrictKeywords causes a keyword unknown to the schema's draft to fail
+// compilation with a [*CompileError] wrapping [ErrUnknownKeyword]. Default:
+// unknown keywords are ignored.
 func WithStrictKeywords(b bool) CompileOption {
 	return func(o *compileOptions) { o.strictKeywords = b }
 }
 
-// WithStrict is a zero-argument shorthand for [WithStrictKeywords](true).
-// Provided for consistency with the rotini sister packages.
+// WithStrict is shorthand for [WithStrictKeywords](true).
 func WithStrict() CompileOption {
 	return WithStrictKeywords(true)
 }
@@ -99,27 +100,24 @@ func WithMetaSchemaValidation(b bool) CompileOption {
 	return func(o *compileOptions) { o.metaSchemaValidation = b }
 }
 
-// WithRefCollisionPolicy controls behavior when two compiled documents
-// declare the same $id. Default: [RefCollisionError] (compile fails).
-//
-// In v0.1, only [RefCollisionError] is wired — other policy values are
-// reserved for v0.2 and currently behave the same as [RefCollisionError].
+// WithRefCollisionPolicy records a [RefCollisionPolicy] for duplicate $id
+// values. It currently has no effect: every policy behaves like
+// [RefCollisionError], so a duplicate $id fails compilation.
 func WithRefCollisionPolicy(p RefCollisionPolicy) CompileOption {
 	return func(o *compileOptions) { o.refCollisionPolicy = p }
 }
 
-// WithLoaderTrace writes one line per [Loader] fetch to w. Useful for
+// WithLoaderTrace writes one line per successful [Loader] fetch to w; failed
+// fetches are reported only through the returned error. Useful for
 // diagnosing $ref resolution. Default: nil (no trace).
 func WithLoaderTrace(w io.Writer) CompileOption {
 	return func(o *compileOptions) { o.loaderTrace = w }
 }
 
-// Option configures a single validation call. Applied to [*Schema] Validate
-// methods and the package-level [Validate] function.
-//
-// Options are evaluated left-to-right; later options override earlier ones
-// for the same field. Most callers will mix [WithFormatAssertion],
-// [WithStopOnFirstError], [WithMaxValidationDepth], and [WithCustomFormat].
+// Option configures a single validation call. Pass options to the [*Schema]
+// Validate methods and the package-level [Validate] function. Options apply
+// left to right; a later option overrides an earlier one for the same
+// setting.
 type Option func(*runOptions)
 
 // runOptions carries the per-call validation configuration.
@@ -159,50 +157,54 @@ func defaultRunOptions() *runOptions {
 }
 
 // WithFormatAssertion enables "format" as an assertion (default: annotation
-// only). When true, format-validator failures become validation errors.
+// only). When true, a string that fails its format validator becomes a
+// [ValidationError] whose Cause is a [*FormatError]; how unknown format
+// names are handled is set by [WithUnknownFormat].
 func WithFormatAssertion(b bool) Option {
 	return func(o *runOptions) { o.formatAssertion = b }
 }
 
-// WithContentAssertion enables contentSchema as an assertion (default:
-// annotation only).
+// WithContentAssertion makes contentEncoding, contentMediaType and
+// contentSchema assertions (default: annotation only). A string must then
+// decode under its contentEncoding; when contentMediaType names a JSON media
+// type it must parse as JSON, and the parsed value must validate against
+// contentSchema. Unknown encodings and non-JSON media types still pass.
 func WithContentAssertion(b bool) Option {
 	return func(o *runOptions) { o.contentAssertion = b }
 }
 
-// WithStopOnFirstError short-circuits validation as soon as the first error
-// is found. Equivalent to selecting OutputFlag at the collector level.
+// WithStopOnFirstError stops validation once the first error is recorded,
+// and leaves [Result.Annotations] empty.
 //
-// Note: applicator branches (anyOf, oneOf, if/then/else) always evaluate
-// every alternative regardless of this option, because the keyword's
-// outcome depends on knowing which branches passed. Short-circuiting
-// applies only at the top-level evaluator and to sibling keywords within
-// a single subschema.
+// Applicator branches (anyOf, oneOf, if/then/else) still try every
+// alternative, because the keyword's outcome depends on which branches
+// pass; the short-circuit applies to sibling keywords and to the outer walk.
 func WithStopOnFirstError(b bool) Option {
 	return func(o *runOptions) { o.stopOnFirstError = b }
 }
 
-// WithMaxInstanceSize rejects instance documents larger than n bytes before
-// parsing. n <= 0 disables the limit. Default: 0 (no limit). Returns
-// [ErrInstanceTooLarge] when an instance exceeds the cap.
+// WithMaxInstanceSize makes [Schema.Validate] (and the methods built on it)
+// reject instance documents larger than n bytes with [ErrInstanceTooLarge]
+// before parsing. It does not apply to [Schema.ValidateValue] or the
+// JSONC, YAML and TOML adapters. n <= 0 disables the limit. Default: 0.
 func WithMaxInstanceSize(n int) Option {
 	return func(o *runOptions) { o.maxInstanceSize = n }
 }
 
-// WithMaxDocumentSize is a sister-package alias for [WithMaxInstanceSize].
-// Both options write to the same underlying field; later calls win.
+// WithMaxDocumentSize is an alias for [WithMaxInstanceSize].
 func WithMaxDocumentSize(n int) Option {
 	return WithMaxInstanceSize(n)
 }
 
-// WithMaxValidationDepth limits recursion into nested objects/arrays to
-// guard against unbounded recursive schemas with adversarial instances.
-// Default: 1000.
+// WithMaxValidationDepth limits how deeply subschema evaluation may nest, to
+// guard against recursive schemas meeting deeply nested instances. Exceeding
+// it records a [*ValidationError] with Keyword "$maxValidationDepth" and
+// Cause [ErrMaxValidationDepth]. Default: 1000.
 func WithMaxValidationDepth(n int) Option {
 	return func(o *runOptions) { o.maxValidationDepth = n }
 }
 
-// WithMaxDepth is a sister-package alias for [WithMaxValidationDepth].
+// WithMaxDepth is an alias for [WithMaxValidationDepth].
 func WithMaxDepth(n int) Option {
 	return WithMaxValidationDepth(n)
 }
@@ -220,21 +222,23 @@ func WithMaxKeyCount(n int) Option {
 	return func(o *runOptions) { o.maxKeyCount = n }
 }
 
-// WithWarningSink installs a writer that receives diagnostic messages
-// emitted during validation. v0.1 emits one line per unknown format under
-// the [UnknownFormatWarn] policy, deduplicated within a single Validate
-// call. Future warning-class diagnostics will write to the same sink.
-// Default: nil (warnings dropped silently).
+// WithWarningSink installs a writer for warnings emitted during validation:
+// one line per unknown format name under the [UnknownFormatWarn] policy,
+// deduplicated within a single Validate call. Default: nil (warnings are
+// dropped).
 func WithWarningSink(w io.Writer) Option {
 	return func(o *runOptions) { o.warningSink = w }
 }
 
-// WithUnknownFormat controls handling of unrecognized "format" names.
+// WithUnknownFormat controls handling of unrecognized "format" names when
+// [WithFormatAssertion] is enabled. Default: [UnknownFormatIgnore].
 func WithUnknownFormat(p UnknownFormatPolicy) Option {
 	return func(o *runOptions) { o.unknownFormatPolicy = p }
 }
 
-// WithCustomFormat registers a format validator for the given format name.
+// WithCustomFormat registers a format validator for the given format name,
+// taking precedence over a built-in validator of the same name. It applies
+// only when [WithFormatAssertion] is enabled.
 func WithCustomFormat(name string, fn func(string) error) Option {
 	return func(o *runOptions) {
 		if o.customFormats == nil {
@@ -253,23 +257,24 @@ func WithMaxErrors(n int) Option {
 }
 
 // WithReadOnly enables direction-aware validation in the "read" direction
-// (the value is being produced as output). Required properties whose schema
-// is annotated `"writeOnly": true` are not enforced because such fields
-// should not appear in output documents.
+// (the value is being produced as output): "required" does not enforce
+// properties whose schema is annotated `"writeOnly": true`, because such
+// fields should not appear in output documents.
 func WithReadOnly(b bool) Option {
 	return func(o *runOptions) { o.readOnly = b }
 }
 
 // WithWriteOnly enables direction-aware validation in the "write" direction
-// (the value is being submitted as input). Required properties whose schema
-// is annotated `"readOnly": true` are not enforced because such fields
-// should not appear in input documents.
+// (the value is being submitted as input): "required" does not enforce
+// properties whose schema is annotated `"readOnly": true`, because such
+// fields should not appear in input documents.
 func WithWriteOnly(b bool) Option {
 	return func(o *runOptions) { o.writeOnly = b }
 }
 
 // WithCollectAnnotations controls whether passing keyword annotations are
-// accumulated in [Result.Annotations]. Default: true.
+// reported in [Result.Annotations]. Default: true. [WithStopOnFirstError]
+// suppresses them regardless.
 func WithCollectAnnotations(b bool) Option {
 	return func(o *runOptions) { o.collectAnnotations = b }
 }

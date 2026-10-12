@@ -9,5 +9,6 @@
 // another) uses that type, and "#" uses the root type. Types are generated
 // for this document only, so any other $ref, such as one to a whole remote
 // document, maps to any.
+//
 // The command `go tool jsonschema generate` wraps it for go:generate use.
 package gogen

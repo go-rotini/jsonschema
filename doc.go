@@ -16,7 +16,7 @@
 //
 // The package targets [Draft 2020-12] as its primary draft and supports
 // older drafts via the schema's $schema keyword. Conformance against the
-// official JSON Schema Test Suite (main branch):
+// official JSON Schema Test Suite (main branch, optional tests excluded):
 //
 //	Draft        Mode               Test-suite pass rate
 //	Draft 4      read-only          610 / 618  (98.7%)
@@ -69,8 +69,9 @@
 // # Output Formats
 //
 // [Result.Output] renders a validation result in any of the four formats
-// from [Draft 2020-12 §12]: [OutputFlag], [OutputBasic], [OutputDetailed],
-// and [OutputVerbose]. The wire shape matches the spec's output meta-schema
+// defined in [JSON Schema Core 2020-12 §12]: [OutputFlag], [OutputBasic],
+// [OutputDetailed], and [OutputVerbose]. The wire shape matches the output
+// meta-schema
 // (also embedded and exposed via [OutputMetaSchema]) and is suitable for
 // sending over the network or feeding into downstream tools.
 //
@@ -80,7 +81,7 @@
 // and supporting [errors.Is] / [errors.As]:
 //
 //   - [*CompileError] — schema-document problems (malformed JSON, bad
-//     keyword shape, unknown vocabulary, ref resolution failure).
+//     keyword shape, duplicate $id, meta-schema violations).
 //   - [*ValidationError] — assertion failure during validation. Multi-error
 //     unwrap (Go 1.20+) walks nested causes from compound applicators
 //     (anyOf, oneOf, allOf, $ref, ...). Switch on [ValidationError.Keyword]
@@ -92,16 +93,13 @@
 //
 // Pointer-typed sentinels ([ErrCompile], [ErrValidation], [ErrRef],
 // [ErrLoader], [ErrFormat]) match instances of their concrete error type
-// via [errors.Is]. Specific failure conditions are surfaced via the
-// package-level sentinels in [errors.go]: [ErrUnknownDraft],
-// [ErrUnknownKeyword], [ErrUnknownFormat], [ErrRefCycle], [ErrMaxRefDepth],
-// [ErrMaxValidationDepth], [ErrInstanceTooLarge], [ErrLoaderRejected],
-// [ErrSchemaNotCompiled], [ErrValidationFailed], [ErrNilReader],
-// [ErrUnsupportedSchemaShape]. Multi-format adapters add [ErrInvalidYAML]
-// and [ErrInvalidTOML].
+// via [errors.Is]. Specific failure conditions have their own sentinels,
+// such as [ErrLoaderRejected], [ErrInstanceTooLarge], [ErrUnknownKeyword]
+// and [ErrSchemaNotCompiled]; the multi-format adapters add
+// [ErrInvalidYAML] and [ErrInvalidTOML].
 //
-// [RenderError] produces a human-readable error string with the (forward-
-// looking) signature for source-line-pointer formatting.
+// [RenderError] formats an error for people, with a snippet of the
+// offending schema or instance line when the source bytes are supplied.
 //
 // # Multi-Format Input
 //
@@ -119,12 +117,11 @@
 // The standard library has no schema layer, so there is no "drop-in" surface
 // to mirror. The two libraries integrate at the boundary instead:
 //
-//   - [Schema.MarshalJSON] returns canonical schema bytes that round-trip
-//     through [encoding/json.Unmarshal] + [CompileValue].
-//   - [Schema.ValidateAndUnmarshal] runs validation and then decodes the
-//     validated bytes via [encoding/json.Unmarshal] in a single call, so a
-//     caller can move from "is this JSON valid against my schema?" to
-//     "decode it into my struct" without two-pass parsing.
+//   - [Schema.MarshalJSON] returns the schema's source bytes, so a [*Schema]
+//     embeds in [encoding/json.Marshal] output and round-trips through
+//     [encoding/json.Unmarshal] + [CompileValue].
+//   - [Schema.ValidateAndUnmarshal] validates and then decodes the validated
+//     bytes via [encoding/json.Unmarshal] in a single call.
 //   - [ValidateTo] is the generic counterpart to [Schema.ValidateAndUnmarshal]
 //     and returns the decoded value of type T directly.
 //
@@ -151,17 +148,22 @@
 //
 // # DoS Protection
 //
-// The package ships with four independent guards against adversarial input:
-// [WithMaxRefDepth] (default 100) caps $ref hop depth per keyword;
-// [WithMaxValidationDepth] (alias [WithMaxDepth], default 1000) caps recursion
-// into nested instances; [WithMaxInstanceSize] (alias [WithMaxDocumentSize])
-// caps instance bytes before parsing; the compiler detects ref cycles at
-// compile time and turns them into lazy edges so they cannot stack-overflow
-// the validator.
+// The package guards against adversarial input in several independent ways:
+//
+//   - [WithMaxRefDepth] (default 100) caps nested $ref, $dynamicRef and
+//     $recursiveRef hops during validation.
+//   - [WithMaxValidationDepth] (alias [WithMaxDepth], default 1000) caps how
+//     deeply subschema evaluation nests.
+//   - [WithMaxInstanceSize] (alias [WithMaxDocumentSize]) caps instance
+//     bytes before parsing.
+//   - [WithMaxKeyCount] caps the number of keys visited on one object.
+//   - The compiler turns $ref cycles into lazy edges that are followed at
+//     validation time, bounded by [WithMaxRefDepth], so they cannot
+//     overflow the stack.
 //
 // [JSON Schema]: https://json-schema.org/
 // [Draft 2020-12]: https://json-schema.org/draft/2020-12/schema
-// [Draft 2020-12 §12]: https://json-schema.org/draft/2020-12/json-schema-core#section-12
+// [JSON Schema Core 2020-12 §12]: https://json-schema.org/draft/2020-12/json-schema-core#section-12
 // [go-rotini/jsonc]: https://github.com/go-rotini/jsonc
 // [go-rotini/yaml]: https://github.com/go-rotini/yaml
 // [go-rotini/toml]: https://github.com/go-rotini/toml

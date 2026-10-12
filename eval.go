@@ -330,7 +330,8 @@ func evalPriority(name string) int {
 	case "type", "enum", "const":
 		return 5
 	// properties / patternProperties must run before additionalProperties
-	// (§12.12) so the latter can read their evaluated-keys annotations.
+	// (JSON Schema Core 2020-12 §10.3.2.3) so the latter can read their
+	// evaluated-keys annotations.
 	case keyProperties, keyPatternProperties:
 		return 8
 	case "prefixItems":

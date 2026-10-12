@@ -4,9 +4,9 @@ import (
 	"testing"
 )
 
-// External seed corpus from the JSON Schema Test Suite (§8.4 of the
-// requirements doc). The seed list below covers the diverse "schema
-// shape" surface from the upstream Draft 2020-12 suite — root pointer
+// External seed corpus from the JSON Schema Test Suite. The seed list
+// below covers the diverse "schema shape" surface from the upstream Draft
+// 2020-12 suite — root pointer
 // refs, recursive defs, dynamicRef anchors, allOf / anyOf / oneOf
 // branches, format keywords, vocabulary disagreements, infinite-loop
 // detection — alongside the legacy in-package adversarial set. Embed

@@ -8,8 +8,7 @@ import (
 )
 
 // Option configures the schema generator. Pass options to [Generate],
-// [Bytes], [FromType], or [New]; later constructors return a
-// reusable [*Generator] that amortizes option parsing across many types.
+// [Bytes], [FromType], or [New], which returns a reusable [*Generator].
 type Option func(*options)
 
 // options carries the generator's configuration.
@@ -59,6 +58,7 @@ func WithOmitDescriptions(b bool) Option {
 
 // WithDurationAsString emits time.Duration as
 // {"type":"string","format":"duration"} instead of integer nanoseconds.
+// Default: false.
 func WithDurationAsString(b bool) Option {
 	return func(o *options) { o.durationAsString = b }
 }

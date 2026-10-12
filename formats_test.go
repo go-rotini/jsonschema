@@ -204,8 +204,8 @@ func TestFormatNonStringSilentPass(t *testing.T) {
 	}
 }
 
-// TestCustomFormatOverridesBuiltin verifies the spec ordering: a custom
-// validator wins over the built-in of the same name.
+// TestCustomFormatOverridesBuiltin verifies that a custom validator wins
+// over the built-in of the same name.
 func TestCustomFormatOverridesBuiltin(t *testing.T) {
 	schema, _ := Compile([]byte(`{"format":"ipv4"}`))
 	// Custom: accept everything regardless of value.

@@ -8,9 +8,10 @@ import (
 	"io"
 )
 
-// ValidateTo validates instanceJSON against schema and returns the decoded
-// value of type T on success, or the validation error on failure. It is the
-// generic counterpart to [*Schema.ValidateAndUnmarshal].
+// ValidateTo validates instanceJSON against schema and, on success, decodes
+// it into a value of type T with [encoding/json.Unmarshal]. It is the generic
+// counterpart to [*Schema.ValidateAndUnmarshal] and reports failures the
+// same way.
 func ValidateTo[T any](schema *Schema, instanceJSON []byte, opts ...Option) (T, error) {
 	var zero T
 	if schema == nil {
@@ -30,9 +31,8 @@ func ValidateTo[T any](schema *Schema, instanceJSON []byte, opts ...Option) (T, 
 	return v, nil
 }
 
-// MustValidateTo is the panic-on-error variant of [ValidateTo]. Intended for
-// package-init use of static, well-known instances; tests and one-shot CLIs
-// where a malformed input is a programming error.
+// MustValidateTo is the panic-on-error variant of [ValidateTo], for static,
+// known-good instances where a failure is a programming error.
 func MustValidateTo[T any](schema *Schema, instanceJSON []byte, opts ...Option) T {
 	v, err := ValidateTo[T](schema, instanceJSON, opts...)
 	if err != nil {
@@ -42,6 +42,9 @@ func MustValidateTo[T any](schema *Schema, instanceJSON []byte, opts ...Option) 
 }
 
 // Validate validates instanceJSON against the schema and returns a [*Result].
+// The returned error reports input that could not be validated (not valid
+// JSON, trailing content after the document, or over [WithMaxInstanceSize]);
+// a schema violation is reported in the Result, not as an error.
 //
 // Empty input ([]byte{} or all-whitespace) is rejected with an error wrapping
 // [io.EOF]. The literal `null` is a valid JSON value and validates against
@@ -65,6 +68,10 @@ func (s *Schema) Validate(instanceJSON []byte, opts ...Option) (*Result, error) 
 }
 
 // ValidateValue validates an already-decoded Go value against the schema.
+// v must use the shapes [encoding/json.Unmarshal] produces into an any:
+// map[string]any, []any, string, bool, nil, and float64 or [Number] (int,
+// int32 and int64 are also accepted as numbers). Other types, such as
+// structs, typed slices or [MapSlice], match no JSON type.
 func (s *Schema) ValidateValue(v any, opts ...Option) (*Result, error) {
 	if s == nil {
 		return nil, ErrSchemaNotCompiled
@@ -94,8 +101,8 @@ func (s *Schema) validateWithOptions(v any, ro *runOptions) (*Result, error) {
 	return res, nil
 }
 
-// ValidateReader streams instance bytes from r and validates them against
-// the schema.
+// ValidateReader reads all of r and validates the bytes as
+// [*Schema.Validate] does. A nil r returns [ErrNilReader].
 func (s *Schema) ValidateReader(r io.Reader, opts ...Option) (*Result, error) {
 	if s == nil {
 		return nil, ErrSchemaNotCompiled
@@ -110,8 +117,10 @@ func (s *Schema) ValidateReader(r io.Reader, opts ...Option) (*Result, error) {
 	return s.Validate(data, opts...)
 }
 
-// ValidateAndUnmarshal validates instanceJSON, then (on success) decodes it
-// into v.
+// ValidateAndUnmarshal validates instanceJSON and, on success, decodes it
+// into v with [encoding/json.Unmarshal] (skipped when v is nil). When the
+// instance is invalid it returns the first [*ValidationError], with the
+// remaining failures appended to its Causes.
 func (s *Schema) ValidateAndUnmarshal(instanceJSON []byte, v any, opts ...Option) error {
 	if s == nil {
 		return ErrSchemaNotCompiled

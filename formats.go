@@ -20,7 +20,7 @@ type FormatValidator func(string) error
 
 // builtinFormats holds every format validator the package ships with. Custom
 // formats registered via [WithCustomFormat] win when both are defined for a
-// name (per spec §7.2.1).
+// name.
 var builtinFormats = map[string]FormatValidator{
 	"date-time":             validateDateTime,
 	"date":                  validateDate,
@@ -802,8 +802,7 @@ func isHostnameLabel(lbl string) bool {
 // validateIDNHostname accepts a hostname that may contain non-ASCII (RFC
 // 5891). Pragmatic stdlib-only implementation: any UTF-8 hostname whose
 // labels look reasonable (no NULs, no control chars, length bounds) is
-// accepted. Bidi and full UTS#46 normalization are not implemented; that is
-// a documented v0.1 limitation.
+// accepted. Bidi rules and full UTS #46 normalization are not implemented.
 func validateIDNHostname(s string) error {
 	if s == "" || len(s) > 255*4 {
 		return formatErr("idn-hostname", s, "bad length")

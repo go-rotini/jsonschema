@@ -53,11 +53,9 @@ func dialectMetaSchemaPath(uri string) (string, bool) {
 	return "", false
 }
 
-// MetaSchemaBytes returns the JSON bytes of the canonical meta-schema for
-// d. The bytes are a slice into the package's embedded copy and must be
-// treated as read-only; callers that need a mutable buffer should copy.
-//
-// Returns [ErrUnknownDraft] for [DraftUnknown] or any unrecognized value.
+// MetaSchemaBytes returns the JSON bytes of the embedded meta-schema for d,
+// as a fresh copy on each call. It returns an error wrapping
+// [ErrUnknownDraft] for [DraftUnknown] or any unrecognized value.
 func MetaSchemaBytes(d Draft) ([]byte, error) {
 	path, ok := metaSchemaPath(d)
 	if !ok {
@@ -70,9 +68,8 @@ func MetaSchemaBytes(d Draft) ([]byte, error) {
 	return data, nil
 }
 
-// MetaSchemaURL returns the canonical URL of the meta-schema for d. It is
-// equivalent to d.MetaSchemaURL() and re-exported as a package-level
-// function for symmetry with [MetaSchemaBytes].
+// MetaSchemaURL returns the canonical URL of the meta-schema for d; it is
+// the same as [Draft.MetaSchemaURL].
 func MetaSchemaURL(d Draft) string {
 	return d.MetaSchemaURL()
 }
@@ -88,12 +85,10 @@ var (
 	dialectMetaSchemaCache   map[string]*Schema
 )
 
-// MetaSchema returns the compiled [*Schema] for the canonical meta-schema
-// of d. The result is memoized; repeated calls return the same pointer.
-//
-// The compile path uses a [Compiler] backed by the embedded meta-schema
-// [MapLoader] so refs into the per-vocabulary meta-schemas resolve without
-// network access.
+// MetaSchema returns the compiled [*Schema] for the meta-schema of d,
+// compiled from the embedded copies without network access. The result is
+// memoized; repeated calls return the same pointer. It returns an error
+// wrapping [ErrUnknownDraft] for an unrecognized d.
 func MetaSchema(d Draft) (*Schema, error) {
 	if _, ok := metaSchemaPath(d); !ok {
 		return nil, fmt.Errorf("%w: %s", ErrUnknownDraft, d.String())

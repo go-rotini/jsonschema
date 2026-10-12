@@ -37,7 +37,8 @@ func (e *formatEval) keyword() string { return "format" }
 func (e *formatEval) eval(ctx *runCtx, instance any) {
 	s, ok := instance.(string)
 	if !ok {
-		// format only applies to strings; silent pass otherwise (per §2.5).
+		// format only applies to strings; other instance types pass
+		// (JSON Schema Validation 2020-12 §7.1).
 		return
 	}
 	ctx.addAnnotation(e.loc, "format", e.format)

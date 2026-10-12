@@ -58,9 +58,9 @@ import (
 	"github.com/go-rotini/yaml"
 )
 
-// Sentinel errors returned by the multi-format adapters. All errors
-// emitted by these adapters wrap one of these so callers can match via
-// [errors.Is].
+// Sentinel errors for YAML and TOML input that parses but cannot be turned
+// into a JSON value. Parse errors from the underlying format package, and
+// compile or validation errors, are wrapped as they are.
 var (
 	// ErrInvalidYAML indicates a structural problem in YAML input that the
 	// adapter could not convert to a JSON-compatible value (e.g. unresolved
@@ -72,22 +72,18 @@ var (
 	ErrInvalidTOML = errors.New("jsonschema: invalid toml")
 )
 
-// LoadJSON parses a JSON schema document and compiles it. It is a verbatim
-// alias for [Compile] provided for naming symmetry with [LoadJSONC],
-// [LoadYAML], and [LoadTOML] when callers dispatch on a runtime format
-// label.
+// LoadJSON is the same as [Compile]; it pairs with [LoadJSONC], [LoadYAML],
+// and [LoadTOML] for callers that dispatch on a format name.
 func LoadJSON(schemaJSON []byte, opts ...CompileOption) (*Schema, error) {
 	return Compile(schemaJSON, opts...)
 }
 
-// LoadJSONURL fetches a JSON schema document from uri using the configured
-// loader and compiles it. Alias for [CompileURL].
+// LoadJSONURL is the same as [CompileURL].
 func LoadJSONURL(uri string, opts ...CompileOption) (*Schema, error) {
 	return CompileURL(uri, opts...)
 }
 
-// LoadJSONValue compiles an already-decoded Go value as a JSON schema.
-// Alias for [CompileValue].
+// LoadJSONValue is the same as [CompileValue].
 func LoadJSONValue(v any, opts ...CompileOption) (*Schema, error) {
 	return CompileValue(v, opts...)
 }
@@ -124,8 +120,9 @@ func LoadJSONC(schemaJSONC []byte, opts ...CompileOption) (*Schema, error) {
 }
 
 // LoadYAML parses a YAML schema document and compiles it as a JSON Schema.
-// The first document in the stream is used; multi-document streams are
-// rejected with [ErrInvalidYAML].
+// The input must hold at most one document; a multi-document stream is
+// rejected with [ErrInvalidYAML]. Plain scalars that read as numbers keep
+// their source text as [Number] values.
 func LoadYAML(schemaYAML []byte, opts ...CompileOption) (*Schema, error) {
 	v, err := decodeYAML(schemaYAML)
 	if err != nil {
@@ -139,6 +136,8 @@ func LoadYAML(schemaYAML []byte, opts ...CompileOption) (*Schema, error) {
 }
 
 // LoadTOML parses a TOML schema document and compiles it as a JSON Schema.
+// Integers become base-10 [Number] values, floats keep their source text,
+// and date and time values become strings.
 func LoadTOML(schemaTOML []byte, opts ...CompileOption) (*Schema, error) {
 	v, err := decodeTOML(schemaTOML)
 	if err != nil {
@@ -151,9 +150,9 @@ func LoadTOML(schemaTOML []byte, opts ...CompileOption) (*Schema, error) {
 	return s, nil
 }
 
-// LoadJSONCURL fetches a JSONC schema document from uri using the
-// configured loader and compiles it. Mirrors [CompileURL] for the JSONC
-// adapter.
+// LoadJSONCURL fetches a JSONC schema document from uri with the
+// [WithLoader] loader (default [DefaultLoader]) and compiles it with
+// [LoadJSONC]. Unlike [CompileURL], uri is not used as the base URI.
 func LoadJSONCURL(uri string, opts ...CompileOption) (*Schema, error) {
 	data, err := loadURLBytes(uri, opts)
 	if err != nil {
@@ -162,8 +161,9 @@ func LoadJSONCURL(uri string, opts ...CompileOption) (*Schema, error) {
 	return LoadJSONC(data, opts...)
 }
 
-// LoadYAMLURL fetches a YAML schema document from uri using the configured
-// loader and compiles it. Mirrors [CompileURL] for the YAML adapter.
+// LoadYAMLURL fetches a YAML schema document from uri with the [WithLoader]
+// loader (default [DefaultLoader]) and compiles it with [LoadYAML]. Unlike
+// [CompileURL], uri is not used as the base URI.
 func LoadYAMLURL(uri string, opts ...CompileOption) (*Schema, error) {
 	data, err := loadURLBytes(uri, opts)
 	if err != nil {
@@ -172,8 +172,9 @@ func LoadYAMLURL(uri string, opts ...CompileOption) (*Schema, error) {
 	return LoadYAML(data, opts...)
 }
 
-// LoadTOMLURL fetches a TOML schema document from uri using the configured
-// loader and compiles it. Mirrors [CompileURL] for the TOML adapter.
+// LoadTOMLURL fetches a TOML schema document from uri with the [WithLoader]
+// loader (default [DefaultLoader]) and compiles it with [LoadTOML]. Unlike
+// [CompileURL], uri is not used as the base URI.
 func LoadTOMLURL(uri string, opts ...CompileOption) (*Schema, error) {
 	data, err := loadURLBytes(uri, opts)
 	if err != nil {
@@ -182,9 +183,9 @@ func LoadTOMLURL(uri string, opts ...CompileOption) (*Schema, error) {
 	return LoadTOML(data, opts...)
 }
 
-// LoadJSONCValue compiles an already-decoded Go value as if it had been
-// produced by the JSONC adapter. Provided for symmetry with [CompileValue]
-// when the caller has run their own JSONC decoder.
+// LoadJSONCValue compiles a value the caller decoded from JSONC. It is
+// [CompileValue] with a JSONC-specific error prefix; v must use the shapes
+// described at [Schema.ValidateValue].
 func LoadJSONCValue(v any, opts ...CompileOption) (*Schema, error) {
 	s, err := CompileValue(v, opts...)
 	if err != nil {
@@ -193,9 +194,9 @@ func LoadJSONCValue(v any, opts ...CompileOption) (*Schema, error) {
 	return s, nil
 }
 
-// LoadYAMLValue compiles an already-decoded Go value as if it had been
-// produced by the YAML adapter. Provided for symmetry with [CompileValue]
-// when the caller has run their own YAML decoder.
+// LoadYAMLValue compiles a value the caller decoded from YAML. It is
+// [CompileValue] with a YAML-specific error prefix; v must use the shapes
+// described at [Schema.ValidateValue].
 func LoadYAMLValue(v any, opts ...CompileOption) (*Schema, error) {
 	s, err := CompileValue(v, opts...)
 	if err != nil {
@@ -204,9 +205,9 @@ func LoadYAMLValue(v any, opts ...CompileOption) (*Schema, error) {
 	return s, nil
 }
 
-// LoadTOMLValue compiles an already-decoded Go value as if it had been
-// produced by the TOML adapter. Provided for symmetry with [CompileValue]
-// when the caller has run their own TOML decoder.
+// LoadTOMLValue compiles a value the caller decoded from TOML. It is
+// [CompileValue] with a TOML-specific error prefix; v must use the shapes
+// described at [Schema.ValidateValue].
 func LoadTOMLValue(v any, opts ...CompileOption) (*Schema, error) {
 	s, err := CompileValue(v, opts...)
 	if err != nil {
@@ -600,7 +601,7 @@ func isYAMLNumber(val string) bool {
 // Hex and octal literals are rewritten to base-10; scientific and decimal
 // literals are passed through verbatim. .inf / .nan are not representable
 // in JSON — we emit a float64 string ("Inf" / "NaN") which the validator's
-// numeric comparators handle as float64; this is a documented limitation.
+// numeric comparators handle as float64.
 func yamlNormalizeNumber(val string) string {
 	switch val {
 	case ".inf", ".Inf", ".INF", "+.inf", "+.Inf", "+.INF":

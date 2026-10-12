@@ -583,8 +583,8 @@ func (c *genCtx) collectStructFields(t reflect.Type, path string, props *ordered
 // returns the updated schema; callers must reassign because boolean
 // schemas are promoted to objects when the tag adds keywords.
 //
-// v0.1 attaches metadata as siblings to $ref. 2019-09+ allows this; older
-// drafts forbid it but most validators accept it in practice.
+// Metadata is attached as siblings of $ref. Draft 2019-09 and later apply
+// $ref siblings; Draft 7 and earlier ignore them.
 func (c *genCtx) applyTagSpecToSchema(fieldSchema any, spec *tagSpec, owner reflect.Type, sf reflect.StructField, fieldPath string) any {
 	m, ok := fieldSchema.(*orderedMap)
 	if !ok {
