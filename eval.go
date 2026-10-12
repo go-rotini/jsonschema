@@ -386,7 +386,7 @@ func orderKeys(m map[string]any) []string {
 // priority runs first. Within a priority bracket the order is stable.
 func evalPriority(name string) int {
 	switch name {
-	case "$ref", "$dynamicRef", "$recursiveRef":
+	case "$ref", keyDynamicRef, "$recursiveRef":
 		return 0
 	case "type", "enum", "const":
 		return 5
@@ -434,7 +434,12 @@ type runCtx struct {
 	opts   *runOptions
 	// cur is the subschema being evaluated; its canonical location turns a
 	// keyword location into an absolute one.
-	cur             *subschema
+	cur *subschema
+	// refPath holds the references crossed to reach cur, innermost last;
+	// it maps a keyword's static location to its evaluation path.
+	// refBuf backs it so shallow ref chains need no allocation.
+	refPath         []refFrame
+	refBuf          [4]refFrame
 	instanceLoc     []string
 	schemaLoc       []string
 	dynamicScope    []string // chain of in-scope resource URIs
@@ -461,6 +466,18 @@ type runCtx struct {
 	formatWarned map[string]bool
 }
 
+// refFrame records one $ref, $dynamicRef or $recursiveRef crossed during
+// evaluation.
+type refFrame struct {
+	// from is the static location of the reference keyword.
+	from string
+	// root is the static location of the subschema the reference entered.
+	root string
+	// path is the evaluation path of root; set once hasPath is true.
+	path    string
+	hasPath bool
+}
+
 // annotationEntry is the internal record of one annotation. unevaluated*
 // keywords scan this log to discover sibling-applicator coverage.
 type annotationEntry struct {
@@ -470,6 +487,10 @@ type annotationEntry struct {
 	value       any
 	// sub is the subschema that produced the annotation.
 	sub *subschema
+	// When pathCut > 0, the evaluation path of the keyword is pathPrefix
+	// followed by keywordLoc[pathCut:]; otherwise it is keywordLoc.
+	pathPrefix string
+	pathCut    int
 }
 
 // dispatch walks every evaluator on sub against instance.
@@ -518,6 +539,52 @@ func (ctx *runCtx) evaluateChild(sub *subschema, instance any, instanceTok, sche
 	ctx.evaluate(sub, instance)
 }
 
+// evaluateRef evaluates sub, the target of the reference keyword at static
+// location refLoc, recording the crossing so keyword locations inside sub
+// report the evaluation path through refLoc.
+func (ctx *runCtx) evaluateRef(refLoc string, sub *subschema, instance any) {
+	ctx.refPath = append(ctx.refPath, refFrame{from: refLoc, root: sub.location})
+	defer func() { ctx.refPath = ctx.refPath[:len(ctx.refPath)-1] }()
+	ctx.evaluate(sub, instance)
+}
+
+// keywordPath returns the evaluation path (JSON Schema Core 2020-12
+// §12.3.1) of the keyword at static location loc in the subschema being
+// evaluated.
+func (ctx *runCtx) keywordPath(loc string) string {
+	n := len(ctx.refPath)
+	if n == 0 {
+		return loc
+	}
+	if rest, ok := pathRest(loc, ctx.refPath[n-1].root); ok {
+		return ctx.anchorPath(n-1) + rest
+	}
+	return loc
+}
+
+// anchorPath returns the evaluation path of refPath[i].root, computing it
+// on first use.
+func (ctx *runCtx) anchorPath(i int) string {
+	f := &ctx.refPath[i]
+	if !f.hasPath {
+		f.path = f.from
+		if i > 0 {
+			if rest, ok := pathRest(f.from, ctx.refPath[i-1].root); ok {
+				f.path = ctx.anchorPath(i-1) + rest
+			}
+		}
+		f.hasPath = true
+	}
+	return f.path
+}
+
+// pathRest returns the part of static location loc below the subschema at
+// static location root, reporting false when loc is not root or under it.
+func pathRest(loc, root string) (string, bool) {
+	rest, ok := strings.CutPrefix(loc, root)
+	return rest, ok && (rest == "" || rest[0] == '/')
+}
+
 // evaluateBranch evaluates sub with a fresh error/annotation buffer so
 // branch failures (oneOf / anyOf / if / not) do not contaminate the outer
 // context. The captured errors and annotations are returned for the
@@ -548,7 +615,7 @@ func (ctx *runCtx) addError(keywordLoc, keyword, _, msg string) {
 		return
 	}
 	ctx.errors = append(ctx.errors, ValidationError{
-		KeywordLocation:         keywordLoc,
+		KeywordLocation:         ctx.keywordPath(keywordLoc),
 		AbsoluteKeywordLocation: ctx.absoluteKeywordLocation(keywordLoc),
 		InstanceLocation:        ctx.instanceLocation(),
 		Keyword:                 keyword,
@@ -567,7 +634,7 @@ func (ctx *runCtx) addErrorWithCause(keywordLoc, keyword, _, msg string, cause e
 		return
 	}
 	ctx.errors = append(ctx.errors, ValidationError{
-		KeywordLocation:         keywordLoc,
+		KeywordLocation:         ctx.keywordPath(keywordLoc),
 		AbsoluteKeywordLocation: ctx.absoluteKeywordLocation(keywordLoc),
 		InstanceLocation:        ctx.instanceLocation(),
 		Keyword:                 keyword,
@@ -585,7 +652,7 @@ func (ctx *runCtx) addCausesError(keywordLoc, keyword, msg string, causes []Vali
 		return
 	}
 	ctx.errors = append(ctx.errors, ValidationError{
-		KeywordLocation:         keywordLoc,
+		KeywordLocation:         ctx.keywordPath(keywordLoc),
 		AbsoluteKeywordLocation: ctx.absoluteKeywordLocation(keywordLoc),
 		InstanceLocation:        ctx.instanceLocation(),
 		Keyword:                 keyword,
@@ -715,6 +782,7 @@ func newRunCtx(schema *Schema, ro *runOptions) *runCtx {
 		opts:        ro,
 		annotations: map[string]map[string]any{},
 	}
+	ctx.refPath = ctx.refBuf[:0]
 	if schema != nil && schema.id != "" {
 		ctx.dynamicScope = append(ctx.dynamicScope, schema.id)
 	} else if schema != nil && schema.resources != nil && schema.resources.rootURI != "" {
@@ -736,21 +804,40 @@ func (ctx *runCtx) addAnnotation(keywordLoc, keyword string, value any) {
 		ctx.annotations[loc] = map[string]any{}
 	}
 	ctx.annotations[loc][keyword] = value
-	ctx.annoEntries = append(ctx.annoEntries, annotationEntry{
+	ctx.appendAnnotationEntry(keywordLoc, loc, keyword, value)
+}
+
+// appendAnnotationEntry logs an annotation produced by the keyword at static
+// location keywordLoc in the subschema being evaluated. The evaluation path
+// is captured only when the public annotations will be built.
+func (ctx *runCtx) appendAnnotationEntry(keywordLoc, instanceLoc, keyword string, value any) {
+	e := annotationEntry{
 		sub:         ctx.cur,
 		keywordLoc:  keywordLoc,
-		instanceLoc: loc,
+		instanceLoc: instanceLoc,
 		keyword:     keyword,
 		value:       value,
-	})
+	}
+	if n := len(ctx.refPath); n > 0 && ctx.opts.collectAnnotations && !ctx.opts.stopOnFirstError {
+		root := ctx.refPath[n-1].root
+		if _, ok := pathRest(keywordLoc, root); ok {
+			e.pathPrefix = ctx.anchorPath(n - 1)
+			e.pathCut = len(root)
+		}
+	}
+	ctx.annoEntries = append(ctx.annoEntries, e)
 }
 
 // publicAnnotations converts the internal entry log into Result.Annotations.
 func (ctx *runCtx) publicAnnotations() []Annotation {
 	out := make([]Annotation, 0, len(ctx.annoEntries))
 	for _, e := range ctx.annoEntries {
+		path := e.keywordLoc
+		if e.pathCut > 0 {
+			path = e.pathPrefix + e.keywordLoc[e.pathCut:]
+		}
 		out = append(out, Annotation{
-			KeywordLocation:         e.keywordLoc,
+			KeywordLocation:         path,
 			AbsoluteKeywordLocation: absoluteKeywordLocation(e.sub, e.keywordLoc),
 			InstanceLocation:        e.instanceLoc,
 			Keyword:                 e.keyword,

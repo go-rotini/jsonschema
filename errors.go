@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"net/url"
 	"strconv"
 	"strings"
 )
@@ -312,7 +313,9 @@ func writeValidationBlock(buf *bytes.Buffer, schemaSrc, instanceSrc []byte, ve *
 	}
 
 	if len(schemaSrc) > 0 && ve.KeywordLocation != "" {
-		writeSourceSnippet(buf, "schema", schemaSrc, ve.KeywordLocation, color, bold)
+		if ptr, ok := followLocalRefs(schemaSrc, ve.KeywordLocation); ok {
+			writeSourceSnippet(buf, "schema", schemaSrc, ptr, color, bold)
+		}
 	}
 	if len(instanceSrc) > 0 && ve.InstanceLocation != "" {
 		writeSourceSnippet(buf, "instance", instanceSrc, ve.InstanceLocation, color, bold)
@@ -346,6 +349,57 @@ func renderCompileError(schemaSrc []byte, ce *CompileError, color bool) string {
 		fmt.Fprintf(&buf, "  cause: %s\n", ce.Cause.Error())
 	}
 	return buf.String()
+}
+
+// followLocalRefs maps keywordLocation, an evaluation path, onto a JSON
+// Pointer into src by replacing each crossed "$ref", "$dynamicRef" or
+// "$recursiveRef" with the local JSON Pointer it names. It reports false
+// when the path crosses a reference that is not a local JSON Pointer.
+func followLocalRefs(src []byte, keywordLocation string) (string, bool) {
+	p := strings.TrimPrefix(keywordLocation, "#")
+	if !strings.HasPrefix(p, "/") || !strings.Contains(p, "/$") {
+		return keywordLocation, true
+	}
+	var doc any
+	if err := json.Unmarshal(src, &doc); err != nil {
+		return keywordLocation, true
+	}
+	var out []string
+	cur := doc
+	for tok := range strings.SplitSeq(p[1:], "/") {
+		m, isMap := cur.(map[string]any)
+		name := unescapeJSONPointerToken(tok)
+		ref, isRef := "", false
+		if isMap && (name == "$ref" || name == keyDynamicRef || name == "$recursiveRef") {
+			ref, isRef = m[name].(string)
+		}
+		if !isRef {
+			out = append(out, tok)
+			next, err := jsonPointer(cur, "/"+tok)
+			if err != nil {
+				return keywordLocation, true
+			}
+			cur = next
+			continue
+		}
+		if ref != "#" && !strings.HasPrefix(ref, "#/") {
+			return "", false
+		}
+		frag, err := url.PathUnescape(ref[1:])
+		if err != nil {
+			return "", false
+		}
+		target, err := jsonPointer(doc, frag)
+		if err != nil {
+			return "", false
+		}
+		out = splitPointer(frag)
+		cur = target
+	}
+	if len(out) == 0 {
+		return "", true
+	}
+	return "/" + strings.Join(out, "/"), true
 }
 
 // writeSourceSnippet attempts to resolve pointer against src and emit a

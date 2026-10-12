@@ -34,6 +34,7 @@ const (
 	keyAnyOf             = "anyOf"
 	keyOneOf             = "oneOf"
 	keyProperties        = "properties"
+	keyDynamicRef        = "$dynamicRef"
 )
 
 // resolveURI resolves ref against base per RFC 3986. Either argument may be

@@ -467,6 +467,63 @@ func BenchmarkValidateInvalidWithStopOnFirstError(b *testing.B) {
 	}
 }
 
+// refBenchSchema is a recursive schema that crosses $ref at every level, so
+// the ref benchmarks exercise evaluation-path tracking.
+const refBenchSchema = `{
+  "$id": "https://example.com/tree.json",
+  "$ref": "#/$defs/node",
+  "$defs": {
+    "node": {
+      "type": "object",
+      "properties": {
+        "name": {"$ref": "#/$defs/name"},
+        "children": {"type": "array", "items": {"$ref": "#/$defs/node"}}
+      },
+      "required": ["name"]
+    },
+    "name": {"type": "string", "minLength": 1}
+  }
+}`
+
+// BenchmarkValidateRefs measures a passing validation through nested and
+// recursive $ref.
+func BenchmarkValidateRefs(b *testing.B) {
+	s, err := Compile([]byte(refBenchSchema))
+	if err != nil {
+		b.Fatal(err)
+	}
+	instance := []byte(`{"name":"a","children":[{"name":"b","children":[{"name":"c"}]},{"name":"d"}]}`)
+	for b.Loop() {
+		_, _ = s.Validate(instance)
+	}
+}
+
+// BenchmarkValidateRefsNoAnnotations is BenchmarkValidateRefs without
+// public annotations.
+func BenchmarkValidateRefsNoAnnotations(b *testing.B) {
+	s, err := Compile([]byte(refBenchSchema))
+	if err != nil {
+		b.Fatal(err)
+	}
+	instance := []byte(`{"name":"a","children":[{"name":"b","children":[{"name":"c"}]},{"name":"d"}]}`)
+	for b.Loop() {
+		_, _ = s.Validate(instance, WithCollectAnnotations(false))
+	}
+}
+
+// BenchmarkValidateRefsInvalid measures a failing validation whose errors
+// sit below nested and recursive $ref.
+func BenchmarkValidateRefsInvalid(b *testing.B) {
+	s, err := Compile([]byte(refBenchSchema))
+	if err != nil {
+		b.Fatal(err)
+	}
+	instance := []byte(`{"name":"a","children":[{"name":1,"children":[{"name":""}]},{"name":"d"}]}`)
+	for b.Loop() {
+		_, _ = s.Validate(instance)
+	}
+}
+
 // TestOutputUnrecognizedFormat covers the default-case fallthrough.
 func TestOutputUnrecognizedFormat(t *testing.T) {
 	r := &Result{Valid: true}

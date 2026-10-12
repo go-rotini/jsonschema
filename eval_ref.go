@@ -51,7 +51,7 @@ func (e *refEval) eval(ctx *runCtx, instance any) {
 		ctx.addError(e.loc, "$ref", "", fmt.Sprintf("cannot build subschema for %q", e.source))
 		return
 	}
-	ctx.evaluate(sub, instance)
+	ctx.evaluateRef(e.loc, sub, instance)
 }
 
 func (e *refEval) builderLoader() Loader {
@@ -111,7 +111,7 @@ func dynamicScopeRefEval(
 		ctx.addError(loc, kw, "", fmt.Sprintf("cannot build subschema for %q", source))
 		return
 	}
-	ctx.evaluate(sub, instance)
+	ctx.evaluateRef(loc, sub, instance)
 }
 
 type dynamicRefEval struct {
@@ -125,7 +125,7 @@ type dynamicRefEval struct {
 	builder      *evalBuilder
 }
 
-func (e *dynamicRefEval) keyword() string { return "$dynamicRef" }
+func (e *dynamicRefEval) keyword() string { return keyDynamicRef }
 
 func (e *dynamicRefEval) eval(ctx *runCtx, instance any) {
 	dynamicScopeRefEval(ctx, "$dynamicRef", e.loc, e.source, e.target,

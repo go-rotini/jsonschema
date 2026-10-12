@@ -525,13 +525,7 @@ func mergeKeysAnnotation(ctx *runCtx, keyword, loc string, keys evaluatedKeys) {
 		}
 	}
 	ctx.annotations[loc1][keyword] = keys
-	ctx.annoEntries = append(ctx.annoEntries, annotationEntry{
-		sub:         ctx.cur,
-		keywordLoc:  loc,
-		instanceLoc: loc1,
-		keyword:     keyword,
-		value:       keys,
-	})
+	ctx.appendAnnotationEntry(loc, loc1, keyword, keys)
 }
 
 type prefixItemsEval struct {
@@ -699,13 +693,7 @@ func mergeContainsAnnotation(ctx *runCtx, loc string, keys evaluatedKeys) {
 		}
 	}
 	ctx.annotations[loc1]["contains"] = keys
-	ctx.annoEntries = append(ctx.annoEntries, annotationEntry{
-		sub:         ctx.cur,
-		keywordLoc:  loc,
-		instanceLoc: loc1,
-		keyword:     "contains",
-		value:       keys,
-	})
+	ctx.appendAnnotationEntry(loc, loc1, "contains", keys)
 }
 
 func recordItemsAnno(ctx *runCtx, keyword, loc string, value any) {
@@ -718,13 +706,7 @@ func recordItemsAnno(ctx *runCtx, keyword, loc string, value any) {
 	} else {
 		ctx.annotations[loc1][keyword] = value
 	}
-	ctx.annoEntries = append(ctx.annoEntries, annotationEntry{
-		sub:         ctx.cur,
-		keywordLoc:  loc,
-		instanceLoc: loc1,
-		keyword:     keyword,
-		value:       value,
-	})
+	ctx.appendAnnotationEntry(loc, loc1, keyword, value)
 }
 
 func registerArrayApplicatorKeywords() {

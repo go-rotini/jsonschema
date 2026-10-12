@@ -588,7 +588,7 @@ func (c *Compiler) buildBinding(rm *resourceMap, key string, raw any, baseURI, l
 			return binding, err
 		}
 		binding.Resolved = resolved
-	case "$dynamicRef":
+	case keyDynamicRef:
 		ref := raw.(string) //nolint:forcetypeassert // validateKeywordShape rejects non-string $dynamicRef upstream.
 		resolved, err := resolveRef(rm, c.opts.loader, baseURI, ref, append(refStack, baseURI), subDraft)
 		if err != nil {

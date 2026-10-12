@@ -146,8 +146,11 @@ type Result struct {
 
 // Annotation is a successful keyword annotation produced during validation.
 type Annotation struct {
-	// KeywordLocation is the JSON Pointer to the keyword in the schema that
-	// produced the annotation (e.g. "/properties/name/title").
+	// KeywordLocation is the evaluation path of the keyword that produced
+	// the annotation: a JSON Pointer from the root schema in fragment form
+	// (e.g. "#/properties/name/title") that names each $ref, $dynamicRef
+	// or $recursiveRef crossed (e.g. "#/properties/name/$ref/title"). The
+	// output formats render it without the leading "#".
 	KeywordLocation string
 	// AbsoluteKeywordLocation is the keyword's canonical location: the
 	// absolute URI of the schema resource holding it with a JSON Pointer
@@ -168,8 +171,11 @@ type Annotation struct {
 // carry their nested failures in [ValidationError.Causes]; Unwrap returns
 // them, so [errors.Is] and [errors.As] can walk the tree.
 type ValidationError struct {
-	// KeywordLocation is the JSON Pointer to the failing keyword in the
-	// schema (e.g. "/properties/name/minLength").
+	// KeywordLocation is the evaluation path of the failing keyword: a
+	// JSON Pointer from the root schema in fragment form (e.g.
+	// "#/properties/name/minLength") that names each $ref, $dynamicRef or
+	// $recursiveRef crossed (e.g. "#/properties/name/$ref/minLength"). The
+	// output formats render it without the leading "#".
 	KeywordLocation string
 	// AbsoluteKeywordLocation is the keyword's canonical location: the
 	// absolute URI of the schema resource holding it with a JSON Pointer
