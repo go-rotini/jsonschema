@@ -50,6 +50,7 @@ import (
 	"errors"
 	"fmt"
 	"maps"
+	"slices"
 	"strconv"
 	"strings"
 
@@ -152,35 +153,35 @@ func LoadTOML(schemaTOML []byte, opts ...CompileOption) (*Schema, error) {
 
 // LoadJSONCURL fetches a JSONC schema document from uri with the
 // [WithLoader] loader (default [DefaultLoader]) and compiles it with
-// [LoadJSONC]. Unlike [CompileURL], uri is not used as the base URI.
+// [LoadJSONC], using uri as the base URI as [CompileURL] does.
 func LoadJSONCURL(uri string, opts ...CompileOption) (*Schema, error) {
 	data, err := loadURLBytes(uri, opts)
 	if err != nil {
 		return nil, fmt.Errorf("jsonschema: load jsonc url: %w", err)
 	}
-	return LoadJSONC(data, opts...)
+	return LoadJSONC(data, withURLBase(opts, uri)...)
 }
 
 // LoadYAMLURL fetches a YAML schema document from uri with the [WithLoader]
-// loader (default [DefaultLoader]) and compiles it with [LoadYAML]. Unlike
-// [CompileURL], uri is not used as the base URI.
+// loader (default [DefaultLoader]) and compiles it with [LoadYAML], using uri
+// as the base URI as [CompileURL] does.
 func LoadYAMLURL(uri string, opts ...CompileOption) (*Schema, error) {
 	data, err := loadURLBytes(uri, opts)
 	if err != nil {
 		return nil, fmt.Errorf("jsonschema: load yaml url: %w", err)
 	}
-	return LoadYAML(data, opts...)
+	return LoadYAML(data, withURLBase(opts, uri)...)
 }
 
 // LoadTOMLURL fetches a TOML schema document from uri with the [WithLoader]
-// loader (default [DefaultLoader]) and compiles it with [LoadTOML]. Unlike
-// [CompileURL], uri is not used as the base URI.
+// loader (default [DefaultLoader]) and compiles it with [LoadTOML], using uri
+// as the base URI as [CompileURL] does.
 func LoadTOMLURL(uri string, opts ...CompileOption) (*Schema, error) {
 	data, err := loadURLBytes(uri, opts)
 	if err != nil {
 		return nil, fmt.Errorf("jsonschema: load toml url: %w", err)
 	}
-	return LoadTOML(data, opts...)
+	return LoadTOML(data, withURLBase(opts, uri)...)
 }
 
 // LoadJSONCValue compiles a value the caller decoded from JSONC. It is
@@ -295,6 +296,12 @@ func MustLoadTOMLValue(v any, opts ...CompileOption) *Schema {
 		panic(err)
 	}
 	return s
+}
+
+// withURLBase returns opts followed by [WithBaseURI](uri), without touching
+// the caller's slice.
+func withURLBase(opts []CompileOption, uri string) []CompileOption {
+	return append(slices.Clip(opts), WithBaseURI(uri))
 }
 
 // loadURLBytes fetches uri's raw bytes using the loader configured by opts
@@ -571,7 +578,8 @@ func convertYAMLScalar(n *yaml.Node) any {
 }
 
 // isYAMLNumber reports whether val parses as a YAML 1.2 core-schema integer
-// or float. Underscores are not allowed in YAML 1.2 numbers.
+// or float. Underscores are not allowed in YAML 1.2 numbers. Like the YAML
+// decoder, it also accepts 0b binary integers.
 func isYAMLNumber(val string) bool {
 	if val == "" {
 		return false
@@ -583,6 +591,10 @@ func isYAMLNumber(val string) bool {
 		".nan", ".NaN", ".NAN":
 		return true
 	}
+	// Base-0 parsing would accept Go's digit separators.
+	if strings.ContainsRune(val, '_') {
+		return false
+	}
 	// Integer (decimal, hex, octal).
 	if _, err := strconv.ParseInt(val, 0, 64); err == nil {
 		return true
@@ -590,11 +602,42 @@ func isYAMLNumber(val string) bool {
 	if _, err := strconv.ParseUint(val, 0, 64); err == nil {
 		return true
 	}
-	// Float.
-	if _, err := strconv.ParseFloat(val, 64); err == nil {
-		return true
+	return isYAMLDecimalFloat(val)
+}
+
+// isYAMLDecimalFloat reports whether val matches the YAML 1.2 core-schema
+// float form [-+]?(\.[0-9]+|[0-9]+(\.[0-9]*)?)([eE][-+]?[0-9]+)?. Unlike
+// [strconv.ParseFloat] it rejects "inf", "nan" and hexadecimal floats.
+func isYAMLDecimalFloat(val string) bool {
+	digits := func(s string) (rest string, n int) {
+		for n < len(s) && s[n] >= '0' && s[n] <= '9' {
+			n++
+		}
+		return s[n:], n
 	}
-	return false
+	s := strings.TrimLeft(val, "+-")
+	if len(val)-len(s) > 1 {
+		return false
+	}
+	s, intDigits := digits(s)
+	fracDigits := 0
+	if strings.HasPrefix(s, ".") {
+		s, fracDigits = digits(s[1:])
+	}
+	if intDigits == 0 && fracDigits == 0 {
+		return false
+	}
+	if s != "" && (s[0] == 'e' || s[0] == 'E') {
+		s = s[1:]
+		if s != "" && (s[0] == '+' || s[0] == '-') {
+			s = s[1:]
+		}
+		var expDigits int
+		if s, expDigits = digits(s); expDigits == 0 {
+			return false
+		}
+	}
+	return s == ""
 }
 
 // yamlNormalizeNumber returns a number string suitable for [json.Number].

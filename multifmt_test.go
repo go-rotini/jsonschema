@@ -1628,6 +1628,18 @@ func TestIsYAMLNumberBranches(t *testing.T) {
 		{"1e6", true},
 		{"abc", false},
 		{"true", false},
+		{"1_000", false},
+		{"0x_FF", false},
+		{"inf", false},
+		{"Infinity", false},
+		{"nan", false},
+		{"0x1p-2", false},
+		{"1e", false},
+		{"+-1", false},
+		{".", false},
+		{"1.", true},
+		{".5", true},
+		{"-1.5e-3", true},
 	}
 	for _, tc := range cases {
 		got := isYAMLNumber(tc.v)
@@ -2058,5 +2070,49 @@ func TestValidateTOMLDecodeFailure(t *testing.T) {
 	s := MustCompile([]byte(`{}`))
 	if _, err := ValidateTOML(s, []byte("[unclosed")); err == nil {
 		t.Error("expected decode error")
+	}
+}
+
+// TestLoadURLUsesURIAsBase checks that a relative $ref in a fetched YAML,
+// TOML or JSONC schema without $id resolves against the fetch URI.
+func TestLoadURLUsesURIAsBase(t *testing.T) {
+	loader := MapLoader{
+		"https://example.com/dir/schema.yaml":  []byte("$ref: defs.json\n"),
+		"https://example.com/dir/schema.toml":  []byte(`"$ref" = "defs.json"` + "\n"),
+		"https://example.com/dir/schema.jsonc": []byte(`{"$ref": "defs.json" /* relative */}`),
+		"https://example.com/dir/defs.json":    []byte(`{"type":"string"}`),
+	}
+	for name, load := range map[string]func() (*Schema, error){
+		"yaml": func() (*Schema, error) { return LoadYAMLURL("https://example.com/dir/schema.yaml", WithLoader(loader)) },
+		"toml": func() (*Schema, error) { return LoadTOMLURL("https://example.com/dir/schema.toml", WithLoader(loader)) },
+		"jsonc": func() (*Schema, error) {
+			return LoadJSONCURL("https://example.com/dir/schema.jsonc", WithLoader(loader))
+		},
+	} {
+		s, err := load()
+		if err != nil {
+			t.Fatalf("%s: %v", name, err)
+		}
+		if res, _ := s.Validate([]byte(`1`)); res.Valid {
+			t.Errorf("%s: 1 should fail the referenced string schema", name)
+		}
+		if res, _ := s.Validate([]byte(`"s"`)); !res.Valid {
+			t.Errorf("%s: \"s\" should be valid, errors %v", name, res.Errors)
+		}
+	}
+}
+
+// TestLoadYAMLUnderscoreIsString checks that a plain scalar with digit
+// separators stays a string, as YAML 1.2 requires.
+func TestLoadYAMLUnderscoreIsString(t *testing.T) {
+	s, err := LoadYAML([]byte("const: 1_000\n"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if res, _ := s.Validate([]byte(`"1_000"`)); !res.Valid {
+		t.Errorf(`"1_000" should match, errors %v`, res.Errors)
+	}
+	if res, _ := s.Validate([]byte(`1000`)); res.Valid {
+		t.Error("1000 should not match the string 1_000")
 	}
 }

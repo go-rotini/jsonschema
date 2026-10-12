@@ -544,13 +544,13 @@ func TestRefMaxDepthExceeded(t *testing.T) {
 	}
 	have := false
 	for _, e := range res.Errors {
-		if e.Keyword == "$ref" && strings.Contains(e.Message, "max ref depth") {
+		if e.Keyword == "$ref" && strings.Contains(e.Message, "max ref depth") && errors.Is(&e, ErrMaxRefDepth) {
 			have = true
 			break
 		}
 	}
 	if !have {
-		t.Errorf("expected max ref depth error in %v", res.Errors)
+		t.Errorf("expected a max ref depth error matching ErrMaxRefDepth in %v", res.Errors)
 	}
 }
 
@@ -571,9 +571,15 @@ func TestDynamicRefMaxDepth(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Validate: %v", err)
 	}
-	if res.Valid {
-		// Either invalid via depth limit or via deeper validation.
-		t.Logf("deep validation invalid (errors=%d)", len(res.Errors))
+	found := false
+	for i := range res.Errors {
+		if errors.Is(&res.Errors[i], ErrMaxRefDepth) {
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Errorf("deep $dynamicRef recursion: no error matches ErrMaxRefDepth in %v", res.Errors)
 	}
 }
 

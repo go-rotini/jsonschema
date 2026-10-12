@@ -182,14 +182,16 @@ var (
 	// validator while the unknown-format policy is [UnknownFormatError].
 	// It is the Cause of the [*FormatError] held in [ValidationError.Cause].
 	ErrUnknownFormat = errors.New("jsonschema: unknown format")
-	// ErrRefCycle is reserved for a $ref cycle the compiler cannot resolve.
-	// No function returns it today: every cycle becomes a lazy edge that
-	// validation follows, bounded by [WithMaxRefDepth].
+	// ErrRefCycle names a $ref cycle. Nothing returns it: $ref cycles are
+	// legal JSON Schema, and validation follows them, bounded by
+	// [WithMaxRefDepth].
+	//
+	// Deprecated: a cycle that never terminates is reported as a
+	// [ValidationError] with Cause [ErrMaxRefDepth]; match that instead.
 	ErrRefCycle = errors.New("jsonschema: ref cycle detected")
 	// ErrMaxRefDepth indicates validation nested more than [WithMaxRefDepth]
-	// $ref, $dynamicRef or $recursiveRef hops. Its text is used as the
-	// Message of the resulting [ValidationError]; it is not set as the
-	// Cause, so [errors.Is] does not match it.
+	// $ref, $dynamicRef or $recursiveRef hops. It is the Cause of the
+	// resulting [ValidationError].
 	ErrMaxRefDepth = errors.New("jsonschema: max ref depth exceeded")
 	// ErrMaxValidationDepth indicates subschema evaluation nested deeper
 	// than [WithMaxValidationDepth]. It is the Cause of the resulting
@@ -218,8 +220,9 @@ var (
 	// ErrNilReader indicates a nil [io.Reader] was passed to
 	// [*Schema.ValidateReader].
 	ErrNilReader = errors.New("jsonschema: nil reader")
-	// ErrUnsupportedSchemaShape is reserved for a schema slot holding
-	// neither a JSON object nor a boolean. No function returns it today.
+	// ErrUnsupportedSchemaShape indicates a schema, or a subschema the
+	// compiler builds, that is neither a JSON object nor a boolean (e.g.
+	// {"not": 5}). It is the Cause of the resulting [*CompileError].
 	ErrUnsupportedSchemaShape = errors.New("jsonschema: unsupported schema shape")
 )
 

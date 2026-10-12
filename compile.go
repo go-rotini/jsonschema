@@ -6,6 +6,8 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"reflect"
+	"slices"
 	"strings"
 	"sync"
 )
@@ -114,10 +116,21 @@ func Validate(schemaJSON, instanceJSON []byte, opts ...Option) (*Result, error) 
 // A Compiler is safe for concurrent use. Concurrent CompileURL calls for the
 // same URI share one fetch and compile.
 type Compiler struct {
-	opts      *compileOptions
-	cache     sync.Map // map[string]*Schema
-	resources sync.Map // map[string][]byte — pre-registered AddResource entries
-	flight    sync.Map // map[string]*compileInflight — in-flight CompileURL calls
+	opts   *compileOptions
+	cache  sync.Map // map[string]*Schema
+	flight sync.Map // map[string]*compileInflight — in-flight CompileURL calls
+
+	// resources holds the AddResource entries in registration order. It is
+	// replaced, never mutated in place, so a compile can range over a
+	// snapshot without holding resMu.
+	resMu     sync.RWMutex
+	resources []registeredResource
+}
+
+// registeredResource is one [Compiler.AddResource] entry, parsed once.
+type registeredResource struct {
+	uri   string
+	value any
 }
 
 // compileInflight is the single-flight record used by [*Compiler.CompileURL]
@@ -274,8 +287,17 @@ func (c *Compiler) MustCompileURL(uri string) *Schema {
 
 // AddResource registers a schema document under uri so later compilations
 // on this Compiler resolve $refs to that URI without invoking the Loader.
-// The bytes must be valid JSON; they are copied. It does not affect
-// [Compiler.CompileURL], which always fetches through the Loader.
+// The bytes must be valid JSON; they are parsed once here and not retained.
+// It does not affect [Compiler.CompileURL], which always fetches through the
+// Loader.
+//
+// Registering a uri that is already registered follows the compiler's
+// [RefCollisionPolicy]: [RefCollisionError] (the default) returns a
+// [*CompileError], [RefCollisionFirstWins] keeps the earlier document, and
+// [RefCollisionLastWins] replaces it. The same policy settles a nested $id
+// in one registered document that matches another's URI. The schema being
+// compiled always takes its own URI, even when a registered resource
+// shares it.
 func (c *Compiler) AddResource(uri string, schemaJSON []byte) error {
 	if c == nil {
 		return ErrSchemaNotCompiled
@@ -283,13 +305,36 @@ func (c *Compiler) AddResource(uri string, schemaJSON []byte) error {
 	if uri == "" {
 		return &CompileError{Message: "AddResource: empty URI"}
 	}
-	if _, err := decodeSchemaBytes(schemaJSON); err != nil {
+	value, err := decodeSchemaBytes(schemaJSON)
+	if err != nil {
 		return &CompileError{KeywordLocation: uri, Message: "AddResource: invalid JSON", Cause: err}
 	}
-	stored := make([]byte, len(schemaJSON))
-	copy(stored, schemaJSON)
-	c.resources.Store(uri, stored)
-	return nil
+	scratch := newResourceMap()
+	scratch.policy = c.opts.refCollisionPolicy
+	if err := walkDocument(scratch, value, uri, DraftDefault); err != nil {
+		return err
+	}
+	c.resMu.Lock()
+	defer c.resMu.Unlock()
+	i := slices.IndexFunc(c.resources, func(r registeredResource) bool { return r.uri == uri })
+	if i < 0 {
+		c.resources = append(slices.Clip(c.resources), registeredResource{uri: uri, value: value})
+		return nil
+	}
+	if reflect.DeepEqual(c.resources[i].value, value) {
+		return nil
+	}
+	switch c.opts.refCollisionPolicy {
+	case RefCollisionFirstWins:
+		return nil
+	case RefCollisionLastWins:
+		next := slices.Clone(c.resources)
+		next[i].value = value
+		c.resources = next
+		return nil
+	default:
+		return &CompileError{KeywordLocation: uri, Message: fmt.Sprintf("AddResource: duplicate URI %q", uri)}
+	}
 }
 
 // compile is the inner entry point shared by every public Compile* call.
@@ -333,7 +378,10 @@ func (c *Compiler) compile(value any, rawSource []byte, baseURI string) (*Schema
 	}
 
 	rm := newResourceMap()
-	c.seedResources(rm)
+	rm.policy = c.opts.refCollisionPolicy
+	if err := c.seedResources(rm); err != nil {
+		return nil, err
+	}
 	if err := walkResource(rm, value, rootURI, draft); err != nil {
 		return nil, err
 	}
@@ -435,31 +483,19 @@ func validateAgainstMetaSchema(_ *Schema, value any, draft Draft, metaSchemaURI 
 	return nil
 }
 
-// seedResources copies any entries registered via [Compiler.AddResource]
-// into rm as parsed-but-unwalked entries. The first $ref to such a resource
-// will materialize it via the existing external-load path; the seed here
-// simply skips the loader call.
-func (c *Compiler) seedResources(rm *resourceMap) {
-	c.resources.Range(func(key, val any) bool {
-		uri, ok := key.(string)
-		if !ok {
-			return true
+// seedResources walks every entry registered via [Compiler.AddResource]
+// into rm, in registration order, so $refs to them resolve without the
+// Loader. A $id collision between registered documents follows rm's policy.
+func (c *Compiler) seedResources(rm *resourceMap) error {
+	c.resMu.RLock()
+	seeds := c.resources
+	c.resMu.RUnlock()
+	for _, r := range seeds {
+		if err := walkDocument(rm, r.value, r.uri, DraftDefault); err != nil {
+			return err
 		}
-		data, ok := val.([]byte)
-		if !ok {
-			return true
-		}
-		parsed, err := decodeSchemaBytes(data)
-		if err != nil {
-			return true
-		}
-		// Seeding is best-effort: walk failures surface when the resource
-		// is actually consulted.
-		if walkErr := walkResource(rm, parsed, uri, DraftDefault); walkErr != nil {
-			_ = walkErr
-		}
-		return true
-	})
+	}
+	return nil
 }
 
 // bindAndResolve walks node and emits keyword bindings plus resolved $ref /

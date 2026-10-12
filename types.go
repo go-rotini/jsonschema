@@ -17,10 +17,13 @@ type Number = json.Number
 // MapSlice is an ordered slice of key-value pairs. Nothing in this module
 // produces or consumes it: the validator treats only map[string]any as a JSON
 // object, so a MapSlice passed to [Schema.ValidateValue] matches no JSON type.
+//
+// Deprecated: pass JSON objects as map[string]any.
 type MapSlice []MapItem
 
-// MapItem is a single key-value pair within a [MapSlice]. JSON object keys
-// are always strings, so [MapItem.Key] is typed as string.
+// MapItem is a single key-value pair within a [MapSlice].
+//
+// Deprecated: pass JSON objects as map[string]any.
 type MapItem struct {
 	// Key is the JSON object member name.
 	Key string
@@ -92,19 +95,21 @@ func (p UnknownFormatPolicy) String() string {
 	}
 }
 
-// RefCollisionPolicy names a behavior for two schema resources that declare
-// the same $id. The policy is not applied yet: whatever [WithRefCollisionPolicy]
-// selects, a duplicate $id within one compilation fails with a [*CompileError].
+// RefCollisionPolicy decides what happens when two different schema
+// resources claim the same URI: two subschemas declaring the same $id, or
+// two [Compiler.AddResource] calls for one URI. Resources with identical
+// content never collide. Select a policy with [WithRefCollisionPolicy].
 type RefCollisionPolicy int
 
 // Recognized ref-collision policies.
 const (
-	// RefCollisionError aborts compilation on collision (default).
+	// RefCollisionError fails with a [*CompileError] on collision (default).
 	RefCollisionError RefCollisionPolicy = iota
-	// RefCollisionFirstWins keeps the first-registered document and
-	// silently ignores subsequent collisions.
+	// RefCollisionFirstWins keeps the first resource seen for the URI and
+	// ignores later ones; $refs to the URI resolve to the first.
 	RefCollisionFirstWins
-	// RefCollisionLastWins replaces an earlier document with the later one.
+	// RefCollisionLastWins replaces an earlier resource with the later one;
+	// $refs to the URI resolve to the last.
 	RefCollisionLastWins
 )
 
@@ -144,9 +149,10 @@ type Annotation struct {
 	// KeywordLocation is the JSON Pointer to the keyword in the schema that
 	// produced the annotation (e.g. "/properties/name/title").
 	KeywordLocation string
-	// AbsoluteKeywordLocation is reserved for the absolute-URI form of
-	// KeywordLocation. The validator does not populate it yet, so it is
-	// always empty.
+	// AbsoluteKeywordLocation is the keyword's canonical location: the
+	// absolute URI of the schema resource holding it with a JSON Pointer
+	// fragment (e.g. "https://example.com/s.json#/$defs/name/type"). It is
+	// empty when that resource has no absolute URI (no $id and no base URI).
 	AbsoluteKeywordLocation string
 	// InstanceLocation is the JSON Pointer to the instance value that the
 	// annotation describes.
@@ -165,9 +171,10 @@ type ValidationError struct {
 	// KeywordLocation is the JSON Pointer to the failing keyword in the
 	// schema (e.g. "/properties/name/minLength").
 	KeywordLocation string
-	// AbsoluteKeywordLocation is reserved for the absolute-URI form of
-	// KeywordLocation. The validator does not populate it yet, so it is
-	// always empty.
+	// AbsoluteKeywordLocation is the keyword's canonical location: the
+	// absolute URI of the schema resource holding it with a JSON Pointer
+	// fragment (e.g. "https://example.com/s.json#/$defs/name/type"). It is
+	// empty when that resource has no absolute URI (no $id and no base URI).
 	AbsoluteKeywordLocation string
 	// InstanceLocation is the JSON Pointer to the failing value in the
 	// instance (e.g. "/name").

@@ -526,6 +526,7 @@ func mergeKeysAnnotation(ctx *runCtx, keyword, loc string, keys evaluatedKeys) {
 	}
 	ctx.annotations[loc1][keyword] = keys
 	ctx.annoEntries = append(ctx.annoEntries, annotationEntry{
+		sub:         ctx.cur,
 		keywordLoc:  loc,
 		instanceLoc: loc1,
 		keyword:     keyword,
@@ -699,6 +700,7 @@ func mergeContainsAnnotation(ctx *runCtx, loc string, keys evaluatedKeys) {
 	}
 	ctx.annotations[loc1]["contains"] = keys
 	ctx.annoEntries = append(ctx.annoEntries, annotationEntry{
+		sub:         ctx.cur,
 		keywordLoc:  loc,
 		instanceLoc: loc1,
 		keyword:     "contains",
@@ -717,6 +719,7 @@ func recordItemsAnno(ctx *runCtx, keyword, loc string, value any) {
 		ctx.annotations[loc1][keyword] = value
 	}
 	ctx.annoEntries = append(ctx.annoEntries, annotationEntry{
+		sub:         ctx.cur,
 		keywordLoc:  loc,
 		instanceLoc: loc1,
 		keyword:     keyword,

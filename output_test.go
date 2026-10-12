@@ -557,3 +557,74 @@ func TestOutputDetailedRootKeywordLocation(t *testing.T) {
 		t.Errorf("got %q, want /foo", got)
 	}
 }
+
+// TestAbsoluteKeywordLocation checks the canonical-URI form of keyword
+// locations on errors, annotations and rendered output.
+func TestAbsoluteKeywordLocation(t *testing.T) {
+	s := MustCompile([]byte(`{
+		"$id":"https://example.com/root.json",
+		"properties":{
+			"ptr":{"$ref":"#/$defs/s"},
+			"anchor":{"$ref":"#named"},
+			"other":{"$ref":"other.json"},
+			"inline":{"minimum":3},
+			"nested":{"$id":"nested.json","maxLength":1},
+			"a b":{"type":"null"}
+		},
+		"$defs":{
+			"s":{"type":"string","title":"S"},
+			"n":{"$anchor":"named","type":"boolean"},
+			"o":{"$id":"other.json","type":"integer"}
+		}
+	}`))
+	res, err := s.Validate([]byte(`{"ptr":1,"anchor":1,"other":"x","inline":1,"nested":"xx","a b":1}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := map[string]string{
+		"/ptr":    "https://example.com/root.json#/$defs/s/type",
+		"/anchor": "https://example.com/root.json#/$defs/n/type",
+		"/other":  "https://example.com/other.json#/type",
+		"/inline": "https://example.com/root.json#/properties/inline/minimum",
+		"/nested": "https://example.com/nested.json#/maxLength",
+		"/a b":    "https://example.com/root.json#/properties/a%20b/type",
+	}
+	got := map[string]string{}
+	for _, e := range res.Errors {
+		if e.Keyword != "properties" {
+			got[e.InstanceLocation] = e.AbsoluteKeywordLocation
+		}
+	}
+	for inst, w := range want {
+		if got[inst] != w {
+			t.Errorf("instance %s: AbsoluteKeywordLocation = %q, want %q", inst, got[inst], w)
+		}
+	}
+	if !bytes.Contains(res.Output(OutputBasic), []byte(`"absoluteKeywordLocation":"https://example.com/other.json#/type"`)) {
+		t.Errorf("basic output lacks absoluteKeywordLocation: %s", res.Output(OutputBasic))
+	}
+
+	res, _ = s.Validate([]byte(`{"ptr":"x"}`), WithCollectAnnotations(true))
+	found := false
+	for _, a := range res.Annotations {
+		if a.Keyword == "title" {
+			found = a.AbsoluteKeywordLocation == "https://example.com/root.json#/$defs/s/title"
+		}
+	}
+	if !found {
+		t.Errorf("title annotation lacks the absolute keyword location: %+v", res.Annotations)
+	}
+}
+
+// TestAbsoluteKeywordLocationUnknownBase leaves the field empty when the
+// schema has no absolute base URI.
+func TestAbsoluteKeywordLocationUnknownBase(t *testing.T) {
+	res, _ := MustCompile([]byte(`{"type":"string"}`)).Validate([]byte(`1`))
+	if len(res.Errors) == 0 || res.Errors[0].AbsoluteKeywordLocation != "" {
+		t.Errorf("errors = %+v, want one with no AbsoluteKeywordLocation", res.Errors)
+	}
+	res, _ = MustCompile([]byte(`{"type":"string"}`), WithBaseURI("https://example.com/s.json")).Validate([]byte(`1`))
+	if len(res.Errors) == 0 || res.Errors[0].AbsoluteKeywordLocation != "https://example.com/s.json#/type" {
+		t.Errorf("errors = %+v, want AbsoluteKeywordLocation from the base URI", res.Errors)
+	}
+}

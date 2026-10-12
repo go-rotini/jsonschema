@@ -611,3 +611,19 @@ func TestUnescapeJSONPointerToken(t *testing.T) {
 		t.Errorf("escapes: got %q", got)
 	}
 }
+
+// TestUnsupportedSchemaShape checks that a subschema that is neither an
+// object nor a boolean fails compilation with ErrUnsupportedSchemaShape.
+func TestUnsupportedSchemaShape(t *testing.T) {
+	for _, src := range []string{`5`, `"s"`, `null`, `{"not":5}`, `{"properties":{"a":[]}}`, `{"items":"x"}`} {
+		_, err := Compile([]byte(src))
+		if !errors.Is(err, ErrUnsupportedSchemaShape) {
+			t.Errorf("Compile(%s): err = %v, want ErrUnsupportedSchemaShape", src, err)
+		}
+	}
+	for _, src := range []string{`true`, `{"not":false}`, `{"$defs":{"unused":5}}`} {
+		if _, err := Compile([]byte(src)); err != nil {
+			t.Errorf("Compile(%s): %v", src, err)
+		}
+	}
+}

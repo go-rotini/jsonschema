@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"runtime/debug"
 
 	"github.com/go-rotini/jsonschema"
 	"github.com/go-rotini/jsonschema/httploader"
@@ -17,9 +18,47 @@ import (
 // dashboard can label rows independently from the import path.
 const implementationName = "go-rotini-jsonschema"
 
-// implementationVersion is the connector's protocol version. It tracks the
-// parent module's tagged release.
-const implementationVersion = "v0.1.0"
+// modulePath is the module whose version the "start" handshake reports.
+const modulePath = "github.com/go-rotini/jsonschema"
+
+// develVersion is reported when the binary carries no module version, as in
+// a build from a source checkout without version control information.
+const develVersion = "devel"
+
+// implementationVersion returns the version of the jsonschema module this
+// binary was built from, read from its build information.
+func implementationVersion() string {
+	info, ok := debug.ReadBuildInfo()
+	return versionFromBuildInfo(info, ok)
+}
+
+// versionFromBuildInfo returns the version of [modulePath] recorded in
+// info, whether it is the main module or a dependency, or [develVersion].
+func versionFromBuildInfo(info *debug.BuildInfo, ok bool) string {
+	if !ok || info == nil {
+		return develVersion
+	}
+	mod := &info.Main
+	if mod.Path != modulePath {
+		mod = nil
+		for _, d := range info.Deps {
+			if d.Path == modulePath {
+				mod = d
+				break
+			}
+		}
+	}
+	if mod == nil {
+		return develVersion
+	}
+	if mod.Replace != nil {
+		mod = mod.Replace
+	}
+	if mod.Version == "" || mod.Version == "(devel)" {
+		return develVersion
+	}
+	return mod.Version
+}
 
 // maxScanBufferBytes caps the per-line scanner buffer. Bowtie cases can
 // embed large schemas (the Test Suite has cases over 100 KB), so the
@@ -238,7 +277,7 @@ func handleStart(cmd command, st *state, enc *json.Encoder) error {
 		Implementation: implementation{
 			Language: "go",
 			Name:     implementationName,
-			Version:  implementationVersion,
+			Version:  implementationVersion(),
 			Homepage: "https://github.com/go-rotini/jsonschema",
 			Issues:   "https://github.com/go-rotini/jsonschema/issues",
 			Source:   "https://github.com/go-rotini/jsonschema",

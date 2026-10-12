@@ -2,6 +2,7 @@ package jsonschema
 
 import (
 	"fmt"
+	"net/url"
 	"sort"
 	"strings"
 	"sync"
@@ -29,6 +30,11 @@ type subschema struct {
 	// boundary (a new resource opens). The dispatch loop uses this to push
 	// the resource onto the dynamic scope only when needed.
 	crossesResource bool
+	// absURI and absPtr are the canonical location of this subschema: the
+	// absolute URI of its resource and its JSON Pointer within it. absURI
+	// is empty when the resource has no absolute URI.
+	absURI string
+	absPtr string
 	// evaluators are the per-keyword evaluators for this subschema in
 	// declaration-stable order. allOf/anyOf/oneOf/$ref/applicator evaluators
 	// come before unevaluated* / format / metadata.
@@ -117,6 +123,9 @@ type buildFrame struct {
 	base     string
 	resource string
 	draft    Draft
+	// absURI and absPtr are the parent subschema's canonical location.
+	absURI string
+	absPtr string
 	// ours is the chain's set of in-flight build keys. Cycles within the
 	// same chain return the partially-built *subschema; foreign goroutines
 	// wait for the build to finish.
@@ -156,7 +165,48 @@ type pendingSubschema struct {
 // compile-time root entry and the runtime $ref / $dynamicRef /
 // $recursiveRef materialization paths.
 func (b *evalBuilder) buildSubschema(node any, loc, baseURI, resourceURI string) (*subschema, error) {
-	return b.buildSubschemaIn(node, loc, baseURI, resourceURI, true, nil)
+	absURI, absPtr := b.canonicalLocation(node, loc, resourceURI)
+	return b.buildSubschemaIn(node, loc, baseURI, resourceURI, absURI, absPtr, true, nil)
+}
+
+// canonicalLocation returns the canonical location of node, built under
+// location key loc in resource resourceURI: from the resource walk for an
+// object, otherwise from loc when it is "#" or an absolute URI with a JSON
+// Pointer fragment. absURI is empty when the location is unknown or not
+// absolute.
+func (b *evalBuilder) canonicalLocation(node any, loc, resourceURI string) (absURI, absPtr string) {
+	if m, ok := node.(map[string]any); ok && b.rm != nil {
+		if l, ok := b.rm.location(m); ok {
+			return absoluteOrEmpty(l.uri), l.ptr
+		}
+	}
+	if loc == "#" {
+		return absoluteOrEmpty(resourceURI), ""
+	}
+	doc, frag := splitFragment(loc)
+	switch {
+	case frag == "" || frag == "#":
+		return absoluteOrEmpty(doc), ""
+	case strings.HasPrefix(frag, "#/"):
+		ptr, err := url.PathUnescape(frag[1:])
+		if err != nil {
+			return "", ""
+		}
+		return absoluteOrEmpty(doc), ptr
+	}
+	return "", ""
+}
+
+// absoluteOrEmpty returns uri when it is an absolute URI, otherwise "".
+func absoluteOrEmpty(uri string) string {
+	if uri == "" {
+		return ""
+	}
+	u, err := url.Parse(uri)
+	if err != nil || !u.IsAbs() {
+		return ""
+	}
+	return uri
 }
 
 // buildSubschemaFrame is the entry point for keyword builders descending
@@ -165,7 +215,11 @@ func (b *evalBuilder) buildSubschema(node any, loc, baseURI, resourceURI string)
 // by populateSubschema). The chain's ours set is threaded through so
 // cycles within the chain resolve to the same partial *subschema.
 func (b *evalBuilder) buildSubschemaFrame(f *buildFrame, node any, loc, baseURI, resourceURI string) (*subschema, error) {
-	return b.buildSubschemaIn(node, loc, baseURI, resourceURI, false, f.ours)
+	absURI, absPtr := "", ""
+	if rest, ok := strings.CutPrefix(loc, f.loc); ok && f.absURI != "" {
+		absURI, absPtr = f.absURI, f.absPtr+rest
+	}
+	return b.buildSubschemaIn(node, loc, baseURI, resourceURI, absURI, absPtr, false, f.ours)
 }
 
 // buildSubschemaIn does the actual work. ours holds the loc keys whose
@@ -175,7 +229,7 @@ func (b *evalBuilder) buildSubschemaFrame(f *buildFrame, node any, loc, baseURI,
 //   - another goroutine owns loc: wait on done, then read from cache.
 //
 // Foreign goroutines never observe a partially-populated *subschema.
-func (b *evalBuilder) buildSubschemaIn(node any, loc, baseURI, resourceURI string, crosses bool, ours map[string]struct{}) (*subschema, error) {
+func (b *evalBuilder) buildSubschemaIn(node any, loc, baseURI, resourceURI, absURI, absPtr string, crosses bool, ours map[string]struct{}) (*subschema, error) {
 	for {
 		b.cacheMu.Lock()
 		if existing, ok := b.cache[loc]; ok {
@@ -199,6 +253,8 @@ func (b *evalBuilder) buildSubschemaIn(node any, loc, baseURI, resourceURI strin
 			baseURI:         baseURI,
 			resourceURI:     resourceURI,
 			crossesResource: crosses,
+			absURI:          absURI,
+			absPtr:          absPtr,
 			schema:          b.schema,
 			keywords:        map[string]struct{}{},
 		}
@@ -264,6 +320,8 @@ func (b *evalBuilder) populateSubschema(sub *subschema, node any, baseURI, resou
 					sub.baseURI = baseURI
 					sub.resourceURI = resourceURI
 					sub.crossesResource = true
+					sub.absURI = absoluteOrEmpty(abs)
+					sub.absPtr = ""
 				}
 			}
 		}
@@ -274,6 +332,8 @@ func (b *evalBuilder) populateSubschema(sub *subschema, node any, baseURI, resou
 			base:     baseURI,
 			resource: resourceURI,
 			draft:    subDraft,
+			absURI:   sub.absURI,
+			absPtr:   sub.absPtr,
 			ours:     ours,
 		}
 
@@ -303,10 +363,11 @@ func (b *evalBuilder) populateSubschema(sub *subschema, node any, baseURI, resou
 		})
 		return nil
 	default:
-		// Unknown shape — treat as the always-pass schema.
-		passing := true
-		sub.boolValue = &passing
-		return nil
+		return &CompileError{
+			KeywordLocation: sub.location,
+			Message:         "schema must be an object or a boolean",
+			Cause:           ErrUnsupportedSchemaShape,
+		}
 	}
 }
 
@@ -369,8 +430,11 @@ func (s *Schema) evalRoot() *subschema {
 
 // runCtx carries per-call validation state.
 type runCtx struct {
-	schema          *Schema
-	opts            *runOptions
+	schema *Schema
+	opts   *runOptions
+	// cur is the subschema being evaluated; its canonical location turns a
+	// keyword location into an absolute one.
+	cur             *subschema
 	instanceLoc     []string
 	schemaLoc       []string
 	dynamicScope    []string // chain of in-scope resource URIs
@@ -404,6 +468,8 @@ type annotationEntry struct {
 	instanceLoc string
 	keyword     string
 	value       any
+	// sub is the subschema that produced the annotation.
+	sub *subschema
 }
 
 // dispatch walks every evaluator on sub against instance.
@@ -411,6 +477,9 @@ func (ctx *runCtx) evaluate(sub *subschema, instance any) {
 	if sub == nil {
 		return
 	}
+	prev := ctx.cur
+	ctx.cur = sub
+	defer func() { ctx.cur = prev }()
 	if sub.boolValue != nil {
 		if !*sub.boolValue {
 			ctx.addError(sub.location, "false", "false", "schema is false; nothing matches")
@@ -479,10 +548,11 @@ func (ctx *runCtx) addError(keywordLoc, keyword, _, msg string) {
 		return
 	}
 	ctx.errors = append(ctx.errors, ValidationError{
-		KeywordLocation:  keywordLoc,
-		InstanceLocation: ctx.instanceLocation(),
-		Keyword:          keyword,
-		Message:          msg,
+		KeywordLocation:         keywordLoc,
+		AbsoluteKeywordLocation: ctx.absoluteKeywordLocation(keywordLoc),
+		InstanceLocation:        ctx.instanceLocation(),
+		Keyword:                 keyword,
+		Message:                 msg,
 	})
 	if ctx.opts.stopOnFirstError {
 		ctx.stopFired = true
@@ -497,11 +567,12 @@ func (ctx *runCtx) addErrorWithCause(keywordLoc, keyword, _, msg string, cause e
 		return
 	}
 	ctx.errors = append(ctx.errors, ValidationError{
-		KeywordLocation:  keywordLoc,
-		InstanceLocation: ctx.instanceLocation(),
-		Keyword:          keyword,
-		Message:          msg,
-		Cause:            cause,
+		KeywordLocation:         keywordLoc,
+		AbsoluteKeywordLocation: ctx.absoluteKeywordLocation(keywordLoc),
+		InstanceLocation:        ctx.instanceLocation(),
+		Keyword:                 keyword,
+		Message:                 msg,
+		Cause:                   cause,
 	})
 	if ctx.opts.stopOnFirstError {
 		ctx.stopFired = true
@@ -514,15 +585,35 @@ func (ctx *runCtx) addCausesError(keywordLoc, keyword, msg string, causes []Vali
 		return
 	}
 	ctx.errors = append(ctx.errors, ValidationError{
-		KeywordLocation:  keywordLoc,
-		InstanceLocation: ctx.instanceLocation(),
-		Keyword:          keyword,
-		Message:          msg,
-		Causes:           causes,
+		KeywordLocation:         keywordLoc,
+		AbsoluteKeywordLocation: ctx.absoluteKeywordLocation(keywordLoc),
+		InstanceLocation:        ctx.instanceLocation(),
+		Keyword:                 keyword,
+		Message:                 msg,
+		Causes:                  causes,
 	})
 	if ctx.opts.stopOnFirstError {
 		ctx.stopFired = true
 	}
+}
+
+// absoluteKeywordLocation returns the absolute form of keywordLoc, a keyword
+// location within the subschema being evaluated: the canonical URI of the
+// subschema's resource with a JSON Pointer fragment (JSON Schema Core
+// 2020-12 §12.3.2). It returns "" when the resource has no absolute URI.
+func (ctx *runCtx) absoluteKeywordLocation(keywordLoc string) string {
+	return absoluteKeywordLocation(ctx.cur, keywordLoc)
+}
+
+func absoluteKeywordLocation(sub *subschema, keywordLoc string) string {
+	if sub == nil || sub.absURI == "" {
+		return ""
+	}
+	rest, ok := strings.CutPrefix(keywordLoc, sub.location)
+	if !ok || (rest != "" && rest[0] != '/') {
+		return ""
+	}
+	return sub.absURI + "#" + (&url.URL{Fragment: sub.absPtr + rest}).EscapedFragment()
 }
 
 // checkMaxKeyCount enforces the [WithMaxKeyCount] cap. When obj has more
@@ -646,6 +737,7 @@ func (ctx *runCtx) addAnnotation(keywordLoc, keyword string, value any) {
 	}
 	ctx.annotations[loc][keyword] = value
 	ctx.annoEntries = append(ctx.annoEntries, annotationEntry{
+		sub:         ctx.cur,
 		keywordLoc:  keywordLoc,
 		instanceLoc: loc,
 		keyword:     keyword,
@@ -658,10 +750,11 @@ func (ctx *runCtx) publicAnnotations() []Annotation {
 	out := make([]Annotation, 0, len(ctx.annoEntries))
 	for _, e := range ctx.annoEntries {
 		out = append(out, Annotation{
-			KeywordLocation:  e.keywordLoc,
-			InstanceLocation: e.instanceLoc,
-			Keyword:          e.keyword,
-			Value:            e.value,
+			KeywordLocation:         e.keywordLoc,
+			AbsoluteKeywordLocation: absoluteKeywordLocation(e.sub, e.keywordLoc),
+			InstanceLocation:        e.instanceLoc,
+			Keyword:                 e.keyword,
+			Value:                   e.value,
 		})
 	}
 	return out

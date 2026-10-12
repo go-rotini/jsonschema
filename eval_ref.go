@@ -26,7 +26,7 @@ func (e *refEval) eval(ctx *runCtx, instance any) {
 		maxDepth = ctx.schema.compileOpts.maxRefDepth
 	}
 	if ctx.refDepth > maxDepth {
-		ctx.addError(e.loc, "$ref", "", ErrMaxRefDepth.Error())
+		ctx.addErrorWithCause(e.loc, "$ref", "", ErrMaxRefDepth.Error(), ErrMaxRefDepth)
 		return
 	}
 	target := e.target
@@ -95,7 +95,7 @@ func dynamicScopeRefEval(
 		maxDepth = ctx.schema.compileOpts.maxRefDepth
 	}
 	if ctx.refDepth > maxDepth {
-		ctx.addError(loc, kw, "", ErrMaxRefDepth.Error())
+		ctx.addErrorWithCause(loc, kw, "", ErrMaxRefDepth.Error(), ErrMaxRefDepth)
 		return
 	}
 	target := lookupTarget()

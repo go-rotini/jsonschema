@@ -68,7 +68,7 @@ func WithBaseURI(uri string) CompileOption {
 
 // WithMaxRefDepth limits how many $ref, $dynamicRef and $recursiveRef hops
 // validation may nest. Exceeding it records a [ValidationError] for the
-// ref keyword whose Message is the text of [ErrMaxRefDepth]. Guards against
+// ref keyword with Cause [ErrMaxRefDepth]. Guards against
 // pathological recursive schemas. Default: 100.
 func WithMaxRefDepth(n int) CompileOption {
 	return func(o *compileOptions) {
@@ -100,9 +100,11 @@ func WithMetaSchemaValidation(b bool) CompileOption {
 	return func(o *compileOptions) { o.metaSchemaValidation = b }
 }
 
-// WithRefCollisionPolicy records a [RefCollisionPolicy] for duplicate $id
-// values. It currently has no effect: every policy behaves like
-// [RefCollisionError], so a duplicate $id fails compilation.
+// WithRefCollisionPolicy sets how a duplicate $id, or a second
+// [Compiler.AddResource] for the same URI, is handled. Resources are seen in
+// order: registered resources first, in registration order, then the
+// schema being compiled, depth-first with object members in name order.
+// Default: [RefCollisionError].
 func WithRefCollisionPolicy(p RefCollisionPolicy) CompileOption {
 	return func(o *compileOptions) { o.refCollisionPolicy = p }
 }

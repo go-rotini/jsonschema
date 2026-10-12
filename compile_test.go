@@ -1118,20 +1118,99 @@ func TestSeedResourcesViaCompileWithRef(t *testing.T) {
 	}
 }
 
-// TestSeedResourcesMalformed covers the decode-error branch by adding a
-// malformed schema then compiling another that doesn't reference it (so the
-// walk happens but the malformed entry is skipped).
-func TestSeedResourcesMalformed(t *testing.T) {
+// TestSeedResourcesCollision covers registered documents whose nested $id
+// claims another registered document's URI: the default policy fails the
+// compile, FirstWins keeps the earlier registration.
+func TestSeedResourcesCollision(t *testing.T) {
+	a := []byte(`{"type":"string"}`)
+	b := []byte(`{"$defs":{"x":{"$id":"https://example.com/a","type":"integer"}}}`)
+	src := []byte(`{"$ref":"https://example.com/a"}`)
+
 	c := NewCompiler()
-	// Use the public AddResource, which validates JSON. We bypass that for
-	// coverage: store directly.
-	c.resources.Store("malformed", []byte("not json"))
-	c.resources.Store(int(1), []byte("ignored")) // non-string key
-	c.resources.Store("ok", "not bytes")         // non-byte val
-	// Compile any schema; seedResources iterates AddResource entries and
-	// must skip malformed ones without panicking.
-	if _, err := c.Compile([]byte(`{}`)); err != nil {
-		t.Errorf("Compile: %v", err)
+	if err := c.AddResource("https://example.com/a", a); err != nil {
+		t.Fatal(err)
+	}
+	if err := c.AddResource("https://example.com/b", b); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := c.Compile(src); err == nil {
+		t.Fatal("Compile with colliding registered resources: want error")
+	}
+
+	c = NewCompiler(WithRefCollisionPolicy(RefCollisionFirstWins))
+	_ = c.AddResource("https://example.com/a", a)
+	_ = c.AddResource("https://example.com/b", b)
+	s, err := c.Compile(src)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if res, _ := s.Validate([]byte(`"str"`)); !res.Valid {
+		t.Errorf("FirstWins: want the first registration (string), got errors %v", res.Errors)
+	}
+}
+
+// TestAddResourceDuplicateURI covers the per-policy handling of a second
+// AddResource for one URI.
+func TestAddResourceDuplicateURI(t *testing.T) {
+	const uri = "https://example.com/t"
+	first := []byte(`{"type":"string"}`)
+	second := []byte(`{"type":"integer"}`)
+	src := []byte(`{"$ref":"https://example.com/t"}`)
+
+	c := NewCompiler()
+	if err := c.AddResource(uri, first); err != nil {
+		t.Fatal(err)
+	}
+	if err := c.AddResource(uri, second); err == nil {
+		t.Error("default policy: duplicate AddResource returned nil")
+	}
+	if err := c.AddResource(uri, first); err != nil {
+		t.Errorf("default policy: re-adding identical content: %v", err)
+	}
+
+	cases := []struct {
+		policy RefCollisionPolicy
+		valid  string
+	}{
+		{RefCollisionFirstWins, `"s"`},
+		{RefCollisionLastWins, `1`},
+	}
+	for _, tc := range cases {
+		c := NewCompiler(WithRefCollisionPolicy(tc.policy))
+		if err := c.AddResource(uri, first); err != nil {
+			t.Fatal(err)
+		}
+		if err := c.AddResource(uri, second); err != nil {
+			t.Errorf("%v: duplicate AddResource: %v", tc.policy, err)
+		}
+		s, err := c.Compile(src)
+		if err != nil {
+			t.Fatalf("%v: Compile: %v", tc.policy, err)
+		}
+		if res, _ := s.Validate([]byte(tc.valid)); !res.Valid {
+			t.Errorf("%v: %s should be valid, errors %v", tc.policy, tc.valid, res.Errors)
+		}
+	}
+}
+
+// TestAddResourceInvalidID surfaces a malformed $id at registration time.
+func TestAddResourceInvalidID(t *testing.T) {
+	c := NewCompiler()
+	if err := c.AddResource("https://example.com/x", []byte(`{"$defs":{"a":{"$id":"http://[::1"}}}`)); err == nil {
+		t.Error("AddResource with malformed nested $id: want error")
+	}
+}
+
+// TestCompileRegisteredDocumentWithNestedID compiles a document that was
+// also registered: identical content under one $id is not a collision.
+func TestCompileRegisteredDocumentWithNestedID(t *testing.T) {
+	doc := []byte(`{"$id":"https://example.com/root","$defs":{"n":{"$id":"https://example.com/n","type":"string"}},"$ref":"https://example.com/n"}`)
+	c := NewCompiler()
+	if err := c.AddResource("https://example.com/root", doc); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := c.Compile(doc); err != nil {
+		t.Errorf("Compile registered document: %v", err)
 	}
 }
 
