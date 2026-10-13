@@ -182,3 +182,37 @@ func TestGenerate_help(t *testing.T) {
 		}
 	}
 }
+
+// TestGenerate_relativeRefToNeighbour checks that a schema file's relative
+// $ref reads the file beside it, and that a failure to load a file names no
+// network flag.
+func TestGenerate_relativeRefToNeighbour(t *testing.T) {
+	dir := t.TempDir()
+	a := filepath.Join(dir, "a.json")
+	if err := os.WriteFile(a, []byte(`{"title":"A","type":"object","properties":{"c":{"$ref":"common.json"}}}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "common.json"), []byte(`{"type":"object","properties":{"n":{"type":"integer"}}}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	var out, errOut bytes.Buffer
+	if code := run([]string{"generate", a}, strings.NewReader(""), &out, &errOut); code != 0 {
+		t.Fatalf("run exit=%d stderr=%s", code, errOut.String())
+	}
+	if !strings.Contains(out.String(), "type A struct") {
+		t.Errorf("output missing type A:\n%s", out.String())
+	}
+
+	b := filepath.Join(dir, "b.json")
+	if err := os.WriteFile(b, []byte(`{"properties":{"c":{"$ref":"missing.json"}}}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	out.Reset()
+	errOut.Reset()
+	if code := run([]string{"generate", b}, strings.NewReader(""), &out, &errOut); code == 0 {
+		t.Fatal("missing neighbour: want failure")
+	}
+	if strings.Contains(errOut.String(), "--allow-network") {
+		t.Errorf("file ref failure suggests --allow-network: %s", errOut.String())
+	}
+}

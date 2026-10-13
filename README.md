@@ -6,7 +6,7 @@ This package is used as the default JSON Schema support package for [rotini](htt
 
 ## Features
 
-- Full [Draft 2020-12](https://json-schema.org/draft/2020-12/schema) support, plus read-only support for Draft 2019-09, Draft 7, Draft 6, and Draft 4
+- [Draft 2020-12](https://json-schema.org/draft/2020-12/schema) support, plus read-only support for Draft 2019-09, Draft 7, Draft 6, and Draft 4; every required case of the official JSON Schema Test Suite passes
 - Compile/validate split (`Compile` → `*Schema` → `Validate`) so compilation amortizes across many validations
 - All four output formats from Draft 2020-12 §12: Flag, Basic, Detailed, Verbose
 - Generic `ValidateTo[T]` typed-decode in one call
@@ -19,7 +19,7 @@ This package is used as the default JSON Schema support package for [rotini](htt
 - OpenAPI 3.1 dialect support (`VocabOAS`, `OASDialectURL`)
 - Bowtie connector for cross-implementation conformance testing
 - `RenderError` for human-readable validation errors with a source pointer into the instance
-- DoS protection: max ref depth, max recursion depth, max document size, ref-loop detection
+- DoS protection: max ref depth, max recursion depth, max document size, ref-loop detection, bounded YAML alias expansion, and numbers compared without expanding their exponents
 
 ## Installation
 
@@ -93,7 +93,7 @@ func main() {
 
 The `generate` subpackage builds a schema from a Go type. Two tags drive generation:
 
-- `json` — standard library semantics: property name, `omitempty`, `-`.
+- `json` — standard library semantics: property name, `omitempty`, `string`, `-`, and encoding/json's rules for embedded-struct field promotion.
 - `jsonschema` — schema-specific options.
 
 Tag option vocabulary:
@@ -132,7 +132,7 @@ fmt.Println(string(schema))
 //    "children":{"type":"array","items":{"$ref":"#/$defs/Tree"}}}}}}
 ```
 
-The `gogen` subpackage goes the other way, from a schema to Go type declarations; `go tool jsonschema generate` wraps it for `go:generate`.
+The `gogen` subpackage goes the other way, from a schema to Go type declarations; `go tool jsonschema generate` wraps it for `go:generate`. It resolves a relative `$ref` in a schema file to a file under that file's directory, and remote `$ref`s only with `--allow-network`.
 
 ## Remote References
 

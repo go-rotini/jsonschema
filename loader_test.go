@@ -3,6 +3,7 @@ package jsonschema
 import (
 	"bytes"
 	"errors"
+	"math"
 	"os"
 	"path/filepath"
 	"strings"
@@ -355,7 +356,7 @@ func TestReadFileImplOk(t *testing.T) {
 	if err := writeBytes(path, []byte("hi")); err != nil {
 		t.Fatal(err)
 	}
-	data, err := readFileImpl(path)
+	data, err := readFileImpl(dir, "x.json", 0)
 	if err != nil {
 		t.Fatalf("readFileImpl: %v", err)
 	}
@@ -366,7 +367,7 @@ func TestReadFileImplOk(t *testing.T) {
 
 // TestReadFileImplFails covers the error branch.
 func TestReadFileImplFails(t *testing.T) {
-	if _, err := readFileImpl("/dev/no-such-thing-/abc"); err == nil {
+	if _, err := readFileImpl("/dev/no-such-thing-", "abc", 0); err == nil {
 		t.Error("expected error")
 	}
 }
@@ -438,5 +439,29 @@ func TestReadFileImplMissing(t *testing.T) {
 	l := FileLoader{Root: t.TempDir()}
 	if _, err := l.Load("file:///nope.json"); err == nil {
 		t.Error("expected error")
+	}
+}
+
+// TestFileLoaderReadsOnlyBoundedRegularFiles checks the size limit and that
+// a directory (or other non-regular file) is not read.
+func TestFileLoaderReadsOnlyBoundedRegularFiles(t *testing.T) {
+	dir := t.TempDir()
+	if err := writeBytes(dir+"/big.json", []byte(`{"a":"`+strings.Repeat("x", 100)+`"}`)); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Mkdir(dir+"/sub", 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := (FileLoader{Root: dir, MaxSize: 50}).Load("file:///big.json"); !errors.Is(err, errFileTooLarge) {
+		t.Errorf("over the limit: err = %v", err)
+	}
+	if _, err := (FileLoader{Root: dir, MaxSize: -1}).Load("file:///big.json"); err != nil {
+		t.Errorf("no limit: err = %v", err)
+	}
+	if b, err := (FileLoader{Root: dir, MaxSize: math.MaxInt64}).Load("file:///big.json"); err != nil || len(b) != 108 {
+		t.Errorf("MaxInt64 limit: len=%d err = %v", len(b), err)
+	}
+	if _, err := (FileLoader{Root: dir}).Load("file:///sub"); !errors.Is(err, errNotRegularFile) {
+		t.Errorf("directory: err = %v", err)
 	}
 }

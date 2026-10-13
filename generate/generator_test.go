@@ -282,7 +282,7 @@ func TestGenerateBytesMapStringValue(t *testing.T) {
 
 func TestGenerateBytesMapNonStringKeyErrors(t *testing.T) {
 	type Holder struct {
-		IDs map[int]string `json:"ids"`
+		IDs map[float64]string `json:"ids"`
 	}
 	_, err := Bytes(Holder{})
 	if err == nil {

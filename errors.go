@@ -160,7 +160,10 @@ func (e *FormatError) Unwrap() error { return e.Cause }
 
 // Sentinel errors. The pointer-typed sentinels (ErrCompile, ErrValidation,
 // ErrRef, ErrLoader, ErrFormat) match any error of their concrete type via
-// [errors.Is]; the others mark specific failure conditions.
+// [errors.Is]; the others mark specific failure conditions. Never pass a
+// pointer-typed sentinel's address to [errors.As] (as in &ErrValidation):
+// that overwrites the shared sentinel. Declare a variable of the error type
+// for errors.As instead.
 var (
 	// ErrCompile matches any [*CompileError].
 	ErrCompile = &CompileError{}
@@ -179,6 +182,10 @@ var (
 	// ErrUnknownKeyword indicates a keyword that is not registered for the
 	// active draft and [WithStrictKeywords] is enabled.
 	ErrUnknownKeyword = errors.New("jsonschema: unknown keyword")
+	// ErrUnknownVocabulary indicates a custom meta-schema whose $vocabulary
+	// requires (true) a vocabulary this package does not implement. It is
+	// the Cause of the resulting [*CompileError].
+	ErrUnknownVocabulary = errors.New("jsonschema: unknown required vocabulary")
 	// ErrUnknownFormat indicates a "format" value with no registered
 	// validator while the unknown-format policy is [UnknownFormatError].
 	// It is the Cause of the [*FormatError] held in [ValidationError.Cause].
@@ -202,6 +209,10 @@ var (
 	// [WithMaxKeyCount] cap allows. It is the Cause of the resulting
 	// [ValidationError].
 	ErrMaxKeyCount = errors.New("jsonschema: max key count exceeded")
+	// ErrMaxEvaluations indicates validation stopped after more subschema
+	// evaluations than [WithMaxEvaluations] allows. The Validate methods
+	// return it as their error, with no [Result].
+	ErrMaxEvaluations = errors.New("jsonschema: max evaluations exceeded")
 	// ErrInstanceTooLarge indicates an instance document larger than
 	// [WithMaxInstanceSize] was rejected before parsing.
 	ErrInstanceTooLarge = errors.New("jsonschema: instance exceeds size limit")

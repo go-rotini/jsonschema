@@ -1,6 +1,8 @@
 TEST_SUITE_DIR  := testdata/JSON-Schema-Test-Suite
-# JSON Schema Test Suite uses 'main' as canonical; upstream does not tag releases.
+# The JSON Schema Test Suite does not tag releases, so the clone is pinned to a commit: upstream
+# additions change the totals in testdata/.expected-passes.json. Bump both together.
 TEST_SUITE_REPO := https://github.com/json-schema-org/JSON-Schema-Test-Suite.git
+TEST_SUITE_SHA  := 7de0e6a06031ede80028583dd45d0cd41105ae5b
 
 # The development tools (the linter, the license and vulnerability checkers and the mutation
 # tester) are declared in tools.mod rather than go.mod, so a module that requires this one never
@@ -10,7 +12,7 @@ TEST_SUITE_REPO := https://github.com/json-schema-org/JSON-Schema-Test-Suite.git
 TOOL := go tool -modfile=tools.mod
 
 .PHONY: all clean clean-suite clean-all clone-test-suite lint test test-acceptance test-bench \
-        test-conformance test-fuzz test-mutation test-race tools-upgrade vuln-tools \
+        test-conformance test-fuzz test-mutation test-race tools-upgrade vuln vuln-tools \
         refresh-acceptance-fixtures
 
 all: clean-all clone-test-suite lint test test-acceptance test-bench \
@@ -27,7 +29,9 @@ clean-all: clean clean-suite
 clone-test-suite: $(TEST_SUITE_DIR)
 
 $(TEST_SUITE_DIR):
-	@git clone --quiet --branch main --depth 1 $(TEST_SUITE_REPO) $(TEST_SUITE_DIR)
+	@git init --quiet $(TEST_SUITE_DIR)
+	@git -C $(TEST_SUITE_DIR) fetch --quiet --depth 1 $(TEST_SUITE_REPO) $(TEST_SUITE_SHA)
+	@git -C $(TEST_SUITE_DIR) checkout --quiet FETCH_HEAD
 
 lint:
 	@gofmt_unformatted=$$(gofmt -l . 2>/dev/null | grep -v '^testdata/' || true); \
@@ -37,7 +41,8 @@ lint:
 	go mod verify -modfile=tools.mod
 	$(TOOL) golangci-lint run ./...
 	$(TOOL) go-licenses check ./...
-	$(TOOL) govulncheck ./...
+	@$(MAKE) --no-print-directory vuln
+	@$(MAKE) --no-print-directory vuln-tools
 
 test: clone-test-suite
 	@go test -v -count=1 -coverprofile=test.out ./...
@@ -54,20 +59,44 @@ test-conformance: clone-test-suite
 	@go test -v -count=1 -run 'TestJSONSchemaTestSuite|TestJSONSchemaEdgeCases' -coverprofile=test_conformance.out ./...
 	@go tool cover -func=test_conformance.out
 
+# Every FuzzXxx target, one at a time (go test -fuzz takes a single target), for FUZZTIME each.
+# The targets are listed from the test files, so a new or renamed one runs without editing this
+# file, and a package that fails to build fails the run. When -fuzztime runs out, go test can lose
+# a race with its own deadline and fail with a bare "context deadline exceeded" and no failing
+# input; that outcome counts as a pass.
+FUZZTIME ?= 60s
+
 test-fuzz:
-	@go test -fuzz='^FuzzCompile$$'  -fuzztime=60s -run=^$$ .
-	@go test -fuzz='^FuzzValidate$$' -fuzztime=60s -run=^$$ .
-	@go test -fuzz='^FuzzGenerate$$' -fuzztime=60s -run=^$$ ./generate
-	@go test -fuzz='^FuzzGenerate$$' -fuzztime=60s -run=^$$ ./gogen
+	@log=$$(mktemp); trap 'rm -f "$$log"' EXIT; \
+	for pkg in $$(go list ./...); do \
+		list=$$(go test -list '^Fuzz' "$$pkg") || { echo "$$list"; exit 1; }; \
+		for name in $$(echo "$$list" | grep '^Fuzz'); do \
+			echo "→ $$pkg $$name"; \
+			go test -fuzz="^$$name$$" -fuzztime=$(FUZZTIME) -run=^$$ "$$pkg" >"$$log" 2>&1; status=$$?; \
+			cat "$$log"; \
+			if [ $$status -ne 0 ]; then \
+				if grep -q '^    context deadline exceeded$$' "$$log" && ! grep -q 'Failing input written' "$$log"; then \
+					echo "→ $$name: fuzz time elapsed; deadline race in go test, no failing input"; \
+				else \
+					exit 1; \
+				fi; \
+			fi; \
+		done; \
+	done
 
 test-mutation: clone-test-suite
 	@$(TOOL) github.com/go-gremlins/gremlins/cmd/gremlins unleash --config .gremlins.yaml
 
-test-race:
+test-race: clone-test-suite
 	@go test -race -count=1 -coverprofile=test_race.out ./...
 	@go tool cover -func=test_race.out
 
-# Scans each tool in tools.mod as a built binary: that is exactly the code that runs.
+# govulncheck, one target per dependency graph; lint runs both. vuln scans go.mod from source,
+# test files included, which reports only vulnerable code this module can reach. vuln-tools scans
+# each tool in tools.mod as a built binary: that is exactly the code that runs.
+vuln:
+	@$(TOOL) govulncheck -test ./...
+
 vuln-tools:
 	@bin=$$(mktemp -d); trap 'rm -rf "$$bin"' EXIT; \
 	for pkg in $$(go list -modfile=tools.mod tool); do \

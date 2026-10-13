@@ -368,6 +368,9 @@ func validateURI(s string) error {
 	if !validPercentEncoding(s) {
 		return formatErr("uri", s, "bad percent-encoding")
 	}
+	if !checkURIAuthority(s) {
+		return formatErr("uri", s, "bad authority or misplaced brackets")
+	}
 	colon := strings.IndexByte(s, ':')
 	if colon <= 0 {
 		return formatErr("uri", s, "missing scheme")
@@ -395,6 +398,9 @@ func validateURIReference(s string) error {
 	}
 	if !validPercentEncoding(s) {
 		return formatErr("uri-reference", s, "bad percent-encoding")
+	}
+	if !checkURIAuthority(s) {
+		return formatErr("uri-reference", s, "bad authority or misplaced brackets")
 	}
 	if _, err := url.Parse(s); err != nil {
 		return formatErrCause("uri-reference", s, err)
@@ -639,7 +645,8 @@ func isURITemplateVarspec(s string) bool {
 		s = s[:len(s)-1]
 	} else if i := strings.IndexByte(s, ':'); i >= 0 {
 		maxLen := s[i+1:]
-		if maxLen == "" || len(maxLen) > 4 {
+		// max-length = %x31-39 0*3DIGIT (RFC 6570 section 2.4.1).
+		if maxLen == "" || len(maxLen) > 4 || maxLen[0] == '0' {
 			return false
 		}
 		for _, c := range maxLen {
@@ -757,10 +764,27 @@ func validateIPv6(s string) error {
 	return nil
 }
 
-// validateHostname accepts an RFC 1123 hostname (letter/digit/hyphen labels,
-// label ≤ 63, total ≤ 255). Trailing dot is rejected (the test suite treats
-// `example.` as invalid, contrary to RFC 1034 zone notation).
+// validateHostname accepts a hostname as Draft 7 and later define it (RFC
+// 1123 with the IDNA A-label rules of RFC 5890): letter/digit/hyphen
+// labels of at most 63 bytes, 255 in all; a label with "--" in its third
+// and fourth positions must be an A-label ("xn--" and valid Punycode that
+// decodes to a valid U-label). Trailing dot is rejected (the test suite
+// treats `example.` as invalid, contrary to RFC 1034 zone notation).
 func validateHostname(s string) error {
+	if err := validateHostnameRFC1123(s); err != nil {
+		return err
+	}
+	for lbl := range strings.SplitSeq(s, ".") {
+		if err := checkLDHLabel(lbl); err != nil {
+			return formatErrCause("hostname", s, err)
+		}
+	}
+	return nil
+}
+
+// validateHostnameRFC1123 accepts an RFC 1123 hostname, the meaning of
+// "hostname" in Drafts 4 and 6.
+func validateHostnameRFC1123(s string) error {
 	if s == "" || len(s) > 255 {
 		return formatErr("hostname", s, "bad length")
 	}
@@ -771,15 +795,66 @@ func validateHostname(s string) error {
 		if !isHostnameLabel(lbl) {
 			return formatErr("hostname", s, "bad label")
 		}
-		// Reject ACE-style labels with hyphens at positions 3-4 unless the
-		// prefix is the IDN ACE marker xn-- (case-insensitive).
-		low := strings.ToLower(lbl)
-		if !strings.HasPrefix(low, "xn--") && len(lbl) >= 4 &&
-			lbl[2] == '-' && lbl[3] == '-' {
-			return formatErr("hostname", s, "hyphens in positions 3-4")
-		}
 	}
 	return nil
+}
+
+var (
+	errHyphens34   = fmt.Errorf("%w: hyphens in positions 3-4", errFormatInvalid)
+	errBadALabel   = fmt.Errorf("%w: invalid A-label", errFormatInvalid)
+	errBadULabel   = fmt.Errorf("%w: invalid U-label", errFormatInvalid)
+	errLabelLength = fmt.Errorf("%w: label too long", errFormatInvalid)
+)
+
+// checkLDHLabel checks the IDNA rules for an ASCII label: "--" in the
+// third and fourth positions is reserved for A-labels, which must hold
+// canonical Punycode for a valid U-label.
+func checkLDHLabel(lbl string) error {
+	if len(lbl) < 4 || lbl[2] != '-' || lbl[3] != '-' {
+		return nil
+	}
+	if !strings.EqualFold(lbl[:2], "xn") {
+		return errHyphens34
+	}
+	enc := strings.ToLower(lbl[4:])
+	u, err := decodePunycode(enc)
+	if err != nil || isASCII(u) || encodePunycode(u) != enc {
+		return errBadALabel
+	}
+	return checkULabel(u)
+}
+
+// checkULabel checks a Unicode label (RFC 5891 §4.2.3): allowed
+// characters, no hyphen at either end or in the third and fourth
+// positions, no leading combining mark, and an A-label form of at most 63
+// bytes.
+func checkULabel(lbl string) error {
+	runes := []rune(lbl)
+	if len(runes) == 0 || runes[0] == '-' || runes[len(runes)-1] == '-' ||
+		unicode.Is(unicode.M, runes[0]) {
+		return errBadULabel
+	}
+	if len(runes) >= 4 && runes[2] == '-' && runes[3] == '-' {
+		return errHyphens34
+	}
+	for _, r := range runes {
+		if r == '.' || !isIDNAllowedRune(r) {
+			return errBadULabel
+		}
+	}
+	if aLabelLen(lbl) > 63 {
+		return errLabelLength
+	}
+	return nil
+}
+
+// aLabelLen returns the length of lbl's ASCII form: lbl itself, or
+// "xn--" and its Punycode.
+func aLabelLen(lbl string) int {
+	if isASCII(lbl) {
+		return len(lbl)
+	}
+	return 4 + len(encodePunycode(lbl))
 }
 
 func isHostnameLabel(lbl string) bool {
@@ -799,15 +874,35 @@ func isHostnameLabel(lbl string) bool {
 	return true
 }
 
+// idnMap applies the parts of the IDNA mapping (UTS #46) that need no
+// tables: the ideographic and halfwidth ideographic full stops become ".",
+// fullwidth ASCII forms become ASCII, and the soft hyphen and zero width
+// space are dropped.
+func idnMap(r rune) rune {
+	switch {
+	case r == 0xad, r == 0x200b:
+		return -1 // soft hyphen and zero width space map to nothing
+	case r == 0x3002, r == 0xff61:
+		return '.'
+	case r >= 0xff01 && r <= 0xff5e:
+		return r - 0xfee0
+	}
+	return r
+}
+
 // validateIDNHostname accepts a hostname that may contain non-ASCII (RFC
-// 5891). Pragmatic stdlib-only implementation: any UTF-8 hostname whose
-// labels look reasonable (no NULs, no control chars, length bounds) is
-// accepted. Bidi rules and full UTS #46 normalization are not implemented.
+// 5890/5891): after mapping fullwidth forms to ASCII, labels separated by
+// "." or an ideographic full stop, each an
+// ASCII label, a valid A-label, or a U-label of allowed characters, with
+// an ASCII form of at most 63 bytes per label and 253 in all. CONTEXTJ,
+// CONTEXTO and the Bidi rule, which need Unicode property tables, are not
+// checked.
 func validateIDNHostname(s string) error {
-	if s == "" || len(s) > 255*4 {
+	name := strings.Map(idnMap, s)
+	if name == "" || len(s) > 255*4 {
 		return formatErr("idn-hostname", s, "bad length")
 	}
-	for _, r := range s {
+	for _, r := range name {
 		if r == 0 || r < 0x20 || r == 0x7F {
 			return formatErr("idn-hostname", s, "control character")
 		}
@@ -818,24 +913,30 @@ func validateIDNHostname(s string) error {
 			return formatErr("idn-hostname", s, fmt.Sprintf("disallowed rune U+%04X", r))
 		}
 	}
-	s = strings.TrimSuffix(s, ".")
-	if s == "" {
-		return formatErr("idn-hostname", s, "empty after trailing dot")
+	if strings.HasSuffix(name, ".") {
+		return formatErr("idn-hostname", s, "trailing dot")
 	}
-	for lbl := range strings.SplitSeq(s, ".") {
+	total := -1
+	for lbl := range strings.SplitSeq(name, ".") {
 		if lbl == "" {
 			return formatErr("idn-hostname", s, "empty label")
 		}
-		if utf8.RuneCountInString(lbl) > 63 {
-			return formatErr("idn-hostname", s, "label too long")
+		var err error
+		if isASCII(lbl) {
+			if !isHostnameLabel(lbl) {
+				return formatErr("idn-hostname", s, "bad label")
+			}
+			err = checkLDHLabel(lbl)
+		} else {
+			err = checkULabel(lbl)
 		}
-		runes := []rune(lbl)
-		if runes[0] == '-' || runes[len(runes)-1] == '-' {
-			return formatErr("idn-hostname", s, "hyphen at label boundary")
+		if err != nil {
+			return formatErrCause("idn-hostname", s, err)
 		}
-		if unicode.Is(unicode.M, runes[0]) {
-			return formatErr("idn-hostname", s, "leading combining mark")
-		}
+		total += 1 + aLabelLen(lbl)
+	}
+	if total > 253 {
+		return formatErr("idn-hostname", s, "name too long")
 	}
 	return nil
 }
@@ -854,6 +955,11 @@ func isIDNAllowedRune(r rune) bool {
 	}
 	if r < 0x80 {
 		return false
+	}
+	if r == 0x200c || r == 0x200d {
+		// ZERO WIDTH NON-JOINER and JOINER are CONTEXTJ characters, valid
+		// in the right context, which is not checked.
+		return true
 	}
 	if unicode.Is(unicode.C, r) || unicode.Is(unicode.Z, r) {
 		return false
@@ -1028,8 +1134,9 @@ func validateAddrDomain(domain string, allowIDN bool) error {
 			return fmt.Errorf("%w: unmatched [", errBadAddr)
 		}
 		inner := domain[1 : len(domain)-1]
-		if strings.HasPrefix(inner, "IPv6:") {
-			return validateIPv6(inner[len("IPv6:"):])
+		// The tag is case-insensitive (RFC 5321 section 4.1.3).
+		if len(inner) >= 5 && strings.EqualFold(inner[:5], "IPv6:") {
+			return validateIPv6(inner[5:])
 		}
 		return validateIPv4(inner)
 	}
@@ -1042,12 +1149,53 @@ func validateAddrDomain(domain string, allowIDN bool) error {
 	return validateIDNHostname(domain)
 }
 
-// validateRegex parses s as ECMA-262 regex syntax. Go's regexp/syntax in Perl
-// mode is a close-enough superset; some ECMA constructs (lookbehind etc.) are
-// not supported and surface as errors here.
+// validateRegex checks that s is ECMA-262 regex syntax (with the "u" flag's
+// escape rules). Backreferences and lookaround are valid ECMA-262 even
+// though RE2 cannot run them.
 func validateRegex(s string) error {
-	if _, err := syntax.Parse(s, syntax.Perl); err != nil {
+	// Constructs RE2 cannot run are valid ECMA-262; the translation stands
+	// placeholders in for them, so the rest is still checked.
+	t, err := translateECMAAll(s)
+	if err != nil {
+		return formatErrCause("regex", s, err)
+	}
+	if _, err := syntax.Parse(t.out.String(), syntax.Perl); err != nil {
 		return formatErrCause("regex", s, err)
 	}
 	return nil
+}
+
+// checkURIAuthority checks the parts of RFC 3986 that url.Parse lets
+// through: the authority holds at most one "@", and "[" and "]" appear
+// only around an IP-literal host.
+func checkURIAuthority(s string) bool {
+	rest := s
+	if colon := strings.IndexByte(s, ':'); colon > 0 && isValidURIScheme(s[:colon]) {
+		rest = s[colon+1:]
+	}
+	if !strings.HasPrefix(rest, "//") {
+		return !strings.ContainsAny(rest, "[]")
+	}
+	auth := rest[2:]
+	tail := ""
+	if i := strings.IndexAny(auth, "/?#"); i >= 0 {
+		auth, tail = auth[:i], auth[i:]
+	}
+	if strings.ContainsAny(tail, "[]") || strings.Count(auth, "@") > 1 {
+		return false
+	}
+	if at := strings.IndexByte(auth, '@'); at >= 0 {
+		if strings.ContainsAny(auth[:at], "[]") {
+			return false
+		}
+		auth = auth[at+1:]
+	}
+	if !strings.HasPrefix(auth, "[") {
+		return !strings.ContainsAny(auth, "[]")
+	}
+	end := strings.IndexByte(auth, ']')
+	if end < 0 || strings.ContainsAny(auth[end+1:], "[]") {
+		return false
+	}
+	return true
 }

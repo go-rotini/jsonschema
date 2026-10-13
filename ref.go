@@ -152,6 +152,9 @@ type resource struct {
 	// draft is the effective draft for this resource. Inherited from the
 	// containing resource unless an explicit $schema is declared.
 	draft Draft
+	// external is true for a resource that came from a registered or
+	// fetched document rather than the schema being compiled.
+	external bool
 }
 
 // newResourceMap allocates an empty [resourceMap] ready for [walkResource].
@@ -179,6 +182,7 @@ func walkResource(rm *resourceMap, node any, baseURI string, draft Draft) error 
 // uri is already taken. rm's root URI is left unchanged.
 func walkDocument(rm *resourceMap, node any, uri string, draft Draft) error {
 	res := newResource(uri, node, draft)
+	res.external = true
 	if err := rm.add(uri, res, "$id"); err != nil {
 		return err
 	}
@@ -275,6 +279,10 @@ func resolveDraftAndIDKey(obj map[string]any, inherited, descent Draft) (string,
 // current is returned unchanged. The boolean is true when a fresh resource
 // was opened.
 func openResourceIfNeeded(rm *resourceMap, current *resource, obj map[string]any, idKey string, subDraft Draft) (*resource, bool, error) {
+	// Before 2019-09, $ref replaces every sibling keyword, $id included.
+	if _, hasRef := obj["$ref"]; hasRef && subDraft <= Draft7 {
+		return current, false, nil
+	}
 	rawID, ok := obj[idKey]
 	if !ok {
 		return current, false, nil
@@ -305,6 +313,7 @@ func openResourceIfNeeded(rm *resourceMap, current *resource, obj map[string]any
 	// Under [RefCollisionFirstWins] a losing resource is still walked, so
 	// its anchors stay scoped to it rather than leaking into the winner.
 	res := newResource(absID, obj, subDraft)
+	res.external = current.external
 	if err := rm.add(absID, res, idKey); err != nil {
 		return nil, false, err
 	}
@@ -599,5 +608,5 @@ func sameMap(a any, b map[string]any) bool {
 	if !ok {
 		return false
 	}
-	return fmt.Sprintf("%p", am) == fmt.Sprintf("%p", b)
+	return reflect.ValueOf(am).UnsafePointer() == reflect.ValueOf(b).UnsafePointer()
 }

@@ -7,58 +7,30 @@ type unevaluatedItemsEval struct {
 
 func (e *unevaluatedItemsEval) keyword() string { return "unevaluatedItems" }
 
+// eval applies sub to the items that neither this subschema's keywords nor
+// its passing in-place subschemas evaluated.
 func (e *unevaluatedItemsEval) eval(ctx *runCtx, instance any) {
 	arr, ok := instance.([]any)
 	if !ok {
 		return
 	}
-	covered := make(map[int]bool)
-	if v, ok := ctx.getAnnotation("prefixItems"); ok {
-		if iv, ok := v.(evaluatedItems); ok {
-			for i := 0; i <= int(iv); i++ {
-				covered[i] = true
-			}
-		}
+	var s annoScope
+	if ctx.scope != nil {
+		s = *ctx.scope
 	}
-	if v, ok := ctx.getAnnotation("items"); ok {
-		switch iv := v.(type) {
-		case evaluatedItemsAll:
-			return
-		case evaluatedItems:
-			for i := 0; i <= int(iv); i++ {
-				covered[i] = true
-			}
-		}
-	}
-	if v, ok := ctx.getAnnotation("additionalItems"); ok {
-		if _, ok := v.(evaluatedItemsAll); ok {
-			return
-		}
-	}
-	if v, ok := ctx.getAnnotation("contains"); ok {
-		if k, ok := v.(evaluatedKeys); ok {
-			for kk := range k {
-				if i, ok := atoiSafe(kk); ok {
-					covered[i] = true
-				}
-			}
-		}
-	}
-	if v, ok := ctx.getAnnotation("unevaluatedItems"); ok {
-		if _, ok := v.(evaluatedItemsAll); ok {
-			return
-		}
+	if s.allItems {
+		return
 	}
 	visited := false
-	for i := range arr {
-		if covered[i] {
+	for i := s.prefix; i < len(arr); i++ {
+		if _, c := s.contained[i]; c {
 			continue
 		}
 		ctx.evaluateChild(e.sub, arr[i], itoaInt(i), "unevaluatedItems")
 		visited = true
 	}
 	if visited {
-		recordItemsAnno(ctx, "unevaluatedItems", e.loc, evaluatedItemsAll{})
+		recordAllItems(ctx, "unevaluatedItems", e.loc)
 	}
 }
 
@@ -69,32 +41,29 @@ type unevaluatedPropertiesEval struct {
 
 func (e *unevaluatedPropertiesEval) keyword() string { return "unevaluatedProperties" }
 
+// eval applies sub to the properties that neither this subschema's
+// keywords nor its passing in-place subschemas evaluated.
 func (e *unevaluatedPropertiesEval) eval(ctx *runCtx, instance any) {
 	obj, ok := instance.(map[string]any)
 	if !ok {
 		return
 	}
-	covered := evaluatedKeys{}
-	for _, key := range []string{keyProperties, keyPatternProperties, "additionalProperties", "unevaluatedProperties"} {
-		if v, ok := ctx.getAnnotation(key); ok {
-			if k, ok := v.(evaluatedKeys); ok {
-				for kk := range k {
-					covered[kk] = struct{}{}
-				}
-			}
-		}
+	var covered map[string]struct{}
+	if ctx.scope != nil {
+		covered = ctx.scope.props
 	}
-	evaluated := evaluatedKeys{}
-	for k, v := range obj {
+	var evaluated evaluatedKeys
+	for _, k := range sortedKeys(obj) {
 		if _, c := covered[k]; c {
 			continue
 		}
-		ctx.evaluateChild(e.sub, v, k, "unevaluatedProperties")
+		ctx.evaluateChild(e.sub, obj[k], k, "unevaluatedProperties")
+		if evaluated == nil {
+			evaluated = evaluatedKeys{}
+		}
 		evaluated[k] = struct{}{}
 	}
-	if len(evaluated) > 0 {
-		mergeKeysAnnotation(ctx, "unevaluatedProperties", e.loc, evaluated)
-	}
+	recordKeys(ctx, "unevaluatedProperties", e.loc, evaluated)
 }
 
 func registerUnevaluatedKeywords() {
@@ -112,20 +81,4 @@ func registerUnevaluatedKeywords() {
 		}
 		return &unevaluatedPropertiesEval{loc: loc, sub: sub}, nil
 	})
-}
-
-// atoiSafe parses s as a non-negative int. Returns (n, true) on success.
-func atoiSafe(s string) (int, bool) {
-	if s == "" {
-		return 0, false
-	}
-	n := 0
-	for i := range len(s) {
-		c := s[i]
-		if c < '0' || c > '9' {
-			return 0, false
-		}
-		n = n*10 + int(c-'0')
-	}
-	return n, true
 }

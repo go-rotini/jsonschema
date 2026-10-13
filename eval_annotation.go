@@ -30,6 +30,12 @@ func (e *annotationEval) eval(ctx *runCtx, instance any) {
 type formatEval struct {
 	loc    string
 	format string
+	// assert is set when the meta-schema's vocabulary makes format an
+	// assertion, whatever [WithFormatAssertion] says.
+	assert bool
+	// rfc1123 is set in Drafts 4 and 6, where "hostname" means RFC 1123
+	// without the later IDNA label rules.
+	rfc1123 bool
 }
 
 func (e *formatEval) keyword() string { return "format" }
@@ -42,10 +48,13 @@ func (e *formatEval) eval(ctx *runCtx, instance any) {
 		return
 	}
 	ctx.addAnnotation(e.loc, "format", e.format)
-	if !ctx.opts.formatAssertion {
+	if !ctx.opts.formatAssertion && !e.assert {
 		return
 	}
 	fn, ok := lookupFormat(e.format, ctx.opts.customFormats)
+	if _, custom := ctx.opts.customFormats[e.format]; e.rfc1123 && e.format == "hostname" && !custom {
+		fn = validateHostnameRFC1123
+	}
 	if !ok {
 		switch ctx.opts.unknownFormatPolicy {
 		case UnknownFormatWarn:
@@ -68,12 +77,14 @@ func (e *formatEval) eval(ctx *runCtx, instance any) {
 }
 
 func registerFormatAndContentKeywords() {
-	registerEvaluator("format", func(_ *evalBuilder, _ *buildFrame, raw any, loc string) (evaluator, error) {
+	registerEvaluator("format", func(b *evalBuilder, f *buildFrame, raw any, loc string) (evaluator, error) {
 		s, ok := raw.(string)
 		if !ok {
 			return nil, &CompileError{KeywordLocation: loc, Message: "format must be a string"}
 		}
-		return &formatEval{loc: loc, format: s}, nil
+		parent, _ := f.parent.(map[string]any)
+		return &formatEval{loc: loc, format: s, assert: b.formatAsserts && b.inCompiledDocument(parent),
+			rfc1123: f.draft == Draft4 || f.draft == Draft6}, nil
 	})
 	registerEvaluator("contentEncoding", func(_ *evalBuilder, _ *buildFrame, raw any, loc string) (evaluator, error) {
 		s, ok := raw.(string)

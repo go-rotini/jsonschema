@@ -120,18 +120,19 @@ func (s *Schema) Resources() []string {
 // Vocabularies returns vocabulary URIs for the schema in a fresh slice.
 //
 // When the root schema declares $vocabulary, the result is the URIs it
-// marks true, in no particular order. The declaration is only reported:
-// validation does not enable or disable keywords by vocabulary. Otherwise
-// the result is the standard Draft 2020-12 vocabulary URIs (whatever the
-// schema's draft), plus [VocabOAS] when $schema is [OASDialectURL].
+// marks true, in no particular order; a schema's own $vocabulary is a
+// meta-schema declaration and does not change how the schema itself
+// validates. Otherwise the result is the standard Draft 2020-12 vocabulary
+// URIs (whatever the schema's draft), plus [VocabOAS] when $schema is
+// [OASDialectURL]. Validation honors the $vocabulary of a custom
+// meta-schema named by $schema when the [Loader] can fetch it: keywords of
+// a standard vocabulary it leaves out do not apply.
 func (s *Schema) Vocabularies() []string {
 	if s == nil {
 		return nil
 	}
 	stdSet := stdVocabularySet(s.draft)
-	// If the root schema declared $vocabulary, prefer that set verbatim
-	// (even though we don't honor opt-in/opt-out semantics yet — this lets
-	// introspecting tools see what the schema asked for).
+	// If the root schema declared $vocabulary, report that set verbatim.
 	if uris := rootVocabularyURIs(s); uris != nil {
 		out := make([]string, len(uris))
 		copy(out, uris)

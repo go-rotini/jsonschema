@@ -16,6 +16,9 @@
 //
 //	go tool jsonschema generate -package models -o models.go schema.json
 //
+// generate resolves only the embedded meta-schemas unless --allow-network is
+// given, in which case remote $refs are fetched over HTTPS.
+//
 // bowtie speaks the Bowtie stdin/stdout JSON protocol (see bowtie.go).
 package main
 

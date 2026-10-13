@@ -3,6 +3,7 @@ package jsonschema
 import (
 	"encoding/json"
 	"errors"
+	"fmt"
 	"strings"
 	"sync"
 	"testing"
@@ -674,7 +675,7 @@ properties:
 	}
 }
 
-// TestMergeYAMLInto covers [mergeYAMLInto] directly across the three
+// TestMergeYAMLInto covers [yamlConverter.mergeInto] directly across the three
 // branches: (1) merge from a mapping value, (2) merge from a sequence of
 // mappings, (3) reject a non-mapping merge target. Direct invocation is
 // required because the underlying YAML parser does not currently surface
@@ -696,8 +697,8 @@ func TestMergeYAMLInto(t *testing.T) {
 	t.Run("from_mapping", func(t *testing.T) {
 		dst := map[string]any{"explicit": "kept"}
 		src := mkMap("a", "1", "b", "2", "explicit", "should-not-overwrite")
-		if err := mergeYAMLInto(dst, src, map[string]*yaml.Node{}, map[*yaml.Node]bool{}); err != nil {
-			t.Fatalf("mergeYAMLInto: %v", err)
+		if err := newTestYAMLConverter().mergeInto(dst, src); err != nil {
+			t.Fatalf("mergeInto: %v", err)
 		}
 		// Existing keys win; new keys are merged in.
 		if got := dst["explicit"]; got != "kept" {
@@ -716,8 +717,8 @@ func TestMergeYAMLInto(t *testing.T) {
 			mkMap("p1", "x"),
 			mkMap("p2", "y"),
 		}}
-		if err := mergeYAMLInto(dst, seq, map[string]*yaml.Node{}, map[*yaml.Node]bool{}); err != nil {
-			t.Fatalf("mergeYAMLInto: %v", err)
+		if err := newTestYAMLConverter().mergeInto(dst, seq); err != nil {
+			t.Fatalf("mergeInto: %v", err)
 		}
 		if dst["p1"] != "x" || dst["p2"] != "y" {
 			t.Errorf("expected p1=x and p2=y; got %v", dst)
@@ -725,13 +726,13 @@ func TestMergeYAMLInto(t *testing.T) {
 	})
 	t.Run("from_nil_is_noop", func(t *testing.T) {
 		dst := map[string]any{"a": 1}
-		if err := mergeYAMLInto(dst, nil, nil, nil); err != nil {
+		if err := newTestYAMLConverter().mergeInto(dst, nil); err != nil {
 			t.Errorf("nil source: %v", err)
 		}
 	})
 	t.Run("from_non_mapping_errors", func(t *testing.T) {
 		dst := map[string]any{}
-		err := mergeYAMLInto(dst, mkScalar("not-a-mapping"), map[string]*yaml.Node{}, map[*yaml.Node]bool{})
+		err := newTestYAMLConverter().mergeInto(dst, mkScalar("not-a-mapping"))
 		if err == nil {
 			t.Fatal("expected error for non-mapping merge value")
 		}
@@ -745,7 +746,7 @@ func TestMergeYAMLInto(t *testing.T) {
 			mkMap("a", "1"),
 			mkScalar("not-a-mapping"),
 		}}
-		err := mergeYAMLInto(dst, seq, map[string]*yaml.Node{}, map[*yaml.Node]bool{})
+		err := newTestYAMLConverter().mergeInto(dst, seq)
 		if err == nil {
 			t.Fatal("expected error for non-mapping inside sequence")
 		}
@@ -1119,7 +1120,7 @@ func TestLoadYAMLNullKey(t *testing.T) {
 	}
 }
 
-// TestLoadYAMLAlias covers convertYAMLNode's AliasNode branch.
+// TestLoadYAMLAlias covers yamlConverter.convert's AliasNode branch.
 func TestLoadYAMLAlias(t *testing.T) {
 	src := []byte(`
 alpha: &shared
@@ -1144,7 +1145,7 @@ func TestLoadYAMLUnresolvedAlias(t *testing.T) {
 	}
 }
 
-// TestLoadYAMLMergeKey covers convertYAMLNode + mergeYAMLInto's mapping
+// TestLoadYAMLMergeKey covers yamlConverter.convert + mergeInto's mapping
 // branch.
 func TestLoadYAMLMergeKey(t *testing.T) {
 	src := []byte(`
@@ -1167,7 +1168,7 @@ actual:
 	}
 }
 
-// TestLoadYAMLMergeSequence covers mergeYAMLInto's []any branch.
+// TestLoadYAMLMergeSequence covers mergeInto's []any branch.
 // Note: YAML merge support depends on parser-level MergeKey detection,
 // which the upstream yaml package handles for `<<:`.
 func TestLoadYAMLMergeSequence(t *testing.T) {
@@ -2114,5 +2115,49 @@ func TestLoadYAMLUnderscoreIsString(t *testing.T) {
 	}
 	if res, _ := s.Validate([]byte(`1000`)); res.Valid {
 		t.Error("1000 should not match the string 1_000")
+	}
+}
+
+func newTestYAMLConverter() *yamlConverter {
+	return &yamlConverter{targets: map[*yaml.Node]*yaml.Node{}, seen: map[*yaml.Node]bool{}, limit: minYAMLNodeLimit}
+}
+
+// TestYAMLAliasExpansionBounded checks that nested aliases cannot expand a
+// small document into an enormous value ("billion laughs"), for both
+// instances and schemas, while ordinary alias reuse still works.
+func TestYAMLAliasExpansionBounded(t *testing.T) {
+	var doc strings.Builder
+	doc.WriteString("a0: &a0 [x0, x1, x2, x3, x4, x5, x6, x7, x8, x9]\n")
+	for i := 1; i <= 9; i++ {
+		prev := "*a" + itoa(i-1)
+		fmt.Fprintf(&doc, "a%d: &a%d [", i, i)
+		doc.WriteString(strings.TrimSuffix(strings.Repeat(prev+", ", 10), ", "))
+		doc.WriteString("]\n")
+	}
+	s := MustCompile([]byte(`{"type":"object"}`))
+	if _, err := ValidateYAML(s, []byte(doc.String())); !errors.Is(err, ErrInvalidYAML) {
+		t.Fatalf("ValidateYAML err = %v, want ErrInvalidYAML", err)
+	}
+	if _, err := LoadYAML([]byte(doc.String())); !errors.Is(err, ErrInvalidYAML) {
+		t.Fatalf("LoadYAML err = %v, want ErrInvalidYAML", err)
+	}
+
+	res, err := ValidateYAML(s, []byte("base: &b {k: 1}\nuse1: *b\nuse2: *b\n"))
+	if err != nil || !res.Valid {
+		t.Fatalf("ordinary aliases: res=%v err=%v", res, err)
+	}
+}
+
+// TestYAMLAliasUsesPrecedingAnchor checks that an alias refers to the most
+// recent anchor before it, and that an alias before any anchor of its name
+// is unresolved.
+func TestYAMLAliasUsesPrecedingAnchor(t *testing.T) {
+	s := MustCompile([]byte(`{"properties":{"b":{"const":1},"d":{"const":2}}}`))
+	res, err := ValidateYAML(s, []byte("a: &x 1\nb: *x\nc: &x 2\nd: *x\n"))
+	if err != nil || !res.Valid {
+		t.Errorf("res=%+v err=%v", res, err)
+	}
+	if _, err := ValidateYAML(s, []byte("b: *x\nc: &x 2\n")); !errors.Is(err, ErrInvalidYAML) {
+		t.Errorf("forward alias: err=%v", err)
 	}
 }

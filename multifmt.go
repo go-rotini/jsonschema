@@ -411,39 +411,78 @@ func decodeYAML(data []byte) (any, error) {
 		}
 		root = doc.Children[0]
 	}
-	anchors := map[string]*yaml.Node{}
-	collectAnchors(root, anchors)
-	return convertYAMLNode(root, anchors, map[*yaml.Node]bool{})
+	targets := map[*yaml.Node]*yaml.Node{}
+	parsed := collectAnchors(root, map[string]*yaml.Node{}, targets)
+	c := &yamlConverter{
+		targets: targets,
+		seen:    map[*yaml.Node]bool{},
+		limit:   max(minYAMLNodeLimit, yamlNodeLimitFactor*parsed),
+	}
+	return c.convert(root)
 }
 
-func collectAnchors(n *yaml.Node, out map[string]*yaml.Node) {
+// minYAMLNodeLimit and yamlNodeLimitFactor bound the number of values a
+// YAML document may expand to through aliases: 100 times the number of
+// parsed nodes, and at least 10,000. Without the bound a few nested aliases
+// ("billion laughs") expand exponentially.
+const (
+	minYAMLNodeLimit    = 10_000
+	yamlNodeLimitFactor = 100
+)
+
+// collectAnchors walks n in document order, recording in targets the node
+// each alias refers to: the most recent node before it with that anchor,
+// as anchors holds them during the walk. It returns the number of nodes
+// visited.
+func collectAnchors(n *yaml.Node, anchors map[string]*yaml.Node, targets map[*yaml.Node]*yaml.Node) int {
 	if n == nil {
-		return
+		return 0
 	}
 	if n.Anchor != "" {
-		out[n.Anchor] = n
+		anchors[n.Anchor] = n
 	}
+	if n.Kind == yaml.AliasNode {
+		if t, ok := anchors[n.Alias]; ok {
+			targets[n] = t
+		}
+	}
+	count := 1
 	for _, c := range n.Children {
-		collectAnchors(c, out)
+		count += collectAnchors(c, anchors, targets)
 	}
+	return count
 }
 
-func convertYAMLNode(n *yaml.Node, anchors map[string]*yaml.Node, seen map[*yaml.Node]bool) (any, error) {
+// yamlConverter turns a YAML AST into a Go value tree, expanding aliases.
+// seen holds the anchors being expanded, to reject cycles; nodes counts the
+// values produced so far, which may not exceed limit.
+type yamlConverter struct {
+	targets map[*yaml.Node]*yaml.Node
+	seen    map[*yaml.Node]bool
+	nodes   int
+	limit   int
+}
+
+func (c *yamlConverter) convert(n *yaml.Node) (any, error) {
 	if n == nil {
 		return nil, nil //nolint:nilnil // YAML missing node is JSON null
 	}
+	c.nodes++
+	if c.nodes > c.limit {
+		return nil, fmt.Errorf("%w: alias expansion exceeds %d nodes", ErrInvalidYAML, c.limit)
+	}
 	switch n.Kind {
 	case yaml.AliasNode:
-		target, ok := anchors[n.Alias]
+		target, ok := c.targets[n]
 		if !ok {
 			return nil, fmt.Errorf("%w: unresolved alias %q", ErrInvalidYAML, n.Alias)
 		}
-		if seen[target] {
+		if c.seen[target] {
 			return nil, fmt.Errorf("%w: cyclic alias %q", ErrInvalidYAML, n.Alias)
 		}
-		seen[target] = true
-		v, err := convertYAMLNode(target, anchors, seen)
-		delete(seen, target)
+		c.seen[target] = true
+		v, err := c.convert(target)
+		delete(c.seen, target)
 		return v, err
 	case yaml.MappingNode:
 		out := make(map[string]any, len(n.Children)/2)
@@ -452,16 +491,16 @@ func convertYAMLNode(n *yaml.Node, anchors map[string]*yaml.Node, seen map[*yaml
 			valNode := n.Children[i+1]
 			// Merge key (<< : *anchor) — flatten mapping into out.
 			if keyNode != nil && keyNode.MergeKey {
-				if err := mergeYAMLInto(out, valNode, anchors, seen); err != nil {
+				if err := c.mergeInto(out, valNode); err != nil {
 					return nil, err
 				}
 				continue
 			}
-			keyStr, err := yamlKeyString(keyNode, anchors, seen)
+			keyStr, err := c.keyString(keyNode)
 			if err != nil {
 				return nil, err
 			}
-			val, err := convertYAMLNode(valNode, anchors, seen)
+			val, err := c.convert(valNode)
 			if err != nil {
 				return nil, err
 			}
@@ -470,8 +509,8 @@ func convertYAMLNode(n *yaml.Node, anchors map[string]*yaml.Node, seen map[*yaml
 		return out, nil
 	case yaml.SequenceNode:
 		out := make([]any, 0, len(n.Children))
-		for _, c := range n.Children {
-			v, err := convertYAMLNode(c, anchors, seen)
+		for _, child := range n.Children {
+			v, err := c.convert(child)
 			if err != nil {
 				return nil, err
 			}
@@ -484,17 +523,17 @@ func convertYAMLNode(n *yaml.Node, anchors map[string]*yaml.Node, seen map[*yaml
 		if len(n.Children) == 0 {
 			return nil, nil //nolint:nilnil // empty document
 		}
-		return convertYAMLNode(n.Children[0], anchors, seen)
+		return c.convert(n.Children[0])
 	default:
 		return n.Value, nil
 	}
 }
 
-func mergeYAMLInto(dst map[string]any, src *yaml.Node, anchors map[string]*yaml.Node, seen map[*yaml.Node]bool) error {
+func (c *yamlConverter) mergeInto(dst map[string]any, src *yaml.Node) error {
 	if src == nil {
 		return nil
 	}
-	v, err := convertYAMLNode(src, anchors, seen)
+	v, err := c.convert(src)
 	if err != nil {
 		return err
 	}
@@ -523,8 +562,8 @@ func mergeYAMLInto(dst map[string]any, src *yaml.Node, anchors map[string]*yaml.
 	return nil
 }
 
-func yamlKeyString(n *yaml.Node, anchors map[string]*yaml.Node, seen map[*yaml.Node]bool) (string, error) {
-	v, err := convertYAMLNode(n, anchors, seen)
+func (c *yamlConverter) keyString(n *yaml.Node) (string, error) {
+	v, err := c.convert(n)
 	if err != nil {
 		return "", err
 	}

@@ -411,15 +411,24 @@ func (c *Compiler) compile(value any, rawSource []byte, baseURI string) (*Schema
 		bindings:      bindings,
 		compileOpts:   c.opts,
 	}
+	vocab, err := c.vocabularies(rm, metaSchemaURI, draft)
+	if err != nil {
+		return nil, err
+	}
 	eb := &evalBuilder{
-		schema: schema,
-		rm:     rm,
-		loader: c.opts.loader,
-		draft:  draft,
-		cache:  map[string]*subschema{},
+		schema:        schema,
+		rm:            rm,
+		loader:        c.opts.loader,
+		draft:         draft,
+		cache:         map[string]*subschema{},
+		vocabOff:      vocab.off,
+		formatAsserts: vocab.formatAsserts,
 	}
 	root, err := eb.buildSubschema(value, "#", rootURI, rootURI)
 	if err != nil {
+		return nil, err
+	}
+	if err := eb.buildAll(); err != nil {
 		return nil, err
 	}
 	schema.root = root
@@ -509,12 +518,17 @@ func (c *Compiler) bindAndResolve(rm *resourceMap, node any, baseURI, location s
 		return nil, nil
 	}
 	idKey, subDraft := bindResolveDraftKey(v, draft)
-	newBaseURI, err := bindResolveBaseURI(v, idKey, baseURI, location)
-	if err != nil {
-		return nil, err
+	newBaseURI := baseURI
+	// Before 2019-09, $ref replaces every sibling keyword, $id included.
+	if _, hasRef := v["$ref"]; !hasRef || subDraft > Draft7 {
+		var err error
+		if newBaseURI, err = bindResolveBaseURI(v, idKey, baseURI, location); err != nil {
+			return nil, err
+		}
 	}
 	var out []keywordBinding
-	for key, raw := range v {
+	for _, key := range orderKeys(v) {
+		raw := v[key]
 		loc := location + "/" + escapePointerToken(key)
 		if _, known := LookupKeyword(key, draft); !known && c.opts.strictKeywords {
 			return nil, &CompileError{KeywordLocation: loc, Message: fmt.Sprintf("unknown keyword %q", key), Cause: ErrUnknownKeyword}
@@ -611,7 +625,8 @@ func (c *Compiler) bindAndResolveChild(rm *resourceMap, raw any, baseURI, locati
 		if !ok {
 			return nil, nil
 		}
-		for k, child := range m {
+		for _, k := range orderKeys(m) {
+			child := m[k]
 			loc := location + "/" + escapePointerToken(k)
 			children, err := c.bindAndResolve(rm, child, baseURI, loc, draft, refStack)
 			if err != nil {
@@ -655,7 +670,8 @@ func (c *Compiler) bindAndResolveChild(rm *resourceMap, raw any, baseURI, locati
 		if !ok {
 			return nil, nil
 		}
-		for k, child := range m {
+		for _, k := range orderKeys(m) {
+			child := m[k]
 			loc := location + "/" + escapePointerToken(k)
 			if _, ok := child.(map[string]any); ok {
 				children, err := c.bindAndResolve(rm, child, baseURI, loc, draft, refStack)
@@ -801,43 +817,21 @@ func checkNonEmptyArray(key string, raw any, loc string) error {
 // isNonNegativeInteger reports whether v is a JSON number ≥ 0 with no
 // fractional part. Numbers like 2.0 count as integers per the spec.
 func isNonNegativeInteger(v any) bool {
-	switch t := v.(type) {
-	case json.Number:
-		if i, err := t.Int64(); err == nil {
-			return i >= 0
-		}
-		if f, err := t.Float64(); err == nil {
-			return f >= 0 && f == float64(int64(f))
-		}
-		return false
-	case int:
-		return t >= 0
-	case int64:
-		return t >= 0
-	case float64:
-		return t >= 0 && t == float64(int64(t))
-	}
-	return false
+	d, ok := parseNumber(v)
+	return ok && d.sign() >= 0 && d.isInteger()
 }
 
 func isPositiveNumber(v any) bool {
-	switch t := v.(type) {
-	case json.Number:
-		f, err := t.Float64()
-		return err == nil && f > 0
-	case int:
-		return t > 0
-	case int64:
-		return t > 0
-	case float64:
-		return t > 0
-	}
-	return false
+	d, ok := parseNumber(v)
+	return ok && !d.nan && !d.inf && d.huge == 0 && d.sign() > 0
 }
 
 // escapePointerToken escapes ~ and / within a JSON Pointer reference
 // token. Inverse of [unescapePointerToken].
 func escapePointerToken(s string) string {
+	if !strings.ContainsAny(s, "~/") {
+		return s
+	}
 	out := make([]byte, 0, len(s))
 	for i := range s {
 		switch s[i] {
@@ -892,4 +886,101 @@ func decodeSchemaBytes(schemaJSON []byte) (any, error) {
 		return nil, fmt.Errorf("decode: %w", err)
 	}
 	return v, nil
+}
+
+// vocabularyUse is what a custom meta-schema's $vocabulary turns on.
+type vocabularyUse struct {
+	// off holds the standard vocabularies (by their 2020-12 URIs, with
+	// [VocabFormatAnnot] standing for "format") whose keywords do not
+	// apply.
+	off map[string]bool
+	// formatAsserts is set when the format-assertion vocabulary is listed.
+	formatAsserts bool
+}
+
+// knownVocabularies maps each vocabulary URI this package implements to the
+// 2020-12 vocabularies whose keywords it covers. In 2019-09 the applicator
+// vocabulary also holds the unevaluated* keywords, and the format
+// vocabulary is named "format".
+var knownVocabularies = map[string][]string{
+	VocabCore:         {VocabCore},
+	VocabApplicator:   {VocabApplicator},
+	VocabUnevaluated:  {VocabUnevaluated},
+	VocabValidation:   {VocabValidation},
+	VocabFormatAnnot:  {VocabFormatAnnot},
+	VocabFormatAssert: {VocabFormatAnnot},
+	VocabContent:      {VocabContent},
+	VocabMetaData:     {VocabMetaData},
+	VocabOAS:          nil,
+
+	"https://json-schema.org/draft/2019-09/vocab/core":       {VocabCore},
+	"https://json-schema.org/draft/2019-09/vocab/applicator": {VocabApplicator, VocabUnevaluated},
+	"https://json-schema.org/draft/2019-09/vocab/validation": {VocabValidation},
+	"https://json-schema.org/draft/2019-09/vocab/format":     {VocabFormatAnnot},
+	"https://json-schema.org/draft/2019-09/vocab/content":    {VocabContent},
+	"https://json-schema.org/draft/2019-09/vocab/meta-data":  {VocabMetaData},
+}
+
+// vocabularies reads the $vocabulary of the custom meta-schema
+// metaSchemaURI: the standard vocabularies it leaves out, so their keywords
+// do not apply, and whether it asks for format assertion. It returns the
+// zero value when the meta-schema is a known one, cannot be loaded, or
+// declares no $vocabulary, and an error when it requires a vocabulary this
+// package does not implement.
+func (c *Compiler) vocabularies(rm *resourceMap, metaSchemaURI string, draft Draft) (vocabularyUse, error) {
+	if metaSchemaURI == "" || draft < Draft201909 || DraftFromMetaSchemaURL(metaSchemaURI) != DraftUnknown {
+		return vocabularyUse{}, nil
+	}
+	if _, ok := metaSchemaForDialect(metaSchemaURI); ok {
+		return vocabularyUse{}, nil
+	}
+	var meta map[string]any
+	if resolved, rerr := resolveRef(rm, c.opts.loader, "", metaSchemaURI, nil, draft); rerr == nil {
+		meta, _ = resolved.Target.(map[string]any)
+	}
+	declared, ok := meta["$vocabulary"].(map[string]any)
+	if !ok {
+		return vocabularyUse{}, nil
+	}
+	var use vocabularyUse
+	listed := map[string]bool{VocabCore: true} // required by every meta-schema
+	for _, uri := range orderKeys(declared) {
+		covers, known := knownVocabularies[uri]
+		if !known {
+			if required, _ := declared[uri].(bool); required {
+				return vocabularyUse{}, &CompileError{
+					KeywordLocation: "#/$schema",
+					Message:         fmt.Sprintf("meta-schema %q requires vocabulary %q, which is not supported", metaSchemaURI, uri),
+					Cause:           ErrUnknownVocabulary,
+				}
+			}
+			continue
+		}
+		for _, v := range covers {
+			listed[v] = true
+		}
+		if uri == VocabFormatAssert {
+			use.formatAsserts = true
+		}
+	}
+	use.off = map[string]bool{}
+	for _, uri := range stdVocabularySet(Draft202012) {
+		if uri != VocabFormatAssert && !listed[uri] {
+			use.off[uri] = true
+		}
+	}
+	return use, nil
+}
+
+// keywordVocabulary returns the URI of the standard vocabulary that holds
+// keyword name.
+func keywordVocabulary(name string) string {
+	for _, v := range stdVocabularies {
+		for _, k := range v.Keywords {
+			if k.Name() == name {
+				return v.URI
+			}
+		}
+	}
+	return ""
 }

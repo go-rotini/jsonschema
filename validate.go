@@ -69,9 +69,11 @@ func (s *Schema) Validate(instanceJSON []byte, opts ...Option) (*Result, error) 
 
 // ValidateValue validates an already-decoded Go value against the schema.
 // v must use the shapes [encoding/json.Unmarshal] produces into an any:
-// map[string]any, []any, string, bool, nil, and float64 or [Number] (int,
-// int32 and int64 are also accepted as numbers). Other types, such as
-// structs, typed slices or [MapSlice], match no JSON type.
+// map[string]any, []any, string, bool, nil, and float64 or [Number]. Every
+// Go integer kind, float32 and a non-nil *[math/big.Int] are also accepted
+// as numbers, so a uint64 above the int64 range is an integer; an integer
+// beyond uint64 can be passed as a [Number] holding its digits. Other
+// types, such as structs, typed slices or [MapSlice], match no JSON type.
 func (s *Schema) ValidateValue(v any, opts ...Option) (*Result, error) {
 	if s == nil {
 		return nil, ErrSchemaNotCompiled
@@ -88,8 +90,12 @@ func (s *Schema) ValidateValue(v any, opts ...Option) (*Result, error) {
 func (s *Schema) validateWithOptions(v any, ro *runOptions) (*Result, error) {
 	ctx := newRunCtx(s, ro)
 	defer ctx.release()
+	ctx.setEvalLimit(v)
 	if root := s.evalRoot(); root != nil {
 		ctx.evaluate(root, v)
+	}
+	if ctx.overBudget {
+		return nil, ErrMaxEvaluations
 	}
 	res := &Result{Valid: len(ctx.errors) == 0, Errors: ctx.errors}
 	// Stop-on-first-error skips annotation collection: unevaluated* keywords

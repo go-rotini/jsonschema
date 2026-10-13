@@ -42,6 +42,9 @@ type subschema struct {
 	// keywords records the recognized keyword names so unevaluated* can
 	// detect sibling keywords without rescanning the raw map.
 	keywords map[string]struct{}
+	// readsScope is true when an unevaluated* keyword here reads the
+	// annotations of this subschema's in-place evaluation.
+	readsScope bool
 	// schema is the parent compiled schema; used by evaluators to follow
 	// refs into other resources.
 	schema *Schema
@@ -152,6 +155,15 @@ type evalBuilder struct {
 	// eventually lands in cache; done is closed when the build completes.
 	inFlight map[string]*pendingSubschema
 	cacheMu  sync.Mutex
+	// frozen is set once compilation has built every reachable
+	// subschema; from then on references resolve without the loader.
+	frozen bool
+	// vocabOff holds the standard vocabularies the root's custom meta-schema
+	// leaves out; their keywords do not apply in the compiled document.
+	vocabOff map[string]bool
+	// formatAsserts is set when the root's custom meta-schema lists the
+	// format-assertion vocabulary: format asserts in the compiled document.
+	formatAsserts bool
 }
 
 // pendingSubschema is the inFlight value: the *subschema currently being
@@ -301,29 +313,12 @@ func (b *evalBuilder) populateSubschema(sub *subschema, node any, baseURI, resou
 		sub.boolValue = &v
 		return nil
 	case map[string]any:
-		subDraft := b.draft
-		idKey := subDraft.IDKeyword()
-		if v, ok := t["$schema"]; ok {
-			if s, ok := v.(string); ok {
-				if d := DraftFromMetaSchemaURL(s); d != DraftUnknown {
-					subDraft = d
-					idKey = subDraft.IDKeyword()
-				}
-			}
-		}
-		if rawID, ok := t[idKey]; ok {
-			if s, ok := rawID.(string); ok && s != "" {
-				if abs, err := resolveURI(baseURI, s); err == nil {
-					abs, _ = splitFragment(abs)
-					baseURI = abs
-					resourceURI = abs
-					sub.baseURI = baseURI
-					sub.resourceURI = resourceURI
-					sub.crossesResource = true
-					sub.absURI = absoluteOrEmpty(abs)
-					sub.absPtr = ""
-				}
-			}
+		subDraft := b.draftAt(t)
+		_, hasRef := t["$ref"]
+		// Before 2019-09, $ref replaces every sibling keyword, $id included.
+		refOnly := hasRef && subDraft <= Draft7
+		if !refOnly {
+			baseURI, resourceURI = b.applyID(sub, t, subDraft.IDKeyword(), baseURI, resourceURI)
 		}
 
 		frame := &buildFrame{
@@ -338,11 +333,20 @@ func (b *evalBuilder) populateSubschema(sub *subschema, node any, baseURI, resou
 		}
 
 		keys := orderKeys(t)
+		if refOnly {
+			keys = []string{"$ref"}
+		}
 		for _, key := range keys {
 			if _, known := LookupKeyword(key, subDraft); !known {
 				continue
 			}
+			if b.vocabularyOff(key, t) {
+				continue
+			}
 			sub.keywords[key] = struct{}{}
+			if key == "unevaluatedProperties" || key == "unevaluatedItems" {
+				sub.readsScope = true
+			}
 			builder, ok := lookupBuilder(key)
 			if !ok {
 				continue
@@ -390,9 +394,9 @@ func evalPriority(name string) int {
 		return 0
 	case "type", "enum", "const":
 		return 5
-	// properties / patternProperties must run before additionalProperties
-	// (JSON Schema Core 2020-12 §10.3.2.3) so the latter can read their
-	// evaluated-keys annotations.
+	// properties / patternProperties run before additionalProperties, the
+	// order JSON Schema Core 2020-12 §10.3.2.3 describes, so their errors
+	// come first.
 	case keyProperties, keyPatternProperties:
 		return 8
 	case "prefixItems":
@@ -438,14 +442,28 @@ type runCtx struct {
 	// refPath holds the references crossed to reach cur, innermost last;
 	// it maps a keyword's static location to its evaluation path.
 	// refBuf backs it so shallow ref chains need no allocation.
-	refPath         []refFrame
-	refBuf          [4]refFrame
-	instanceLoc     []string
-	schemaLoc       []string
-	dynamicScope    []string // chain of in-scope resource URIs
-	errors          []ValidationError
-	annotations     map[string]map[string]any // instanceLoc → keyword → value
-	annoEntries     []annotationEntry         // ordered annotation log for output
+	refPath []refFrame
+	refBuf  [4]refFrame
+	// instancePtr is the escaped JSON Pointer of the current instance;
+	// instanceLoc holds the pointers of its ancestors.
+	instancePtr  string
+	instanceLoc  []string
+	schemaLoc    []string
+	dynamicScope []string // chain of in-scope resource URIs
+	errors       []ValidationError
+	// failCount counts every failure reported, including those dropped by
+	// the error cap, so a subschema can tell whether it passed.
+	failCount int
+	// scope holds the evaluated-location annotations of the subschema
+	// being evaluated, which unevaluated* keywords read. It covers only
+	// that subschema's keywords and the in-place subschemas that passed.
+	scope *annoScope
+	// needScope reports whether an unevaluated* keyword may read the
+	// current scope; when it is false anyOf and oneOf may stop early.
+	needScope bool
+	// public reports whether the annotation log is built for the result.
+	public          bool
+	annoEntries     []annotationEntry // ordered annotation log for output
 	refDepth        int
 	validationDepth int
 	// stopFired propagates stop-on-first-error across evaluateBranch so
@@ -464,7 +482,76 @@ type runCtx struct {
 	// formatWarned records unknown-format names already written to
 	// runOptions.warningSink so a single Validate call dedupes warnings.
 	formatWarned map[string]bool
+	// evals counts subschema evaluations against evalLimit (no limit when
+	// evalLimit is negative); overBudget is set once evals exceeds it and
+	// stops the walk.
+	evals      int
+	evalLimit  int
+	evalAuto   bool
+	overBudget bool
 }
+
+// Evaluation budget defaults: evalsPerValue evaluations for each value in
+// the instance, and at least minEvalBudget.
+const (
+	evalsPerValue = 100
+	minEvalBudget = 1_000_000
+)
+
+// setEvalLimit sets the evaluation budget for validating instance.
+func (ctx *runCtx) setEvalLimit(instance any) {
+	if ctx.opts.maxEvaluations != 0 {
+		ctx.evalLimit = ctx.opts.maxEvaluations
+		return
+	}
+	ctx.evalAuto = true
+	ctx.evalLimit = max(minEvalBudget, evalsPerValue*countValues(instance))
+}
+
+// growEvalLimit extends a default budget for decoded content about to be
+// validated.
+func (ctx *runCtx) growEvalLimit(content any) {
+	if ctx.evalAuto {
+		ctx.evalLimit += evalsPerValue * countValues(content)
+	}
+}
+
+// chargeError counts the error just appended against the evaluation
+// budget, one evaluation per 32 bytes it holds, so the budget also bounds
+// the memory that errors from a branching schema can take.
+func (ctx *runCtx) chargeError() {
+	e := &ctx.errors[len(ctx.errors)-1]
+	ctx.evals += (128 + len(e.KeywordLocation) + len(e.AbsoluteKeywordLocation) +
+		len(e.InstanceLocation) + len(e.Message)) / 32
+	if ctx.evalLimit >= 0 && ctx.evals > ctx.evalLimit {
+		ctx.overBudget = true
+	}
+}
+
+// countValues returns the number of JSON values in v, v included, up to
+// maxCountedValues; the cap also ends the walk of a Go value that contains
+// itself.
+func countValues(v any) int {
+	n := 0
+	stack := []any{v}
+	for len(stack) > 0 && n < maxCountedValues {
+		x := stack[len(stack)-1]
+		stack = stack[:len(stack)-1]
+		n++
+		switch t := x.(type) {
+		case []any:
+			stack = append(stack, t...)
+		case map[string]any:
+			for _, c := range t {
+				stack = append(stack, c)
+			}
+		}
+	}
+	return n
+}
+
+// maxCountedValues bounds [countValues].
+const maxCountedValues = 1 << 26
 
 // refFrame records one $ref, $dynamicRef or $recursiveRef crossed during
 // evaluation.
@@ -493,10 +580,42 @@ type annotationEntry struct {
 	pathCut    int
 }
 
-// dispatch walks every evaluator on sub against instance.
+// evaluate applies sub in place: to the instance the current subschema is
+// evaluating. When sub passes, its annotations join the current scope.
 func (ctx *runCtx) evaluate(sub *subschema, instance any) {
-	if sub == nil {
+	outer := ctx.scope
+	ctx.scope = nil
+	fails := ctx.failCount
+	ctx.run(sub, instance)
+	inner := ctx.scope
+	ctx.scope = outer
+	if inner != nil && ctx.failCount == fails {
+		ctx.adoptScope(inner)
+	}
+}
+
+// adoptScope merges s into the current scope.
+func (ctx *runCtx) adoptScope(s *annoScope) {
+	if ctx.scope == nil {
+		ctx.scope = s
 		return
+	}
+	ctx.scope.merge(s)
+}
+
+// run walks every evaluator on sub against instance.
+func (ctx *runCtx) run(sub *subschema, instance any) {
+	if sub == nil || ctx.overBudget {
+		return
+	}
+	ctx.evals++
+	if ctx.evalLimit >= 0 && ctx.evals > ctx.evalLimit {
+		ctx.overBudget = true
+		return
+	}
+	if sub.readsScope && !ctx.needScope {
+		ctx.needScope = true
+		defer func() { ctx.needScope = false }()
 	}
 	prev := ctx.cur
 	ctx.cur = sub
@@ -529,14 +648,20 @@ func (ctx *runCtx) evaluate(sub *subschema, instance any) {
 	}
 }
 
-// evaluateChild evaluates sub against instance with the instance and schema
-// pointer-token fragments pushed temporarily.
+// evaluateChild evaluates sub against instance, a child of the current
+// instance, with the instance and schema pointer-token fragments pushed
+// temporarily. The child's annotations describe a different instance, so
+// they never join the current scope.
 func (ctx *runCtx) evaluateChild(sub *subschema, instance any, instanceTok, schemaTok string) {
 	ctx.pushInstance(instanceTok)
 	defer ctx.popInstance()
 	ctx.pushSchema(schemaTok)
 	defer ctx.popSchema()
-	ctx.evaluate(sub, instance)
+	outer, need, depth := ctx.scope, ctx.needScope, ctx.refDepth
+	// The $ref depth limit counts hops at one instance location.
+	ctx.scope, ctx.needScope, ctx.refDepth = nil, false, 0
+	ctx.run(sub, instance)
+	ctx.scope, ctx.needScope, ctx.refDepth = outer, need, depth
 }
 
 // evaluateRef evaluates sub, the target of the reference keyword at static
@@ -585,32 +710,43 @@ func pathRest(loc, root string) (string, bool) {
 	return rest, ok && (rest == "" || rest[0] == '/')
 }
 
-// evaluateBranch evaluates sub with a fresh error/annotation buffer so
-// branch failures (oneOf / anyOf / if / not) do not contaminate the outer
-// context. The captured errors and annotations are returned for the
-// caller to merge. The outer stopFired flag is preserved across the call.
-func (ctx *runCtx) evaluateBranch(sub *subschema, instance any) ([]ValidationError, []annotationEntry) {
+// branchAnnotations are the annotations a branch produced: its log entries
+// and its scope.
+type branchAnnotations struct {
+	entries []annotationEntry
+	scope   *annoScope
+}
+
+// evaluateBranch evaluates sub in place with fresh error and annotation
+// buffers, so branch failures (oneOf / anyOf / if / not) do not contaminate
+// the outer context. The captured errors and annotations are returned for
+// the caller to merge. The outer stopFired flag is preserved across the
+// call.
+func (ctx *runCtx) evaluateBranch(sub *subschema, instance any) ([]ValidationError, branchAnnotations) {
 	saved := ctx.errors
 	savedAnno := ctx.annoEntries
-	savedAnnoMap := ctx.annotations
+	savedScope := ctx.scope
 	savedStop := ctx.stopFired
+	savedFails := ctx.failCount
 	ctx.errors = nil
 	ctx.annoEntries = nil
-	ctx.annotations = make(map[string]map[string]any)
+	ctx.scope = nil
 	// Branches are speculative; their stopFired must not affect siblings.
 	ctx.stopFired = false
-	ctx.evaluate(sub, instance)
+	ctx.run(sub, instance)
 	br := ctx.errors
-	annos := ctx.annoEntries
+	annos := branchAnnotations{entries: ctx.annoEntries, scope: ctx.scope}
 	ctx.errors = saved
 	ctx.annoEntries = savedAnno
-	ctx.annotations = savedAnnoMap
+	ctx.scope = savedScope
 	ctx.stopFired = savedStop
+	ctx.failCount = savedFails
 	return br, annos
 }
 
 // addError appends a ValidationError at the current instance/schema location.
 func (ctx *runCtx) addError(keywordLoc, keyword, _, msg string) {
+	ctx.failCount++
 	if ctx.opts.maxErrors > 0 && len(ctx.errors) >= ctx.opts.maxErrors {
 		return
 	}
@@ -621,6 +757,7 @@ func (ctx *runCtx) addError(keywordLoc, keyword, _, msg string) {
 		Keyword:                 keyword,
 		Message:                 msg,
 	})
+	ctx.chargeError()
 	if ctx.opts.stopOnFirstError {
 		ctx.stopFired = true
 	}
@@ -630,6 +767,7 @@ func (ctx *runCtx) addError(keywordLoc, keyword, _, msg string) {
 // callers can use [errors.As] to extract the underlying error
 // (e.g. *FormatError) from a [*ValidationError].
 func (ctx *runCtx) addErrorWithCause(keywordLoc, keyword, _, msg string, cause error) {
+	ctx.failCount++
 	if ctx.opts.maxErrors > 0 && len(ctx.errors) >= ctx.opts.maxErrors {
 		return
 	}
@@ -641,6 +779,7 @@ func (ctx *runCtx) addErrorWithCause(keywordLoc, keyword, _, msg string, cause e
 		Message:                 msg,
 		Cause:                   cause,
 	})
+	ctx.chargeError()
 	if ctx.opts.stopOnFirstError {
 		ctx.stopFired = true
 	}
@@ -648,6 +787,7 @@ func (ctx *runCtx) addErrorWithCause(keywordLoc, keyword, _, msg string, cause e
 
 // addCausesError appends a compound error with nested causes.
 func (ctx *runCtx) addCausesError(keywordLoc, keyword, msg string, causes []ValidationError) {
+	ctx.failCount++
 	if ctx.opts.maxErrors > 0 && len(ctx.errors) >= ctx.opts.maxErrors {
 		return
 	}
@@ -659,6 +799,7 @@ func (ctx *runCtx) addCausesError(keywordLoc, keyword, msg string, causes []Vali
 		Message:                 msg,
 		Causes:                  causes,
 	})
+	ctx.chargeError()
 	if ctx.opts.stopOnFirstError {
 		ctx.stopFired = true
 	}
@@ -728,6 +869,9 @@ func (ctx *runCtx) emitFormatWarning(format string) {
 
 // shouldStop reports whether validation should stop early.
 func (ctx *runCtx) shouldStop() bool {
+	if ctx.overBudget {
+		return true
+	}
 	if ctx.opts.stopOnFirstError && (ctx.stopFired || len(ctx.errors) > 0) {
 		return true
 	}
@@ -736,23 +880,18 @@ func (ctx *runCtx) shouldStop() bool {
 
 // instanceLocation returns the current instance location as a JSON Pointer.
 func (ctx *runCtx) instanceLocation() string {
-	if len(ctx.instanceLoc) == 0 {
-		return ""
-	}
-	var b strings.Builder
-	for _, tok := range ctx.instanceLoc {
-		b.WriteByte('/')
-		b.WriteString(escapePointerToken(tok))
-	}
-	return b.String()
+	return ctx.instancePtr
 }
 
-// pushInstance / popInstance manage the instance-location pointer.
+// pushInstance / popInstance manage the instance-location pointer, which is
+// kept escaped so reading it costs nothing.
 func (ctx *runCtx) pushInstance(tok string) {
-	ctx.instanceLoc = append(ctx.instanceLoc, tok)
+	ctx.instanceLoc = append(ctx.instanceLoc, ctx.instancePtr)
+	ctx.instancePtr += "/" + escapePointerToken(tok)
 }
 func (ctx *runCtx) popInstance() {
 	if n := len(ctx.instanceLoc); n > 0 {
+		ctx.instancePtr = ctx.instanceLoc[n-1]
 		ctx.instanceLoc = ctx.instanceLoc[:n-1]
 	}
 }
@@ -778,9 +917,10 @@ func (ctx *runCtx) popDynamicScope() {
 
 func newRunCtx(schema *Schema, ro *runOptions) *runCtx {
 	ctx := &runCtx{
-		schema:      schema,
-		opts:        ro,
-		annotations: map[string]map[string]any{},
+		schema:    schema,
+		opts:      ro,
+		evalLimit: -1,
+		public:    ro.collectAnnotations && !ro.stopOnFirstError,
 	}
 	ctx.refPath = ctx.refBuf[:0]
 	if schema != nil && schema.id != "" {
@@ -795,30 +935,29 @@ func newRunCtx(schema *Schema, ro *runOptions) *runCtx {
 // without a public-API churn.
 func (ctx *runCtx) release() {}
 
-// addAnnotation records an annotation at the current instance location.
-// The collectAnnotations option only gates the public surface; the
-// internal record always feeds unevaluated* and branch merging.
+// addAnnotation logs an annotation at the current instance location.
 func (ctx *runCtx) addAnnotation(keywordLoc, keyword string, value any) {
-	loc := ctx.instanceLocation()
-	if ctx.annotations[loc] == nil {
-		ctx.annotations[loc] = map[string]any{}
+	if !ctx.public {
+		return
 	}
-	ctx.annotations[loc][keyword] = value
-	ctx.appendAnnotationEntry(keywordLoc, loc, keyword, value)
+	ctx.appendAnnotationEntry(keywordLoc, keyword, value)
 }
 
 // appendAnnotationEntry logs an annotation produced by the keyword at static
-// location keywordLoc in the subschema being evaluated. The evaluation path
-// is captured only when the public annotations will be built.
-func (ctx *runCtx) appendAnnotationEntry(keywordLoc, instanceLoc, keyword string, value any) {
+// location keywordLoc in the subschema being evaluated. Nothing is logged
+// when the public annotations will not be built.
+func (ctx *runCtx) appendAnnotationEntry(keywordLoc, keyword string, value any) {
+	if !ctx.public {
+		return
+	}
 	e := annotationEntry{
 		sub:         ctx.cur,
 		keywordLoc:  keywordLoc,
-		instanceLoc: instanceLoc,
+		instanceLoc: ctx.instanceLocation(),
 		keyword:     keyword,
 		value:       value,
 	}
-	if n := len(ctx.refPath); n > 0 && ctx.opts.collectAnnotations && !ctx.opts.stopOnFirstError {
+	if n := len(ctx.refPath); n > 0 {
 		root := ctx.refPath[n-1].root
 		if _, ok := pathRest(keywordLoc, root); ok {
 			e.pathPrefix = ctx.anchorPath(n - 1)
@@ -841,85 +980,321 @@ func (ctx *runCtx) publicAnnotations() []Annotation {
 			AbsoluteKeywordLocation: absoluteKeywordLocation(e.sub, e.keywordLoc),
 			InstanceLocation:        e.instanceLoc,
 			Keyword:                 e.keyword,
-			Value:                   e.value,
+			Value:                   sanitizeAnnotation(e.value),
 		})
 	}
 	return out
 }
 
-// getAnnotation fetches the annotation for keyword at the current instance
-// location, if any.
-func (ctx *runCtx) getAnnotation(keyword string) (any, bool) {
-	loc := ctx.instanceLocation()
-	if m, ok := ctx.annotations[loc]; ok {
-		if v, ok := m[keyword]; ok {
-			return v, true
-		}
-	}
-	return nil, false
-}
-
-// addBranchAnnotations merges annotations captured in evaluateBranch back
-// into the running context.
-func (ctx *runCtx) addBranchAnnotations(annos []annotationEntry) {
-	for _, e := range annos {
-		if ctx.annotations[e.instanceLoc] == nil {
-			ctx.annotations[e.instanceLoc] = map[string]any{}
-		}
-		// Sets union; scalars last-write-wins.
-		if existing, ok := ctx.annotations[e.instanceLoc][e.keyword]; ok {
-			ctx.annotations[e.instanceLoc][e.keyword] = mergeAnnotation(existing, e.value)
-		} else {
-			ctx.annotations[e.instanceLoc][e.keyword] = e.value
-		}
-		ctx.annoEntries = append(ctx.annoEntries, e)
+// addBranchAnnotations merges the annotations of a passing branch captured
+// by evaluateBranch into the running context.
+func (ctx *runCtx) addBranchAnnotations(b branchAnnotations) {
+	ctx.annoEntries = append(ctx.annoEntries, b.entries...)
+	if b.scope != nil {
+		ctx.adoptScope(b.scope)
 	}
 }
 
-// mergeAnnotation combines two annotation values from sibling applicator
-// branches. For evaluated-set annotations (returned as map[string]struct{}
-// or map[int]struct{}) we union; otherwise last-wins.
-func mergeAnnotation(a, b any) any {
-	switch av := a.(type) {
-	case evaluatedKeys:
-		if bv, ok := b.(evaluatedKeys); ok {
-			out := make(evaluatedKeys, len(av)+len(bv))
-			for k := range av {
-				out[k] = struct{}{}
-			}
-			for k := range bv {
-				out[k] = struct{}{}
-			}
-			return out
-		}
-	case evaluatedItems:
-		if bv, ok := b.(evaluatedItems); ok {
-			if av < bv {
-				return bv
-			}
-			return av
-		}
-	case evaluatedItemsAll:
-		return a
-	}
-	if _, ok := a.(evaluatedItemsAll); ok {
-		return a
-	}
-	if _, ok := b.(evaluatedItemsAll); ok {
-		return b
-	}
-	return b
+// annoScope records which parts of the instance a subschema evaluated,
+// for unevaluatedProperties and unevaluatedItems.
+type annoScope struct {
+	// props holds the evaluated property names.
+	props map[string]struct{}
+	// prefix is the number of leading array items evaluated.
+	prefix int
+	// allItems is true when every array item was evaluated.
+	allItems bool
+	// contained holds the indexes of array items that matched contains.
+	contained map[int]struct{}
 }
 
-// evaluatedKeys is the annotation value used by properties /
-// patternProperties / additionalProperties / unevaluatedProperties to track
-// which property names have been evaluated. Stored as a set for O(1) lookup.
+// scopeForWrite returns the current scope, creating it when needed.
+func (ctx *runCtx) scopeForWrite() *annoScope {
+	if ctx.scope == nil {
+		ctx.scope = &annoScope{}
+	}
+	return ctx.scope
+}
+
+// tracksEvaluated reports whether anything reads the locations a keyword
+// evaluates: an unevaluated* keyword through the scope, or the public
+// annotation log.
+func (ctx *runCtx) tracksEvaluated() bool { return ctx.needScope || ctx.public }
+
+// The mark* methods record evaluated locations in the scope. They do
+// nothing while needScope is false: no unevaluated* keyword can then read
+// the scope, since needScope stays set below any subschema that reads it
+// until the walk moves to a child instance, which starts a fresh scope.
+
+// markProps records evaluated property names.
+func (ctx *runCtx) markProps(keys evaluatedKeys) {
+	if !ctx.needScope {
+		return
+	}
+	s := ctx.scopeForWrite()
+	if s.props == nil {
+		s.props = make(map[string]struct{}, len(keys))
+	}
+	for k := range keys {
+		s.props[k] = struct{}{}
+	}
+}
+
+// markPrefix records that the first n array items were evaluated.
+func (ctx *runCtx) markPrefix(n int) {
+	if !ctx.needScope {
+		return
+	}
+	s := ctx.scopeForWrite()
+	s.prefix = max(s.prefix, n)
+}
+
+// markAllItems records that every array item was evaluated.
+func (ctx *runCtx) markAllItems() {
+	if !ctx.needScope {
+		return
+	}
+	ctx.scopeForWrite().allItems = true
+}
+
+// markContained records the array items that matched contains.
+func (ctx *runCtx) markContained(idx []int) {
+	if !ctx.needScope {
+		return
+	}
+	s := ctx.scopeForWrite()
+	if s.contained == nil {
+		s.contained = make(map[int]struct{}, len(idx))
+	}
+	for _, i := range idx {
+		s.contained[i] = struct{}{}
+	}
+}
+
+// merge adds o's evaluated locations to s.
+func (s *annoScope) merge(o *annoScope) {
+	if len(o.props) > 0 {
+		if s.props == nil {
+			s.props = make(map[string]struct{}, len(o.props))
+		}
+		for k := range o.props {
+			s.props[k] = struct{}{}
+		}
+	}
+	s.prefix = max(s.prefix, o.prefix)
+	s.allItems = s.allItems || o.allItems
+	if len(o.contained) > 0 {
+		if s.contained == nil {
+			s.contained = make(map[int]struct{}, len(o.contained))
+		}
+		for i := range o.contained {
+			s.contained[i] = struct{}{}
+		}
+	}
+}
+
+// evaluatedKeys is the annotation value of properties /
+// patternProperties / additionalProperties / unevaluatedProperties and
+// contains: the property names (or item indexes) evaluated. It is reported
+// publicly as a sorted []string.
 type evaluatedKeys map[string]struct{}
 
-// evaluatedItems is the annotation value used by prefixItems to record the
-// largest index it covered (so unevaluatedItems knows where to start).
+// evaluatedItems is the annotation value of prefixItems (and the
+// array form of items): the largest index covered. It is reported publicly
+// as an int.
 type evaluatedItems int
 
-// evaluatedItemsAll is the annotation marker used by `items` (or
-// `additionalItems`) to indicate every index past prefixItems was evaluated.
+// evaluatedItemsAll is the annotation value of items, additionalItems and
+// unevaluatedItems when they applied to every remaining item. It is
+// reported publicly as true.
 type evaluatedItemsAll struct{}
+
+// resourceRoot returns the canonical location the resource walk recorded
+// for node, if it walked node.
+func (b *evalBuilder) resourceRoot(node map[string]any) (schemaLocation, bool) {
+	if b.rm == nil {
+		return schemaLocation{}, false
+	}
+	return b.rm.location(node)
+}
+
+// targetBase returns the base URI in effect at target: the URI of the
+// resource the walk found it in, or fallback when target was not walked.
+func (b *evalBuilder) targetBase(target any, fallback string) string {
+	if m, ok := target.(map[string]any); ok {
+		if l, ok := b.resourceRoot(m); ok && l.uri != "" {
+			return l.uri
+		}
+	}
+	return fallback
+}
+
+// buildAll builds every subschema validation can reach: the targets of
+// every reference, and for dynamic references every schema in the resource
+// map that the dynamic scope could select. Remote documents are fetched
+// here, so a reference that cannot be resolved fails compilation. Once it
+// returns, the builder is frozen: validation only reads the subschema cache
+// and the resource map.
+func (b *evalBuilder) buildAll() error {
+	var w refWork
+	done := map[*subschema]bool{}
+	for {
+		pending := b.unvisited(done)
+		if len(pending) == 0 {
+			break
+		}
+		for _, sub := range pending {
+			done[sub] = true
+			if err := w.buildTargets(sub); err != nil {
+				return err
+			}
+		}
+		if err := w.buildDynamicTargets(b.rm); err != nil {
+			return err
+		}
+	}
+	b.frozen = true
+	return nil
+}
+
+// unvisited returns the cached subschemas not in done, sorted by location
+// so the order of fetches does not depend on map order.
+func (b *evalBuilder) unvisited(done map[*subschema]bool) []*subschema {
+	b.cacheMu.Lock()
+	pending := make([]*subschema, 0, len(b.cache))
+	for _, sub := range b.cache {
+		if !done[sub] {
+			pending = append(pending, sub)
+		}
+	}
+	b.cacheMu.Unlock()
+	sort.Slice(pending, func(i, j int) bool { return pending[i].location < pending[j].location })
+	return pending
+}
+
+// refWork collects the dynamic and recursive references buildAll has seen.
+type refWork struct {
+	dynamic   []*dynamicRefEval
+	recursive []*recursiveRefEval
+}
+
+// buildTargets builds the static targets of sub's reference keywords.
+func (w *refWork) buildTargets(sub *subschema) error {
+	for _, ev := range sub.evaluators {
+		var err error
+		switch e := ev.(type) {
+		case *refEval:
+			if e.target == nil {
+				return &CompileError{KeywordLocation: e.loc, Message: fmt.Sprintf("cannot resolve $ref %q", e.source)}
+			}
+			e.sub, err = e.build(e.target)
+		case *dynamicRefEval:
+			w.dynamic = append(w.dynamic, e)
+			if e.target != nil {
+				_, err = e.build(e.target)
+			}
+		case *recursiveRefEval:
+			w.recursive = append(w.recursive, e)
+			if e.target != nil {
+				_, err = e.build(e.target)
+			}
+		}
+		if err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// buildDynamicTargets builds every schema the dynamic scope could select:
+// each matching $dynamicAnchor for a $dynamicRef, and each resource root
+// with "$recursiveAnchor": true for a $recursiveRef.
+func (w *refWork) buildDynamicTargets(rm *resourceMap) error {
+	for _, uri := range rm.order {
+		res := rm.byURI[uri]
+		if res == nil {
+			continue
+		}
+		for _, e := range w.dynamic {
+			if t, ok := res.dynamicAnchors[e.fragmentName]; ok && e.fragmentName != "" {
+				if _, err := e.build(t); err != nil {
+					return err
+				}
+			}
+		}
+		if !res.recursiveAnchor {
+			continue
+		}
+		for _, e := range w.recursive {
+			if _, err := e.build(res.root); err != nil {
+				return err
+			}
+		}
+	}
+	return nil
+}
+
+// draftAt returns the draft in effect at node: its own $schema, else the
+// draft of the resource the walk found it in, else the compile's draft.
+func (b *evalBuilder) draftAt(node map[string]any) Draft {
+	if s, ok := node["$schema"].(string); ok {
+		if d := DraftFromMetaSchemaURL(s); d != DraftUnknown {
+			return d
+		}
+	}
+	if l, ok := b.resourceRoot(node); ok {
+		if res := b.rm.byURI[l.uri]; res != nil && res.draft != DraftUnknown {
+			return res.draft
+		}
+	}
+	return b.draft
+}
+
+// applyID applies node's $id (keyword idKey) to sub and returns the base
+// and resource URIs in effect inside it.
+func (b *evalBuilder) applyID(sub *subschema, node map[string]any, idKey, baseURI, resourceURI string) (string, string) {
+	rawID, ok := node[idKey]
+	if !ok {
+		return baseURI, resourceURI
+	}
+	uri := ""
+	if l, walked := b.resourceRoot(node); walked {
+		// The resource walk already resolved this $id; resolving it again
+		// against a base that includes it would apply a relative $id twice.
+		if l.ptr == "" && l.uri != "" {
+			uri = l.uri
+		}
+	} else if s, ok := rawID.(string); ok && s != "" {
+		if abs, err := resolveURI(baseURI, s); err == nil {
+			uri, _ = splitFragment(abs)
+		}
+	}
+	if uri == "" {
+		return baseURI, resourceURI
+	}
+	sub.baseURI, sub.resourceURI = uri, uri
+	sub.crossesResource = true
+	sub.absURI, sub.absPtr = absoluteOrEmpty(uri), ""
+	return uri, uri
+}
+
+// vocabularyOff reports whether keyword belongs to a vocabulary the root's
+// custom meta-schema leaves out. That applies to the compiled document
+// only, not to registered or fetched documents.
+func (b *evalBuilder) vocabularyOff(keyword string, node map[string]any) bool {
+	if len(b.vocabOff) == 0 || !b.vocabOff[keywordVocabulary(keyword)] {
+		return false
+	}
+	return b.inCompiledDocument(node)
+}
+
+// inCompiledDocument reports whether node belongs to the document being
+// compiled rather than to a registered or fetched one.
+func (b *evalBuilder) inCompiledDocument(node map[string]any) bool {
+	if l, ok := b.resourceRoot(node); ok {
+		if res := b.rm.byURI[l.uri]; res != nil && res.external {
+			return false
+		}
+	}
+	return true
+}

@@ -63,11 +63,15 @@ func (m MapLoader) Load(uri string) ([]byte, error) {
 // path is taken relative to Root (file:///a/b.json reads Root/a/b.json).
 // Any other scheme, a ".." segment, or a path or symlink that escapes Root
 // is rejected with [ErrLoaderRejected]. An empty Root rejects every URI, so
-// file-system access is always an explicit opt-in.
+// file-system access is always an explicit opt-in. Only regular files are
+// read, through an [os.Root], and no larger than MaxSize.
 type FileLoader struct {
 	// Root is the directory file:// URIs resolve against. Required; an
 	// empty Root disables the loader entirely.
 	Root string
+	// MaxSize limits the size of a file the loader reads. Zero means 64 MiB;
+	// a negative value means no limit.
+	MaxSize int64
 }
 
 // Load implements [Loader].
@@ -121,7 +125,7 @@ func (l FileLoader) Load(uri string) ([]byte, error) {
 	if err != nil || rel3 == ".." || strings.HasPrefix(rel3, ".."+string(filepath.Separator)) {
 		return nil, &LoaderError{URI: uri, Cause: fmt.Errorf("%w: %w", errSymlinkEscapesRoot, ErrLoaderRejected)}
 	}
-	data, err := readFile(resolvedPath)
+	data, err := readFile(resolvedRoot, rel3, l.MaxSize)
 	if err != nil {
 		return nil, &LoaderError{URI: uri, Cause: err}
 	}

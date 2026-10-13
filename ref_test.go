@@ -7,6 +7,7 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"time"
 )
 
 func TestResolveURIAbsoluteRef(t *testing.T) {
@@ -324,7 +325,7 @@ func TestRefBillionLaughs(t *testing.T) {
 	}
 	res, err := schema.Validate([]byte(`"hi"`))
 	if err != nil {
-		if strings.Contains(err.Error(), "max ref depth") {
+		if errors.Is(err, ErrMaxEvaluations) {
 			return
 		}
 		t.Fatalf("validate: %v", err)
@@ -332,7 +333,7 @@ func TestRefBillionLaughs(t *testing.T) {
 	if res == nil {
 		t.Fatal("nil result")
 	}
-	// Either Valid:true (validation bounded) or a max-ref-depth error are
+	// Either Valid:true (validation bounded) or ErrMaxEvaluations is
 	// acceptable; the only failure mode is stack overflow / OOM.
 	_ = res
 }
@@ -554,20 +555,19 @@ func TestRefMaxDepthExceeded(t *testing.T) {
 	}
 }
 
-// TestDynamicRefMaxDepth covers the depth-limit branch on $dynamicRef.
+// TestDynamicRefMaxDepth covers the depth-limit branch on $dynamicRef: a
+// reference loop that never moves into the instance.
 func TestDynamicRefMaxDepth(t *testing.T) {
 	src := []byte(`{
 		"$id":"https://example.com/x",
 		"$dynamicAnchor":"loop",
-		"properties":{"x":{"$dynamicRef":"#loop"}}
+		"allOf":[{"$dynamicRef":"#loop"}]
 	}`)
 	s, err := Compile(src, WithMaxRefDepth(50))
 	if err != nil {
 		t.Fatalf("Compile: %v", err)
 	}
-	// Build a deeply nested instance.
-	deep := strings.Repeat(`{"x":`, 200) + `null` + strings.Repeat(`}`, 200)
-	res, err := s.Validate([]byte(deep))
+	res, err := s.Validate([]byte(`null`))
 	if err != nil {
 		t.Fatalf("Validate: %v", err)
 	}
@@ -998,5 +998,53 @@ func TestConcurrentLazyRefValidate(t *testing.T) {
 			t.Logf("worker=%d iter=%d case=%s expected=%v got=%v errs=%v",
 				m.worker, m.iter, m.caseName, m.expected, m.got, m.errs)
 		}
+	}
+}
+
+// TestMaxEvaluations checks that branching reference graphs stop with
+// ErrMaxEvaluations under the default budget, quickly and in bounded
+// memory, while ordinary large instances stay within it.
+func TestMaxEvaluations(t *testing.T) {
+	selfRef := MustCompile([]byte(`{"$defs":{"d":{"allOf":[{"$ref":"#/$defs/d"},{"$ref":"#/$defs/d"}]}},"$ref":"#/$defs/d"}`))
+	var b strings.Builder
+	b.WriteString(`{"$ref":"#/$defs/d0","$defs":{`)
+	for i := range 40 {
+		fmt.Fprintf(&b, `"d%d":{"allOf":[{"$ref":"#/$defs/d%d"},{"$ref":"#/$defs/d%d"}]},`, i, i+1, i+1)
+	}
+	b.WriteString(`"d40":{"type":"integer"}}}`)
+	dag := MustCompile([]byte(b.String()))
+	for name, s := range map[string]*Schema{"self": selfRef, "dag": dag} {
+		for _, inst := range []string{`1`, `"x"`} {
+			start := time.Now()
+			res, err := s.Validate([]byte(inst))
+			if !errors.Is(err, ErrMaxEvaluations) || res != nil {
+				t.Errorf("%s %s: res=%v err=%v; want ErrMaxEvaluations", name, inst, res, err)
+			}
+			if d := time.Since(start); d > 5*time.Second {
+				t.Errorf("%s %s: took %v", name, inst, d)
+			}
+		}
+	}
+
+	if _, err := dag.Validate([]byte(`"x"`), WithMaxEvaluations(-1), WithStopOnFirstError(true)); err != nil {
+		t.Errorf("unlimited: %v", err)
+	}
+	simple := MustCompile([]byte(`{"items":{"type":"integer"}}`))
+	if _, err := simple.Validate([]byte(`[1,2,3]`), WithMaxEvaluations(3)); !errors.Is(err, ErrMaxEvaluations) {
+		t.Errorf("cap 3: err=%v", err)
+	}
+	if res, err := simple.Validate([]byte(`[1,2,3]`), WithMaxEvaluations(4)); err != nil || !res.Valid {
+		t.Errorf("cap 4: res=%v err=%v", res, err)
+	}
+
+	// The default grows with the instance: 300,000 values, each checked
+	// through two references and several keywords, stay within it.
+	tree := MustCompile([]byte(`{"type":"array","items":{"$ref":"#/$defs/item"},"$defs":{"item":{"type":"object","properties":{"a":{"$ref":"#/$defs/n"},"b":{"$ref":"#/$defs/n"}}},"n":{"anyOf":[{"type":"string"},{"type":"integer","minimum":0}]}}}`))
+	items := make([]any, 100000)
+	for i := range items {
+		items[i] = map[string]any{"a": float64(i), "b": "x"}
+	}
+	if res, err := tree.ValidateValue(items); err != nil || !res.Valid {
+		t.Fatalf("large instance: err=%v", err)
 	}
 }

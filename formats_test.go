@@ -955,3 +955,71 @@ func TestFormatEmailAndIDN(t *testing.T) {
 		})
 	}
 }
+
+// TestHostnameIDNARules checks the IDNA label rules: Draft 4 and 6
+// hostnames follow RFC 1123 only; later drafts reserve "--" in the third
+// and fourth positions for A-labels, which must be canonical Punycode.
+func TestHostnameIDNARules(t *testing.T) {
+	for _, tc := range []struct {
+		draft  Draft
+		format string
+		s      string
+		valid  bool
+	}{
+		{Draft4, "hostname", "ab--cd.example", true},
+		{Draft6, "hostname", "ab--cd.example", true},
+		{Draft7, "hostname", "ab--cd.example", false},
+		{Draft202012, "hostname", "xn--X", false},
+		{Draft202012, "hostname", "xn--nxasmq6b.example", true},
+		{Draft202012, "hostname", "XN--nxasmq6b", true},
+		{Draft202012, "hostname", "xn---9uc", false},
+		{Draft202012, "hostname", "xn--hello-zed", false},
+		{Draft202012, "idn-hostname", "xn--X", false},
+		{Draft202012, "idn-hostname", "XN--aa---o47jg78q", false},
+		{Draft202012, "idn-hostname", "ab--cd", false},
+		{Draft202012, "idn-hostname", "例え.テスト", true},
+		{Draft202012, "idn-hostname", "例え。テスト", true},
+		{Draft202012, "idn-hostname", "example.", false},
+		{Draft202012, "idn-hostname", "。", false},
+		{Draft202012, "idn-hostname", "a​b", true},
+		{Draft202012, "idn-hostname", "ｘｎ--nxasmq6b", true},
+		{Draft202012, "idn-hostname", strings.Repeat("ü", 60), false},
+	} {
+		schema := MustCompile([]byte(`{"format":"`+tc.format+`"}`), WithDefaultDraft(tc.draft))
+		res, err := schema.ValidateValue(tc.s, WithFormatAssertion(true))
+		if err != nil || res.Valid != tc.valid {
+			t.Errorf("draft %v %s %q: valid=%v err=%v, want %v", tc.draft, tc.format, tc.s, res.Valid, err, tc.valid)
+		}
+	}
+}
+
+// TestPunycodeRoundTrip checks the Punycode decoder against RFC 3492
+// sample strings and its encoder.
+func TestPunycodeRoundTrip(t *testing.T) {
+	for enc, dec := range map[string]string{
+		"nxasmq6b":                 "βόλοσ",
+		"bcher-kva":                "bücher",
+		"-9uc":                     "",
+		"ihqwcrb4cv8a8dqg056pqjye": "他们为什么不说中文",
+		"mnchen-3ya":               "münchen",
+	} {
+		got, err := decodePunycode(enc)
+		if dec == "" {
+			if err == nil && encodePunycode(got) == enc {
+				t.Errorf("%s: decoded and re-encoded to itself", enc)
+			}
+			continue
+		}
+		if err != nil || got != dec {
+			t.Errorf("decode %s = %q, %v; want %q", enc, got, err, dec)
+		}
+		if e := encodePunycode(dec); e != enc {
+			t.Errorf("encode %q = %s; want %s", dec, e, enc)
+		}
+	}
+	for _, bad := range []string{"X", "999999999999", "a-é"} {
+		if _, err := decodePunycode(bad); err == nil {
+			t.Errorf("decode %q: no error", bad)
+		}
+	}
+}

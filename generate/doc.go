@@ -18,13 +18,17 @@
 //	intN, uintN                      {"type": "integer"} (with min/max on width)
 //	float32, float64                 {"type": "number"}
 //	string                           {"type": "string"}
-//	[]byte, [N]byte                  {"type": "string", "contentEncoding": "base64"}
-//	[]T, [N]T                        {"type": "array", "items": <T>}
-//	map[string]V                     {"type": "object", "additionalProperties": <V>}
+//	[]byte                           {"type": ["string", "null"], "contentEncoding": "base64"}
+//	[N]byte                          {"type": "string", "contentEncoding": "base64"}
+//	[]T                              {"type": ["array", "null"], "items": <T>}
+//	[N]T                             {"type": "array", "items": <T>}
+//	map[string]V                     {"type": ["object", "null"], "additionalProperties": <V>}
+//	map[int]V, map[uint]V            as map[string]V, with "propertyNames" a decimal pattern
+//	map[K]V, K a TextMarshaler       as map[string]V
 //	struct                           {"type": "object", "properties": {...}, "required": [...]}
 //	time.Time                        {"type": "string", "format": "date-time"}
 //	time.Duration                    {"type": "integer"} or "format": "duration" via [WithDurationAsString]
-//	*T                               <T> by default; anyOf:[null, T] under [WithNullablePointers]
+//	*T                               anyOf:[null, <T>]; see below and [WithNullablePointers]
 //	interface{} / any                {} by default; configurable via [WithInterfaceAsAny]
 //	json.Number                      {"type": ["number", "string"]}
 //	json.RawMessage                  {} (any)
@@ -32,6 +36,12 @@
 //	encoding.TextMarshaler           {"type": "string"} (non-struct types)
 //	json.Marshaler                   {} (non-struct types)
 //	chan / func / unsafe.Pointer     generation error
+//
+// A nil slice, map or pointer marshals to null, so those types also allow
+// null, except in a struct field tagged omitempty or omitzero, which leaves
+// a nil value out. The root type is not made nullable: Generate(&T{})
+// describes a T. A jsonschema tag's assertions on a pointer field apply to
+// the pointed-to value, so null still passes them.
 //
 // Self-referential and mutually recursive types are emitted via $defs entries
 // with internal $ref links. Custom emitters (registered via
@@ -43,7 +53,9 @@
 // Two tags drive schema generation:
 //
 //   - "json" — standard library semantics: property name, "omitempty"
-//     (excluded from "required"), and "-" (skipped).
+//     (excluded from "required"), "-" (skipped), and "string" (a string
+//     holding the value's JSON form). Fields of embedded structs are
+//     promoted, and name conflicts are settled, as encoding/json does.
 //   - "jsonschema" — schema-specific options.
 //
 // Example:

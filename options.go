@@ -67,9 +67,11 @@ func WithBaseURI(uri string) CompileOption {
 }
 
 // WithMaxRefDepth limits how many $ref, $dynamicRef and $recursiveRef hops
-// validation may nest. Exceeding it records a [ValidationError] for the
-// ref keyword with Cause [ErrMaxRefDepth]. Guards against
-// pathological recursive schemas. Default: 100.
+// validation may nest at one instance location. Exceeding it records a
+// [ValidationError] for the ref keyword with Cause [ErrMaxRefDepth]. It
+// stops reference loops that never move into the instance; the count
+// restarts at each child of the instance, so recursive schemas can follow
+// deep data, which [WithMaxValidationDepth] bounds instead. Default: 100.
 func WithMaxRefDepth(n int) CompileOption {
 	return func(o *compileOptions) {
 		o.maxRefDepth = n
@@ -137,6 +139,7 @@ type runOptions struct {
 	writeOnly           bool
 	collectAnnotations  bool
 	warningSink         io.Writer
+	maxEvaluations      int
 }
 
 // defaultRunOptions returns a freshly-initialized [*runOptions] with sensible
@@ -276,7 +279,22 @@ func WithWriteOnly(b bool) Option {
 
 // WithCollectAnnotations controls whether passing keyword annotations are
 // reported in [Result.Annotations]. Default: true. [WithStopOnFirstError]
-// suppresses them regardless.
+// suppresses them regardless. Without collection, anyOf stops at its first
+// passing branch unless an unevaluated* keyword needs the others, which
+// bounds the cost of deeply nested anyOf.
 func WithCollectAnnotations(b bool) Option {
 	return func(o *runOptions) { o.collectAnnotations = b }
+}
+
+// WithMaxEvaluations caps how many subschema evaluations one validation may
+// perform. A schema whose references branch, such as an allOf holding two
+// $refs back to itself, can otherwise need time exponential in its depth.
+// Each recorded error also counts, one evaluation per 32 bytes it holds, so
+// the cap bounds memory too. Exceeding the cap stops validation, which then
+// returns [ErrMaxEvaluations] and no [Result]. n > 0 sets the cap and n < 0
+// removes it. Default (0): 100 evaluations per value in the instance (every
+// object, array and scalar, decoded content included), and at least
+// 1,000,000.
+func WithMaxEvaluations(n int) Option {
+	return func(o *runOptions) { o.maxEvaluations = n }
 }

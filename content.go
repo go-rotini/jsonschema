@@ -4,7 +4,6 @@ import (
 	"encoding/base32"
 	"encoding/base64"
 	"encoding/hex"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -70,8 +69,8 @@ func (e *contentMediaTypeEval) eval(ctx *runCtx, instance any) {
 	if bytes == nil {
 		bytes = []byte(s)
 	}
-	var v any
-	if err := json.Unmarshal(bytes, &v); err != nil {
+	v, err := decodeSchemaBytes(bytes)
+	if err != nil {
 		ctx.addError(e.loc, "contentMediaType", "contentMediaType",
 			"value is not valid "+e.mediaType+": "+err.Error())
 		return
@@ -105,13 +104,14 @@ func (e *contentSchemaEval) eval(ctx *runCtx, instance any) {
 		_ = s
 		return
 	}
-	branch, annos := ctx.evaluateBranch(e.sub, parsed)
+	// The decoded content is a separate document: its annotations do not
+	// describe this instance, so they are not kept.
+	ctx.growEvalLimit(parsed)
+	branch, _ := ctx.evaluateBranch(e.sub, parsed)
 	if len(branch) > 0 {
 		ctx.addCausesError(e.loc, "contentSchema",
 			"decoded content does not validate against contentSchema", branch)
-		return
 	}
-	ctx.addBranchAnnotations(annos)
 }
 
 // errUnknownEncoding signals that contentEncoding named an unrecognized

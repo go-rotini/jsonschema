@@ -16,14 +16,15 @@
 //
 // The package targets [Draft 2020-12] as its primary draft and supports
 // older drafts via the schema's $schema keyword. Conformance against the
-// official JSON Schema Test Suite (main branch, optional tests excluded):
+// official JSON Schema Test Suite (at the commit pinned in the Makefile, optional
+// tests excluded):
 //
-//	Draft        Mode               Test-suite pass rate
-//	Draft 4      read-only          610 / 618  (98.7%)
-//	Draft 6      read-only          835 / 841  (99.3%)
-//	Draft 7      read-only          923 / 929  (99.4%)
-//	Draft 2019-09  read-only        1249 / 1261 (99.0%)
-//	Draft 2020-12  read + write     1284 / 1301 (98.7%)  ← primary target
+//	Draft          Mode           Test-suite pass rate
+//	Draft 4        read-only      618 / 618   (100%)
+//	Draft 6        read-only      841 / 841   (100%)
+//	Draft 7        read-only      929 / 929   (100%)
+//	Draft 2019-09  read-only      1261 / 1261 (100%)
+//	Draft 2020-12  read + write   1301 / 1301 (100%)  ← primary target
 //
 // "Read-only" means the package compiles and validates schemas authored
 // against that draft; the schema generator in the generate subpackage
@@ -157,6 +158,10 @@
 //   - [WithMaxInstanceSize] (alias [WithMaxDocumentSize]) caps instance
 //     bytes before parsing.
 //   - [WithMaxKeyCount] caps the number of keys visited on one object.
+//   - [WithMaxEvaluations] caps the subschema evaluations of one
+//     validation (by default 100 per instance value, at least 1,000,000),
+//     so references that branch back on themselves cannot take
+//     exponential time; exceeding it returns [ErrMaxEvaluations].
 //   - The compiler turns $ref cycles into lazy edges that are followed at
 //     validation time, bounded by [WithMaxRefDepth], so they cannot
 //     overflow the stack.

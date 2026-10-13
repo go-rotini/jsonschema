@@ -19,6 +19,7 @@ type options struct {
 	omitDescriptions          bool
 	durationAsString          bool
 	nullablePointers          bool
+	nullablePointersSet       bool
 	orderedProperties         bool
 	additionalPropertiesFalse bool
 	emitSchemaDeclaration     bool
@@ -63,9 +64,17 @@ func WithDurationAsString(b bool) Option {
 	return func(o *options) { o.durationAsString = b }
 }
 
-// WithNullablePointers emits *T as anyOf:[null, T]. Default: false.
+// WithNullablePointers sets how *T is emitted for every pointer, root
+// type and omitempty fields included: true emits anyOf:[null, <T>] and
+// false emits <T>. Without this option a pointer allows null where
+// encoding/json can write one: everywhere except the root type and a
+// struct field tagged omitempty or omitzero, which leaves a nil pointer
+// out.
 func WithNullablePointers(b bool) Option {
-	return func(o *options) { o.nullablePointers = b }
+	return func(o *options) {
+		o.nullablePointers = b
+		o.nullablePointersSet = true
+	}
 }
 
 // WithOrderedProperties controls whether emitted struct schemas

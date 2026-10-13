@@ -15,24 +15,25 @@ import (
 type typeEval struct {
 	loc     string
 	allowed []string
+	// draft4 selects Draft 4's integer rule (see isDraft4Integer).
+	draft4 bool
 }
 
 func (e *typeEval) keyword() string { return "type" }
 
 func (e *typeEval) eval(ctx *runCtx, instance any) {
-	if matchesAnyType(instance, e.allowed) {
-		return
-	}
-	ctx.addError(e.loc, "type", "", fmt.Sprintf("value is not of type %s", strings.Join(e.allowed, "/")))
-}
-
-func matchesAnyType(v any, allowed []string) bool {
-	for _, t := range allowed {
-		if matchesType(v, t) {
-			return true
+	for _, t := range e.allowed {
+		if t == "integer" && e.draft4 {
+			if isDraft4Integer(instance) {
+				return
+			}
+			continue
+		}
+		if matchesType(instance, t) {
+			return
 		}
 	}
-	return false
+	ctx.addError(e.loc, "type", "", fmt.Sprintf("value is not of type %s", strings.Join(e.allowed, "/")))
 }
 
 func matchesType(v any, t string) bool {
@@ -59,37 +60,42 @@ func matchesType(v any, t string) bool {
 	return false
 }
 
+// isJSONNumber reports whether v is one of the Go types that hold a JSON
+// number: float64, float32, [Number], every integer kind and a non-nil
+// *[big.Int].
 func isJSONNumber(v any) bool {
-	switch v.(type) {
-	case json.Number, float64, int, int64, int32:
+	switch n := v.(type) {
+	case json.Number, float64, float32,
+		int, int8, int16, int32, int64,
+		uint, uint8, uint16, uint32, uint64:
 		return true
+	case *big.Int:
+		return n != nil
 	}
 	return false
 }
 
+// isJSONInteger reports whether v is a number with no fractional part (1.0
+// counts).
 func isJSONInteger(v any) bool {
-	switch n := v.(type) {
-	case json.Number:
-		s := string(n)
-		// Integer = number with no fractional part (1.0 counts).
-		r := new(big.Rat)
-		if _, ok := r.SetString(s); !ok {
-			return false
-		}
-		return r.IsInt()
-	case float64:
-		return !math.IsNaN(n) && !math.IsInf(n, 0) && n == math.Trunc(n)
-	case int, int64, int32:
-		return true
+	d, ok := parseNumber(v)
+	return ok && d.isInteger()
+}
+
+// isDraft4Integer applies Draft 4's stricter rule: number text with a
+// fraction or exponent part is not an integer, even when its value is.
+func isDraft4Integer(v any) bool {
+	if n, ok := v.(json.Number); ok && strings.ContainsAny(string(n), ".eE") {
+		return false
 	}
-	return false
+	return isJSONInteger(v)
 }
 
 func registerTypeKeyword() {
 	registerEvaluator("type", buildType)
 }
 
-func buildType(_ *evalBuilder, _ *buildFrame, raw any, loc string) (evaluator, error) {
+func buildType(_ *evalBuilder, f *buildFrame, raw any, loc string) (evaluator, error) {
 	var allowed []string
 	switch t := raw.(type) {
 	case string:
@@ -103,7 +109,7 @@ func buildType(_ *evalBuilder, _ *buildFrame, raw any, loc string) (evaluator, e
 	default:
 		return nil, &CompileError{KeywordLocation: loc, Message: "type must be a string or array of strings"}
 	}
-	return &typeEval{loc: loc, allowed: allowed}, nil
+	return &typeEval{loc: loc, allowed: allowed, draft4: f != nil && f.draft == Draft4}, nil
 }
 
 type enumEval struct {
@@ -149,13 +155,13 @@ func registerEnumConstKeywords() {
 }
 
 // canonicalEqual reports whether a and b represent the same JSON value.
-// Numbers compare by big.Rat so 1 == 1.0 == "1.0".
+// Numbers compare by value, so 1 == 1.0 == 1e0.
 func canonicalEqual(a, b any) bool {
 	if isJSONNumber(a) && isJSONNumber(b) {
-		ra, oka := numberToRat(a)
-		rb, okb := numberToRat(b)
+		da, oka := parseNumber(a)
+		db, okb := parseNumber(b)
 		if oka && okb {
-			return ra.Cmp(rb) == 0
+			return da.equal(db)
 		}
 	}
 	if a == nil && b == nil {
@@ -201,42 +207,18 @@ func canonicalEqual(a, b any) bool {
 	return reflect.DeepEqual(a, b)
 }
 
-// numberToRat converts a JSON number value into a *big.Rat.
-func numberToRat(v any) (*big.Rat, bool) {
-	switch n := v.(type) {
-	case json.Number:
-		r := new(big.Rat)
-		if _, ok := r.SetString(string(n)); ok {
-			return r, true
-		}
-		if i, err := n.Int64(); err == nil {
-			return new(big.Rat).SetInt64(i), true
-		}
-		if f, err := n.Float64(); err == nil {
-			r := new(big.Rat)
-			r.SetFloat64(f)
-			return r, true
-		}
-	case float64:
-		if math.IsNaN(n) || math.IsInf(n, 0) {
-			return nil, false
-		}
-		r := new(big.Rat)
-		r.SetFloat64(n)
-		return r, true
-	case int:
-		return new(big.Rat).SetInt64(int64(n)), true
-	case int64:
-		return new(big.Rat).SetInt64(n), true
-	case int32:
-		return new(big.Rat).SetInt64(int64(n)), true
+// numberText returns the source text of a schema number for messages.
+func numberText(v any) string {
+	if n, ok := v.(json.Number); ok {
+		return string(n)
 	}
-	return nil, false
+	return fmt.Sprint(v)
 }
 
 type multipleOfEval struct {
-	loc string
-	val *big.Rat
+	loc  string
+	val  divisor
+	text string
 }
 
 func (e *multipleOfEval) keyword() string { return "multipleOf" }
@@ -245,20 +227,25 @@ func (e *multipleOfEval) eval(ctx *runCtx, instance any) {
 	if !isJSONNumber(instance) {
 		return
 	}
-	r, ok := numberToRat(instance)
+	x, ok := parseNumber(instance)
 	if !ok {
+		ctx.addError(e.loc, "multipleOf", "", "value is not a valid number")
 		return
 	}
-	q := new(big.Rat).Quo(r, e.val)
-	if !q.IsInt() {
-		ctx.addError(e.loc, "multipleOf", "", fmt.Sprintf("value is not a multiple of %s", e.val.RatString()))
+	multiple, ok := e.val.divides(x)
+	switch {
+	case !ok:
+		ctx.addError(e.loc, "multipleOf", "", fmt.Sprintf("value cannot be checked as a multiple of %s", e.text))
+	case !multiple:
+		ctx.addError(e.loc, "multipleOf", "", fmt.Sprintf("value is not a multiple of %s", e.text))
 	}
 }
 
 type rangeEval struct {
 	loc       string
 	kw        string
-	val       *big.Rat
+	val       decimal
+	text      string
 	exclusive bool
 	upper     bool // true for max{,Exclusive}; false for min{,Exclusive}
 }
@@ -269,78 +256,93 @@ func (e *rangeEval) eval(ctx *runCtx, instance any) {
 	if !isJSONNumber(instance) {
 		return
 	}
-	r, ok := numberToRat(instance)
+	x, ok := parseNumber(instance)
 	if !ok {
+		ctx.addError(e.loc, e.kw, "", "value is not a valid number")
 		return
 	}
-	cmp := r.Cmp(e.val)
+	cmp, ok := x.cmp(e.val)
+	if !ok {
+		ctx.addError(e.loc, e.kw, "", fmt.Sprintf("value cannot be compared with %s", e.text))
+		return
+	}
 	if e.upper {
 		if e.exclusive {
 			if cmp >= 0 {
-				ctx.addError(e.loc, e.kw, "", fmt.Sprintf("value must be < %s", e.val.RatString()))
+				ctx.addError(e.loc, e.kw, "", fmt.Sprintf("value must be < %s", e.text))
 			}
 		} else if cmp > 0 {
-			ctx.addError(e.loc, e.kw, "", fmt.Sprintf("value must be <= %s", e.val.RatString()))
+			ctx.addError(e.loc, e.kw, "", fmt.Sprintf("value must be <= %s", e.text))
 		}
 	} else {
 		if e.exclusive {
 			if cmp <= 0 {
-				ctx.addError(e.loc, e.kw, "", fmt.Sprintf("value must be > %s", e.val.RatString()))
+				ctx.addError(e.loc, e.kw, "", fmt.Sprintf("value must be > %s", e.text))
 			}
 		} else if cmp < 0 {
-			ctx.addError(e.loc, e.kw, "", fmt.Sprintf("value must be >= %s", e.val.RatString()))
+			ctx.addError(e.loc, e.kw, "", fmt.Sprintf("value must be >= %s", e.text))
 		}
+	}
+}
+
+// schemaNumber parses a numeric keyword value, rejecting NaN and infinities.
+func schemaNumber(raw any) (decimal, bool) {
+	d, ok := parseNumber(raw)
+	if !ok || d.nan || d.inf {
+		return decimal{}, false
+	}
+	return d, true
+}
+
+// buildRange returns the builder for maximum or minimum. In Draft 4 a
+// sibling "exclusiveMaximum": true (or "exclusiveMinimum": true) makes the
+// bound exclusive.
+func buildRange(kw, exclusiveKw string, upper bool) builderFn {
+	return func(_ *evalBuilder, f *buildFrame, raw any, loc string) (evaluator, error) {
+		d, ok := schemaNumber(raw)
+		if !ok {
+			return nil, &CompileError{KeywordLocation: loc, Message: kw + " must be a number"}
+		}
+		exclusive := false
+		if parent, ok := f.parent.(map[string]any); ok && f.draft <= Draft4 {
+			exclusive, _ = parent[exclusiveKw].(bool)
+		}
+		return &rangeEval{loc: loc, kw: kw, val: d, text: numberText(raw), upper: upper, exclusive: exclusive}, nil
+	}
+}
+
+// buildExclusiveRange returns the builder for exclusiveMaximum or
+// exclusiveMinimum. The Draft 4 boolean form only modifies the sibling
+// maximum or minimum, so it has no evaluator of its own.
+func buildExclusiveRange(kw string, upper bool) builderFn {
+	return func(_ *evalBuilder, f *buildFrame, raw any, loc string) (evaluator, error) {
+		if _, ok := raw.(bool); ok && f.draft <= Draft4 {
+			// The Draft 4 boolean form is applied by the maximum / minimum builder.
+			return nil, nil
+		}
+		d, ok := schemaNumber(raw)
+		if !ok {
+			return nil, &CompileError{KeywordLocation: loc, Message: kw + " must be a number"}
+		}
+		return &rangeEval{loc: loc, kw: kw, val: d, text: numberText(raw), upper: upper, exclusive: true}, nil
 	}
 }
 
 func registerNumericKeywords() {
 	registerEvaluator("multipleOf", func(_ *evalBuilder, _ *buildFrame, raw any, loc string) (evaluator, error) {
-		r, ok := numberToRat(raw)
-		if !ok {
+		d, ok := schemaNumber(raw)
+		if !ok || d.huge != 0 {
 			return nil, &CompileError{KeywordLocation: loc, Message: "multipleOf must be a number"}
 		}
-		if r.Sign() <= 0 {
+		if d.sign() <= 0 {
 			return nil, &CompileError{KeywordLocation: loc, Message: "multipleOf must be > 0"}
 		}
-		return &multipleOfEval{loc: loc, val: r}, nil
+		return &multipleOfEval{loc: loc, val: newDivisor(d), text: numberText(raw)}, nil
 	})
-	registerEvaluator("maximum", func(_ *evalBuilder, _ *buildFrame, raw any, loc string) (evaluator, error) {
-		r, ok := numberToRat(raw)
-		if !ok {
-			return nil, &CompileError{KeywordLocation: loc, Message: "maximum must be a number"}
-		}
-		return &rangeEval{loc: loc, kw: "maximum", val: r, upper: true}, nil
-	})
-	registerEvaluator("minimum", func(_ *evalBuilder, _ *buildFrame, raw any, loc string) (evaluator, error) {
-		r, ok := numberToRat(raw)
-		if !ok {
-			return nil, &CompileError{KeywordLocation: loc, Message: "minimum must be a number"}
-		}
-		return &rangeEval{loc: loc, kw: "minimum", val: r, upper: false}, nil
-	})
-	registerEvaluator("exclusiveMaximum", func(_ *evalBuilder, f *buildFrame, raw any, loc string) (evaluator, error) {
-		// Draft 4 spelled this as a boolean paired with maximum; later
-		// drafts make it a number. The Draft-4 form is folded into the
-		// maximum evaluator, leaving this entry as a no-op.
-		if _, ok := raw.(bool); ok && f.draft <= Draft4 {
-			return nil, nil //nolint:nilnil // Draft 4 boolean form is folded into maximumEval; no standalone evaluator.
-		}
-		r, ok := numberToRat(raw)
-		if !ok {
-			return nil, &CompileError{KeywordLocation: loc, Message: "exclusiveMaximum must be a number"}
-		}
-		return &rangeEval{loc: loc, kw: "exclusiveMaximum", val: r, upper: true, exclusive: true}, nil
-	})
-	registerEvaluator("exclusiveMinimum", func(_ *evalBuilder, f *buildFrame, raw any, loc string) (evaluator, error) {
-		if _, ok := raw.(bool); ok && f.draft <= Draft4 {
-			return nil, nil //nolint:nilnil // Draft 4 boolean form is folded into minimumEval; no standalone evaluator.
-		}
-		r, ok := numberToRat(raw)
-		if !ok {
-			return nil, &CompileError{KeywordLocation: loc, Message: "exclusiveMinimum must be a number"}
-		}
-		return &rangeEval{loc: loc, kw: "exclusiveMinimum", val: r, upper: false, exclusive: true}, nil
-	})
+	registerEvaluator("maximum", buildRange("maximum", "exclusiveMaximum", true))
+	registerEvaluator("minimum", buildRange("minimum", "exclusiveMinimum", false))
+	registerEvaluator("exclusiveMaximum", buildExclusiveRange("exclusiveMaximum", true))
+	registerEvaluator("exclusiveMinimum", buildExclusiveRange("exclusiveMinimum", false))
 }
 
 type lengthEval struct {
@@ -404,7 +406,7 @@ func registerStringKeywords() {
 		if !ok {
 			return nil, &CompileError{KeywordLocation: loc, Message: "pattern must be a string"}
 		}
-		re, err := regexp.Compile(translateECMA(s))
+		re, err := compileECMA(s)
 		if err != nil {
 			return nil, &CompileError{KeywordLocation: loc, Message: "invalid pattern", Cause: err}
 		}
@@ -412,34 +414,33 @@ func registerStringKeywords() {
 	})
 }
 
-// translateECMA maps an ECMA-262 regex source to its Go RE2 equivalent.
-// Most patterns map directly; this is a placeholder for future escapes
-// and character-class translations that need rewriting.
-func translateECMA(p string) string {
-	return p
-}
-
+// toInt converts an integral JSON number to an int. Values beyond the int
+// range are clamped to math.MaxInt or math.MinInt: as a length or count
+// bound no instance can reach them, so the clamp keeps their meaning.
 func toInt(raw any) (int, bool) {
-	switch v := raw.(type) {
-	case json.Number:
-		if i, err := v.Int64(); err == nil {
-			return int(i), true
-		}
-		if f, err := v.Float64(); err == nil {
-			if f == math.Trunc(f) && !math.IsInf(f, 0) {
-				return int(f), true
-			}
-		}
-	case int:
-		return v, true
-	case int64:
-		return int(v), true
-	case float64:
-		if v == math.Trunc(v) && !math.IsInf(v, 0) {
-			return int(v), true
-		}
+	d, ok := parseNumber(raw)
+	if !ok || !d.isInteger() {
+		return 0, false
 	}
-	return 0, false
+	if d.isZero() {
+		return 0, true
+	}
+	limit := math.MaxInt
+	if d.neg {
+		limit = math.MinInt
+	}
+	if d.huge != 0 || d.exp+int64(len(d.digits)) > 19 {
+		return limit, true
+	}
+	text := d.digits + strings.Repeat("0", int(d.exp))
+	if d.neg {
+		text = "-" + text
+	}
+	n, err := strconv.ParseInt(text, 10, strconv.IntSize)
+	if err != nil {
+		return limit, true
+	}
+	return int(n), true
 }
 
 type itemsCountEval struct {
@@ -480,14 +481,116 @@ func (e *uniqueItemsEval) eval(ctx *runCtx, instance any) {
 	if !ok {
 		return
 	}
-	for i := range arr {
-		for j := i + 1; j < len(arr); j++ {
+	if i, j, dup := firstDuplicate(arr); dup {
+		ctx.addError(e.loc, "uniqueItems", "", fmt.Sprintf("array items %d and %d are not unique", i, j))
+	}
+}
+
+// firstDuplicate returns the first pair i < j, in (i, j) order, of equal
+// items in arr. Items are compared through their canonical keys, so the
+// cost is linear in the size of arr. Only items holding a Go type outside
+// the JSON value shapes have no key; such an item can equal only another
+// one like it, so those few are compared with each other pairwise.
+func firstDuplicate(arr []any) (int, int, bool) {
+	first := make(map[string]int, len(arr))
+	bi, bj := -1, -1
+	var sb strings.Builder
+	var unkeyed []int
+	nan := 0
+	for j, item := range arr {
+		sb.Reset()
+		if !canonicalKey(&sb, item, &nan) {
+			unkeyed = append(unkeyed, j)
+			continue
+		}
+		k := sb.String()
+		i, seen := first[k]
+		if !seen {
+			first[k] = j
+			continue
+		}
+		// For a given i the first j found is the smallest.
+		if bi < 0 || i < bi {
+			bi, bj = i, j
+		}
+	}
+	for x, i := range unkeyed {
+		if bi >= 0 && i > bi {
+			break
+		}
+		for _, j := range unkeyed[x+1:] {
 			if canonicalEqual(arr[i], arr[j]) {
-				ctx.addError(e.loc, "uniqueItems", "", fmt.Sprintf("array items %d and %d are not unique", i, j))
-				return
+				return i, j, true
 			}
 		}
 	}
+	return bi, bj, bi >= 0
+}
+
+// canonicalKey writes a key for v to sb such that two values have the same
+// key exactly when [canonicalEqual] holds. NaN equals nothing, so each NaN
+// gets a key of its own, numbered through nan. It reports false for a Go
+// type outside the JSON value shapes.
+func canonicalKey(sb *strings.Builder, v any, nan *int) bool {
+	switch t := v.(type) {
+	case nil:
+		sb.WriteByte('z')
+	case bool:
+		if t {
+			sb.WriteByte('t')
+		} else {
+			sb.WriteByte('f')
+		}
+	case string:
+		sb.WriteByte('s')
+		sb.WriteString(strconv.Itoa(len(t)))
+		sb.WriteByte(':')
+		sb.WriteString(t)
+	case []any:
+		sb.WriteByte('[')
+		for _, item := range t {
+			if !canonicalKey(sb, item, nan) {
+				return false
+			}
+		}
+		sb.WriteByte(']')
+	case map[string]any:
+		sb.WriteByte('{')
+		for _, k := range orderKeys(t) {
+			sb.WriteString(strconv.Itoa(len(k)))
+			sb.WriteByte(':')
+			sb.WriteString(k)
+			if !canonicalKey(sb, t[k], nan) {
+				return false
+			}
+		}
+		sb.WriteByte('}')
+	default:
+		if !isJSONNumber(t) {
+			return false
+		}
+		d, ok := parseNumber(t)
+		switch {
+		case !ok:
+			// Number text that does not parse equals only the same text.
+			n, _ := t.(json.Number)
+			s := string(n)
+			sb.WriteByte('u')
+			sb.WriteString(strconv.Itoa(len(s)))
+			sb.WriteByte(':')
+			sb.WriteString(s)
+		case d.nan:
+			sb.WriteByte('N')
+			sb.WriteString(strconv.Itoa(*nan))
+			sb.WriteByte(';')
+			*nan++
+		default:
+			sb.WriteByte('n')
+			d.key(sb)
+			sb.WriteByte(';')
+		}
+	}
+	return true
 }
 
 func registerArrayKeywords() {
@@ -577,6 +680,7 @@ func (e *requiredEval) eval(ctx *runCtx, instance any) {
 
 type dependentRequiredEval struct {
 	loc  string
+	keys []string // sorted, so errors come in a stable order
 	deps map[string][]string
 }
 
@@ -587,11 +691,11 @@ func (e *dependentRequiredEval) eval(ctx *runCtx, instance any) {
 	if !ok {
 		return
 	}
-	for k, required := range e.deps {
+	for _, k := range e.keys {
 		if _, present := obj[k]; !present {
 			continue
 		}
-		for _, r := range required {
+		for _, r := range e.deps[k] {
 			if _, p := obj[r]; !p {
 				ctx.addError(e.loc, "dependentRequired", "", fmt.Sprintf("property %q requires %q", k, r))
 			}
@@ -651,7 +755,7 @@ func registerObjectKeywords() {
 			}
 			deps[k] = vals
 		}
-		return &dependentRequiredEval{loc: loc, deps: deps}, nil
+		return &dependentRequiredEval{loc: loc, keys: orderKeys(m), deps: deps}, nil
 	})
 }
 

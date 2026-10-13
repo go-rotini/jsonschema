@@ -1,6 +1,9 @@
 package jsonschema
 
 import (
+	"math/big"
+	"regexp"
+	"strings"
 	"testing"
 )
 
@@ -137,4 +140,90 @@ var fuzzSeedCorpus = [][]byte{
 	[]byte(`{"$schema":"https://json-schema.org/draft/2020-12/schema","type":"string","anyOf":[{"maxLength":2},{"minLength":4}]}`),                                                                                                                                  // anyOf :: with base
 	[]byte(`{"$schema":"https://json-schema.org/draft/2020-12/schema","$ref":"http://localhost:1234/draft2020-12/integer.json"}`),                                                                                                                                   // refRemote :: remote ref
 	[]byte(`{"$schema":"https://json-schema.org/draft/2020-12/schema","$ref":"http://localhost:1234/draft2020-12/subSchemas.json#/$defs/integer"}`),                                                                                                                 // refRemote :: fragment within remote
+}
+
+// FuzzDecimal checks the exact decimal arithmetic against math/big.Rat:
+// ordering, equality keys, integer tests and multipleOf divisibility must
+// agree for every pair of numbers both parse.
+func FuzzDecimal(f *testing.F) {
+	for _, s := range [][2]string{{"0.1", "1e-1"}, {"-0", "0"}, {"12.5e3", "1.25e4"}, {"3", "0.3e1"},
+		{"7.0", "0.5"}, {"100", "2.5"}, {"1e-20", "1e-21"}, {"390625", "0.0016"}, {"18446744073709551615", "5"}} {
+		f.Add(s[0], s[1])
+	}
+	f.Fuzz(func(t *testing.T, a, b string) {
+		if len(a) > 60 || len(b) > 60 {
+			return
+		}
+		ra, okA := new(big.Rat).SetString(a)
+		rb, okB := new(big.Rat).SetString(b)
+		da, okDA := parseDecimal(a)
+		db, okDB := parseDecimal(b)
+		if !okA || !okB || !okDA || !okDB || da.nan || db.nan || da.inf || db.inf {
+			return
+		}
+		if c, ok := da.cmp(db); !ok || c != ra.Cmp(rb) {
+			t.Fatalf("cmp(%q, %q) = %d, %v; want %d", a, b, c, ok, ra.Cmp(rb))
+		}
+		var ka, kb strings.Builder
+		da.key(&ka)
+		db.key(&kb)
+		if (ka.String() == kb.String()) != (ra.Cmp(rb) == 0) {
+			t.Fatalf("keys of %q and %q: %q, %q", a, b, ka.String(), kb.String())
+		}
+		if da.isInteger() != ra.IsInt() {
+			t.Fatalf("isInteger(%q) = %v", a, da.isInteger())
+		}
+		if rb.Sign() > 0 {
+			want := new(big.Rat).Quo(ra, rb).IsInt()
+			if got, ok := newDivisor(db).divides(da); !ok || got != want {
+				t.Fatalf("divides(%q, %q) = %v, %v; want %v", a, b, got, ok, want)
+			}
+		}
+	})
+}
+
+// FuzzTranslateECMA checks that translating any pattern never panics, and
+// that a translation the regex format accepts is one RE2 compiles once its
+// placeholders stand in for the constructs RE2 cannot run.
+func FuzzTranslateECMA(f *testing.F) {
+	for _, s := range []string{`^\d+$`, `[\S\s]`, `(?<n>a)\k<n>`, `(?=a)b`, `\u{1F600}`, `[^\S]`, `\cA\x41A`, `a{2,1}`, `[\b]`} {
+		f.Add(s)
+	}
+	f.Fuzz(func(t *testing.T, p string) {
+		if re, err := compileECMA(p); err == nil && re == nil {
+			t.Fatalf("compileECMA(%q) returned neither a regexp nor an error", p)
+		}
+		if validateRegex(p) != nil {
+			return
+		}
+		tr, err := translateECMAAll(p)
+		if err != nil {
+			t.Fatalf("validateRegex accepted %q, which does not translate: %v", p, err)
+		}
+		if _, err := regexp.Compile(tr.out.String()); err != nil {
+			t.Fatalf("validateRegex accepted %q, whose translation %q RE2 rejects: %v", p, tr.out.String(), err)
+		}
+	})
+}
+
+// FuzzValidateYAML and FuzzValidateTOML check that decoding any YAML or
+// TOML instance for validation returns a result or an error, never a panic.
+func FuzzValidateYAML(f *testing.F) {
+	for _, s := range []string{"a: 1\n", "a: &x [1, *x]\n", "a: &x 1\nb: *x\nc: &x 2\nd: *x\n", "- .nan\n- 1e400\n", "<<: {a: 1}\n"} {
+		f.Add(s)
+	}
+	s := MustCompile([]byte(`{"uniqueItems":true,"items":{"multipleOf":0.5},"additionalProperties":{"maximum":10}}`))
+	f.Fuzz(func(t *testing.T, doc string) {
+		_, _ = ValidateYAML(s, []byte(doc))
+	})
+}
+
+func FuzzValidateTOML(f *testing.F) {
+	for _, s := range []string{"a = 1\n", "a = [nan, 1, inf]\n", "[t]\nx = 1979-05-27T07:32:00Z\n", "a = 0x10\nb = 1e400\n"} {
+		f.Add(s)
+	}
+	s := MustCompile([]byte(`{"additionalProperties":{"uniqueItems":true,"maximum":10,"multipleOf":0.5}}`))
+	f.Fuzz(func(t *testing.T, doc string) {
+		_, _ = ValidateTOML(s, []byte(doc))
+	})
 }
