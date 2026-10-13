@@ -22,6 +22,7 @@ type compileOptions struct {
 	metaSchemaValidation bool
 	refCollisionPolicy   RefCollisionPolicy
 	loaderTrace          io.Writer
+	maxEvaluations       int
 	defaultDraftSet      bool
 	loaderSet            bool
 	maxRefDepthSet       bool
@@ -116,6 +117,15 @@ func WithRefCollisionPolicy(p RefCollisionPolicy) CompileOption {
 // diagnosing $ref resolution. Default: nil (no trace).
 func WithLoaderTrace(w io.Writer) CompileOption {
 	return func(o *compileOptions) { o.loaderTrace = w }
+}
+
+// WithDefaultMaxEvaluations sets the evaluation cap for validations of the
+// compiled schema that do not pass [WithMaxEvaluations]; n has the same
+// meaning as there. It lets the schema's owner set the cap once, for
+// callers that validate without options. Default (0): the automatic cap
+// [WithMaxEvaluations] describes.
+func WithDefaultMaxEvaluations(n int) CompileOption {
+	return func(o *compileOptions) { o.maxEvaluations = n }
 }
 
 // Option configures a single validation call. Pass options to the [*Schema]
@@ -291,10 +301,15 @@ func WithCollectAnnotations(b bool) Option {
 // $refs back to itself, can otherwise need time exponential in its depth.
 // Each recorded error also counts, one evaluation per 32 bytes it holds, so
 // the cap bounds memory too. Exceeding the cap stops validation, which then
-// returns [ErrMaxEvaluations] and no [Result]. n > 0 sets the cap and n < 0
-// removes it. Default (0): 100 evaluations per value in the instance (every
-// object, array and scalar, decoded content included), and at least
-// 1,000,000.
+// returns [ErrMaxEvaluations] and no [Result]. Errors that a passing anyOf
+// or oneOf discards do not count. n > 0 sets the cap and n < 0 removes it.
+// Default (0): the cap set by [WithDefaultMaxEvaluations] when the schema
+// was compiled with one; otherwise, for each value in the instance (every
+// object, array and scalar, decoded content included), as many evaluations
+// as the compiled schema has subschemas and at least 100, and in all at
+// least 1,000,000. That covers validation that evaluates each subschema
+// about once per value, however wide its unions, and stops schemas whose
+// references multiply the work.
 func WithMaxEvaluations(n int) Option {
 	return func(o *runOptions) { o.maxEvaluations = n }
 }

@@ -1023,3 +1023,58 @@ func TestPunycodeRoundTrip(t *testing.T) {
 		}
 	}
 }
+
+// TestULabelLengthWithoutEncoding checks that a U-label too long for any
+// A-label is rejected without Punycode-encoding it, and that labels near
+// the limit keep their result.
+func TestULabelLengthWithoutEncoding(t *testing.T) {
+	long := strings.Repeat("中", 1000)
+	if err := checkULabel(long); !errors.Is(err, errLabelLength) {
+		t.Fatalf("err = %v", err)
+	}
+	if n := testing.AllocsPerRun(10, func() { _ = checkULabel(long) }); n > 1 {
+		t.Errorf("%v allocations: the label was encoded", n)
+	}
+	for n := 50; n <= 70; n++ {
+		for _, lbl := range []string{strings.Repeat("ü", n), "a" + strings.Repeat("ü", n-1)} {
+			want := 4+len(encodePunycode(lbl)) > 63
+			if got := errors.Is(checkULabel(lbl), errLabelLength); got != want {
+				t.Errorf("%d runes: too long = %v, want %v", n, got, want)
+			}
+		}
+	}
+}
+
+// TestHostnameContextO checks the RFC 5892 CONTEXTO rules in hostname
+// and idn-hostname.
+func TestHostnameContextO(t *testing.T) {
+	cases := []struct {
+		format, value string
+		want          bool
+	}{
+		{"idn-hostname", "l·l", true},
+		{"idn-hostname", "a·l", false},
+		{"idn-hostname", "α͵β", true},
+		{"idn-hostname", "α͵S", false},
+		{"idn-hostname", "א׳ב", true},
+		{"idn-hostname", "A״ב", false},
+		{"idn-hostname", "・ぁ", true},
+		{"idn-hostname", "def・abc", false},
+		{"idn-hostname", "ب٠ب", true},
+		{"idn-hostname", "ب٠۰", false},
+		{"idn-hostname", "ب٠.ب۰", true},
+		{"hostname", "xn--ll-0ea", true},
+		{"hostname", "xn--al-0ea", false},
+		{"hostname", "xn--vek", false},
+	}
+	for _, tc := range cases {
+		s := MustCompile([]byte(`{"format":"` + tc.format + `"}`))
+		res, err := s.Validate([]byte(jsonString(tc.value)), WithFormatAssertion(true))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if res.Valid != tc.want {
+			t.Errorf("%s %q: valid=%v, want %v", tc.format, tc.value, res.Valid, tc.want)
+		}
+	}
+}

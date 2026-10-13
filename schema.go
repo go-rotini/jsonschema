@@ -35,6 +35,9 @@ type Schema struct {
 	// compileOpts carries the options the schema was compiled with.
 	// Validation re-uses the loader and ref-depth limits stored here.
 	compileOpts *compileOptions
+	// subschemas is the number of subschemas Compile built; it scales the
+	// default evaluation cap.
+	subschemas int
 }
 
 // Draft returns the draft this schema was compiled against.

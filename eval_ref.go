@@ -20,6 +20,9 @@ type refEval struct {
 	// sub is the built target, set by Compile before the schema is
 	// returned and read without locking from then on.
 	sub *subschema
+	// err is why Compile could not resolve or build the target. It is
+	// reported when an instance reaches the reference.
+	err error
 }
 
 func (e *refEval) keyword() string { return "$ref" }
@@ -43,6 +46,10 @@ func enterRef(ctx *runCtx, kw, loc string) bool {
 func (e *refEval) eval(ctx *runCtx, instance any) {
 	defer func() { ctx.refDepth-- }()
 	if !enterRef(ctx, "$ref", e.loc) {
+		return
+	}
+	if e.err != nil {
+		ctx.addErrorWithCause(e.loc, "$ref", "", e.err.Error(), e.err)
 		return
 	}
 	if e.target == nil {
@@ -87,7 +94,7 @@ func dynamicScopeRefEval(
 	kw, loc, source string,
 	staticTarget any,
 	lookupTarget func() any,
-	subschemaFor func(any) *subschema,
+	subschemaFor func(any) (*subschema, error),
 	instance any,
 ) {
 	defer func() { ctx.refDepth-- }()
@@ -102,9 +109,13 @@ func dynamicScopeRefEval(
 		ctx.addError(loc, kw, "", fmt.Sprintf("cannot resolve %q", source))
 		return
 	}
-	sub := subschemaFor(target)
+	sub, err := subschemaFor(target)
 	if sub == nil {
-		ctx.addError(loc, kw, "", fmt.Sprintf("cannot build subschema for %q", source))
+		msg := fmt.Sprintf("cannot build subschema for %q", source)
+		if err != nil {
+			msg += ": " + err.Error()
+		}
+		ctx.addErrorWithCause(loc, kw, "", msg, err)
 		return
 	}
 	ctx.evaluateRef(loc, sub, instance)
@@ -120,9 +131,11 @@ type dynamicRefEval struct {
 	fragmentName string
 	builder      *evalBuilder
 	// built maps the identity of each target Compile built to its
-	// subschema. It is written only while compiling and read without
-	// locking from then on.
-	built map[any]*subschema
+	// subschema, and failed each target it could not build to the error.
+	// Both are written only while compiling and read without locking from
+	// then on.
+	built  map[any]*subschema
+	failed map[any]error
 }
 
 func (e *dynamicRefEval) keyword() string { return keyDynamicRef }
@@ -152,15 +165,23 @@ func (e *dynamicRefEval) findDynamic(ctx *runCtx) any {
 	return nil
 }
 
-func (e *dynamicRefEval) subschemaFor(target any) *subschema {
-	if sub, ok := e.built[rawIdentity(target)]; ok {
-		return sub
+func (e *dynamicRefEval) subschemaFor(target any) (*subschema, error) {
+	id := rawIdentity(target)
+	if sub, ok := e.built[id]; ok {
+		return sub, nil
 	}
-	sub, err := e.build(target)
-	if err != nil {
-		return nil
+	if err, ok := e.failed[id]; ok {
+		return nil, err
 	}
-	return sub
+	return e.build(target)
+}
+
+// prebuild builds target while compiling; a target that fails is recorded
+// in failed and reported when validation reaches it.
+func (e *dynamicRefEval) prebuild(target any) {
+	if _, err := e.build(target); err != nil {
+		e.failed = recordFailure(e.failed, target, err)
+	}
 }
 
 func (e *dynamicRefEval) build(target any) (*subschema, error) {
@@ -212,8 +233,9 @@ type recursiveRefEval struct {
 	targetURI string
 	target    any
 	builder   *evalBuilder
-	// built is as for [dynamicRefEval].
-	built map[any]*subschema
+	// built and failed are as for [dynamicRefEval].
+	built  map[any]*subschema
+	failed map[any]error
 }
 
 func (e *recursiveRefEval) keyword() string { return "$recursiveRef" }
@@ -253,15 +275,32 @@ func (e *recursiveRefEval) findRecursive(ctx *runCtx) any {
 	return nil
 }
 
-func (e *recursiveRefEval) subschemaFor(target any) *subschema {
-	if sub, ok := e.built[rawIdentity(target)]; ok {
-		return sub
+func (e *recursiveRefEval) subschemaFor(target any) (*subschema, error) {
+	id := rawIdentity(target)
+	if sub, ok := e.built[id]; ok {
+		return sub, nil
 	}
-	sub, err := e.build(target)
-	if err != nil {
-		return nil
+	if err, ok := e.failed[id]; ok {
+		return nil, err
 	}
-	return sub
+	return e.build(target)
+}
+
+// prebuild is as for [dynamicRefEval].
+func (e *recursiveRefEval) prebuild(target any) {
+	if _, err := e.build(target); err != nil {
+		e.failed = recordFailure(e.failed, target, err)
+	}
+}
+
+// recordFailure adds target's build error to failed, allocating it when
+// nil, and returns the map.
+func recordFailure(failed map[any]error, target any, err error) map[any]error {
+	if failed == nil {
+		failed = map[any]error{}
+	}
+	failed[rawIdentity(target)] = err
+	return failed
 }
 
 func (e *recursiveRefEval) build(target any) (*subschema, error) {
@@ -297,7 +336,10 @@ func registerRefKeywords() {
 		}
 		resolved, err := b.resolve(f.base, ref, f.draft)
 		if err != nil {
-			return nil, &CompileError{KeywordLocation: loc, Message: "cannot resolve $ref", Cause: err}
+			// A reference that cannot be resolved fails only the
+			// instances that reach it.
+			return &refEval{loc: loc, source: ref, builder: b,
+				err: fmt.Errorf("cannot resolve %q: %w", ref, err)}, nil
 		}
 		return &refEval{
 			loc:       loc,

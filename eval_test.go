@@ -5,6 +5,7 @@ package jsonschema
 import (
 	"errors"
 	"testing"
+	"time"
 )
 
 // TestAddErrorWithCauseMaxErrorsGate covers the maxErrors-gate branch.
@@ -212,4 +213,33 @@ func TestEvalRootNilSchema(t *testing.T) {
 func TestRunCtxRelease(t *testing.T) {
 	ctx := newRunCtx(nil, defaultRunOptions())
 	ctx.release() // currently a no-op; covers the function for coverage.
+}
+
+// TestCountValuesSharedAndCyclic checks that sizing the default budget
+// counts a shared or self-containing Go value quickly, and a tree exactly.
+func TestCountValuesSharedAndCyclic(t *testing.T) {
+	cyc := []any{nil, nil}
+	cyc[0], cyc[1] = cyc, cyc
+	dag := []any{"leaf"}
+	for range 30 {
+		dag = []any{dag, dag}
+	}
+	start := time.Now()
+	if n := countValues(cyc); n != 3 {
+		t.Errorf("cyclic: %d values, want 3", n)
+	}
+	if n := countValues(dag); n > 100 {
+		t.Errorf("shared: %d values", n)
+	}
+	if d := time.Since(start); d > time.Second {
+		t.Errorf("took %v", d)
+	}
+	tree := map[string]any{"a": []any{1.0, "x", map[string]any{"b": nil}}, "c": []any{}}
+	if n := countValues(tree); n != 7 {
+		t.Errorf("tree: %d values, want 7", n)
+	}
+	s := MustCompile([]byte(`{"type":"array"}`))
+	if res, err := s.ValidateValue(cyc); err != nil || !res.Valid {
+		t.Errorf("cyclic instance: res=%v err=%v", res, err)
+	}
 }

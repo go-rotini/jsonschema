@@ -865,3 +865,19 @@ func TestValidationFailureErrorMultiCause(t *testing.T) {
 		t.Errorf("Causes = %d, want 1", len(ve.Causes))
 	}
 }
+
+// TestJSONNumberBeyondUint64 checks that a json.Number holding an integer
+// beyond the uint64 range is both a number and an integer.
+func TestJSONNumberBeyondUint64(t *testing.T) {
+	for _, schema := range []string{`{"type":"number"}`, `{"type":"integer"}`} {
+		s := MustCompile([]byte(schema))
+		for _, v := range []json.Number{"18446744073709551616", "-99999999999999999999999", "1e30", "5"} {
+			if res, err := s.ValidateValue(v); err != nil || !res.Valid {
+				t.Errorf("%s %s: res=%v err=%v", schema, v, res, err)
+			}
+		}
+	}
+	if res, err := MustCompile([]byte(`{"type":"integer"}`)).ValidateValue(json.Number("1.5")); err != nil || res.Valid {
+		t.Errorf("1.5 accepted as an integer: res=%v err=%v", res, err)
+	}
+}

@@ -107,8 +107,9 @@ func (e *contentSchemaEval) eval(ctx *runCtx, instance any) {
 	// The decoded content is a separate document: its annotations do not
 	// describe this instance, so they are not kept.
 	ctx.growEvalLimit(parsed)
-	branch, _ := ctx.evaluateBranch(e.sub, parsed)
+	branch, _, cost := ctx.evaluateBranch(e.sub, parsed)
 	if len(branch) > 0 {
+		ctx.chargeErrors(cost)
 		ctx.addCausesError(e.loc, "contentSchema",
 			"decoded content does not validate against contentSchema", branch)
 	}

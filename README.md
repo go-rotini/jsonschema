@@ -19,7 +19,7 @@ This package is used as the default JSON Schema support package for [rotini](htt
 - OpenAPI 3.1 dialect support (`VocabOAS`, `OASDialectURL`)
 - Bowtie connector for cross-implementation conformance testing
 - `RenderError` for human-readable validation errors with a source pointer into the instance
-- DoS protection: max ref depth, max recursion depth, max document size, ref-loop detection, bounded YAML alias expansion, and numbers compared without expanding their exponents
+- DoS protection: max ref depth, max recursion depth, max document size, a cap on subschema evaluations that scales with the schema and the instance, ref-loop detection, bounded YAML alias expansion, and numbers compared without expanding their exponents
 
 ## Installation
 

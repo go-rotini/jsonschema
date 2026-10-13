@@ -804,6 +804,7 @@ var (
 	errBadALabel   = fmt.Errorf("%w: invalid A-label", errFormatInvalid)
 	errBadULabel   = fmt.Errorf("%w: invalid U-label", errFormatInvalid)
 	errLabelLength = fmt.Errorf("%w: label too long", errFormatInvalid)
+	errContextO    = fmt.Errorf("%w: character not allowed in this context", errFormatInvalid)
 )
 
 // checkLDHLabel checks the IDNA rules for an ASCII label: "--" in the
@@ -842,10 +843,53 @@ func checkULabel(lbl string) error {
 			return errBadULabel
 		}
 	}
-	if aLabelLen(lbl) > 63 {
+	// Punycode spends at least one byte per rune, so the A-label of a label
+	// of more than 59 runes is too long without encoding it.
+	if len(runes) > 63-len("xn--") || aLabelLen(lbl) > 63 {
 		return errLabelLength
 	}
+	if !contextOK(runes) {
+		return errContextO
+	}
 	return nil
+}
+
+// contextOK applies the CONTEXTO rules of RFC 5892 Appendix A.3 to A.9 to
+// a label's runes. The CONTEXTJ rules for ZERO WIDTH JOINER and NON-JOINER
+// need Unicode joining data the standard library lacks and are not checked.
+func contextOK(runes []rune) bool {
+	at := func(i int) rune {
+		if i < 0 || i >= len(runes) {
+			return -1
+		}
+		return runes[i]
+	}
+	arabicIndic, extendedIndic, kanaOrHan, katakanaDot := false, false, false, false
+	for i, r := range runes {
+		switch {
+		case r == 0x00B7: // MIDDLE DOT, only between two 'l's
+			if at(i-1) != 'l' || at(i+1) != 'l' {
+				return false
+			}
+		case r == 0x0375: // GREEK LOWER NUMERAL SIGN, before a Greek letter
+			if next := at(i + 1); next < 0 || !unicode.Is(unicode.Greek, next) {
+				return false
+			}
+		case r == 0x05F3 || r == 0x05F4: // HEBREW GERESH, GERSHAYIM, after Hebrew
+			if prev := at(i - 1); prev < 0 || !unicode.Is(unicode.Hebrew, prev) {
+				return false
+			}
+		case r == 0x30FB: // KATAKANA MIDDLE DOT, in a label with kana or Han
+			katakanaDot = true
+		case r >= 0x0660 && r <= 0x0669:
+			arabicIndic = true
+		case r >= 0x06F0 && r <= 0x06F9:
+			extendedIndic = true
+		case unicode.In(r, unicode.Hiragana, unicode.Katakana, unicode.Han):
+			kanaOrHan = true
+		}
+	}
+	return (!katakanaDot || kanaOrHan) && (!arabicIndic || !extendedIndic)
 }
 
 // aLabelLen returns the length of lbl's ASCII form: lbl itself, or
@@ -1149,13 +1193,14 @@ func validateAddrDomain(domain string, allowIDN bool) error {
 	return validateIDNHostname(domain)
 }
 
-// validateRegex checks that s is ECMA-262 regex syntax (with the "u" flag's
-// escape rules). Backreferences and lookaround are valid ECMA-262 even
+// validateRegex checks that s is ECMA-262 regex syntax: the "u" flag's
+// escapes, plus the identity escape of any character that is not an ASCII
+// letter or digit. Backreferences and lookaround are valid ECMA-262 even
 // though RE2 cannot run them.
 func validateRegex(s string) error {
 	// Constructs RE2 cannot run are valid ECMA-262; the translation stands
 	// placeholders in for them, so the rest is still checked.
-	t, err := translateECMAAll(s)
+	t, err := translateECMAAll(s, true)
 	if err != nil {
 		return formatErrCause("regex", s, err)
 	}

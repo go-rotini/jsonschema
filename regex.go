@@ -21,13 +21,21 @@ var (
 // as class members.
 const ecmaSpace = `\t\n\v\f\r \x{a0}\x{1680}\x{2000}-\x{200a}\x{2028}\x{2029}\x{202f}\x{205f}\x{3000}\x{feff}`
 
-// compileECMA compiles an ECMA-262 pattern (with the "u" flag's escape
-// rules, as JSON Schema recommends) into an RE2 regexp with the same
-// meaning. Backreferences and lookaround have no RE2 equivalent and are
-// reported as errors.
+// compileECMA compiles a pattern or patternProperties key: ECMA-262 syntax
+// (the "u" flag's escapes, plus the identity escape of any character that
+// is not an ASCII letter or digit, such as \_ or \:) into an RE2 regexp with
+// the same meaning. A pattern that is not ECMA-262 but is RE2 syntax, such
+// as one using the inline flags (?i) or (?s), compiles with RE2's meaning.
+// Backreferences and lookaround have no RE2 equivalent and are reported as
+// errors.
 func compileECMA(p string) (*regexp.Regexp, error) {
 	re2, err := translateECMA(p)
 	if err != nil {
+		if errors.Is(err, errECMASyntax) {
+			if re, rawErr := regexp.Compile(p); rawErr == nil {
+				return re, nil
+			}
+		}
 		return nil, err
 	}
 	re, err := regexp.Compile(re2)
@@ -43,7 +51,7 @@ func compileECMA(p string) (*regexp.Regexp, error) {
 // wraps errECMASyntax for invalid ECMA syntax and errECMAUnsupported for
 // valid syntax RE2 cannot express.
 func translateECMA(p string) (string, error) {
-	t, err := translateECMAAll(p)
+	t, err := translateECMAAll(p, false)
 	if err != nil {
 		return "", err
 	}
@@ -57,11 +65,13 @@ func translateECMA(p string) (string, error) {
 // constructs RE2 cannot run. It reports the first of those as unsupported
 // and stands an empty group in for each (a lookaround keeps its contents
 // as a plain group), so that the rest of the pattern can still be
-// syntax-checked.
+// syntax-checked. With strict set it also rejects a quantifier on an
+// assertion (^, $, \b, \B or a lookbehind), which ECMA-262 forbids and RE2
+// accepts.
 // The translation is t.out; t.unsupported holds the first unsupported
 // construct.
-func translateECMAAll(p string) (*ecmaTranslator, error) {
-	t := &ecmaTranslator{p: p}
+func translateECMAAll(p string, strict bool) (*ecmaTranslator, error) {
+	t := &ecmaTranslator{p: p, strict: strict}
 	t.out.Grow(len(p) + 8)
 	if err := t.run(); err != nil {
 		return nil, err
@@ -81,6 +91,12 @@ type ecmaTranslator struct {
 	classStart int
 	// classNonSpace records a \S in the current class.
 	classNonSpace bool
+	// strict rejects quantified assertions. afterAssertion is set when the
+	// last atom written is an assertion, and lookbehind records, for each
+	// open group, whether it is a lookbehind.
+	strict         bool
+	afterAssertion bool
+	lookbehind     []bool
 }
 
 // unsupportedConstruct records an unsupported construct and writes a
@@ -95,66 +111,123 @@ func (t *ecmaTranslator) unsupportedConstruct(what, placeholder string) {
 func (t *ecmaTranslator) run() error {
 	p := t.p
 	for i := 0; i < len(p); {
-		c := p[i]
-		switch {
-		case c == '\\':
-			n, err := t.escape(i)
-			if err != nil {
-				return err
-			}
-			i += n
-			continue
-		case t.inClass && c == ']':
-			t.inClass = false
-			t.closeClass()
-			i++
-			continue
-		case t.inClass && c == '[':
-			t.out.WriteString(`\[`)
-			i++
-			continue
-		case !t.inClass && c == '[':
-			switch {
-			case strings.HasPrefix(p[i:], "[]"):
-				t.out.WriteString(`[^\x00-\x{10FFFF}]`)
-				i += 2
-				continue
-			case strings.HasPrefix(p[i:], "[^]"):
-				t.out.WriteString(`[\x00-\x{10FFFF}]`)
-				i += 3
-				continue
-			}
-			t.inClass, t.negated, t.classNonSpace = true, false, false
-			t.out.WriteByte('[')
-			i++
-			if i < len(p) && p[i] == '^' {
-				t.out.WriteByte('^')
-				t.negated = true
-				i++
-			}
-			t.classStart = t.out.Len()
-			// A leading ] is a literal in RE2 but closes an empty class in
-			// ECMA; [] and [^] were handled above.
-			continue
-		case !t.inClass && c == '.':
-			t.out.WriteString(`[^\n\r\x{2028}\x{2029}]`)
-			i++
-			continue
-		case !t.inClass && c == '(' && strings.HasPrefix(p[i:], "(?"):
-			n, err := t.group(p[i:])
-			if err != nil {
-				return err
-			}
-			i += n
-			continue
+		if t.strict && t.afterAssertion && !t.inClass && isQuantifier(p[i:]) {
+			return fmt.Errorf("%w: quantifier on an assertion", errECMASyntax)
 		}
-		t.out.WriteByte(c)
-		i++
+		t.afterAssertion = false
+		var n int
+		var err error
+		switch c := p[i]; {
+		case c == '\\':
+			n, err = t.escape(i)
+			t.afterAssertion = err == nil && !t.inClass && (p[i+1] == 'b' || p[i+1] == 'B')
+		case t.inClass:
+			n = t.classByte(c)
+		default:
+			n, err = t.outsideClass(p[i:])
+		}
+		if err != nil {
+			return err
+		}
+		i += n
 	}
 	if t.inClass {
 		return fmt.Errorf("%w: unterminated character class", errECMASyntax)
 	}
 	return nil
+}
+
+// classByte translates c, a byte inside a character class other than a
+// backslash, and returns 1.
+func (t *ecmaTranslator) classByte(c byte) int {
+	switch c {
+	case ']':
+		t.inClass = false
+		t.closeClass()
+	case '[':
+		t.out.WriteString(`\[`)
+	default:
+		t.out.WriteByte(c)
+	}
+	return 1
+}
+
+// outsideClass translates the construct at the start of s, outside a
+// character class and not an escape, and returns the number of bytes
+// consumed.
+func (t *ecmaTranslator) outsideClass(s string) (int, error) {
+	switch c := s[0]; c {
+	case '[':
+		return t.openClass(s), nil
+	case '.':
+		t.out.WriteString(`[^\n\r\x{2028}\x{2029}]`)
+		return 1, nil
+	case '(':
+		t.lookbehind = append(t.lookbehind, strings.HasPrefix(s, "(?<=") || strings.HasPrefix(s, "(?<!"))
+		if strings.HasPrefix(s, "(?") {
+			return t.group(s)
+		}
+	case ')':
+		if k := len(t.lookbehind); k > 0 {
+			t.afterAssertion = t.lookbehind[k-1]
+			t.lookbehind = t.lookbehind[:k-1]
+		}
+	case '^', '$':
+		t.afterAssertion = true
+	}
+	t.out.WriteByte(s[0])
+	return 1, nil
+}
+
+// openClass translates the character class opening at the start of s and
+// returns the number of bytes consumed.
+func (t *ecmaTranslator) openClass(s string) int {
+	switch {
+	case strings.HasPrefix(s, "[]"):
+		t.out.WriteString(`[^\x00-\x{10FFFF}]`)
+		return 2
+	case strings.HasPrefix(s, "[^]"):
+		t.out.WriteString(`[\x00-\x{10FFFF}]`)
+		return 3
+	}
+	t.inClass, t.negated, t.classNonSpace = true, false, false
+	t.out.WriteByte('[')
+	n := 1
+	if len(s) > 1 && s[1] == '^' {
+		t.out.WriteByte('^')
+		t.negated = true
+		n++
+	}
+	// A leading ] is a literal in RE2 but closes an empty class in ECMA;
+	// [] and [^] were handled above.
+	t.classStart = t.out.Len()
+	return n
+}
+
+// isQuantifier reports whether s starts with a quantifier: *, +, ? or a
+// well-formed {n}, {n,} or {n,m}.
+func isQuantifier(s string) bool {
+	switch s[0] {
+	case '*', '+', '?':
+		return true
+	case '{':
+	default:
+		return false
+	}
+	i := 1
+	for i < len(s) && isDigit(s[i]) {
+		i++
+	}
+	if i == 1 {
+		return false
+	}
+	if i < len(s) && s[i] == ',' {
+		i++
+		for i < len(s) && isDigit(s[i]) {
+			i++
+		}
+	}
+	return i < len(s) && s[i] == '}'
 }
 
 // closeClass ends the character class just written. A class holding \S
@@ -304,12 +377,18 @@ func (t *ecmaTranslator) escape(i int) (int, error) {
 		fmt.Fprintf(out, `\%c{%s}`, c, name)
 		return end + 1, nil
 	}
-	if strings.IndexByte(`^$\.*+?()[]{}|/`, c) >= 0 || (inClass && c == '-') {
+	// Any other character that is not an ASCII letter or digit is an
+	// identity escape, as ECMA-262 Annex B allows: it matches itself.
+	if c < utf8.RuneSelf {
+		if isASCIILetter(rune(c)) || isDigit(c) {
+			return 0, fmt.Errorf("%w: \\%c is not an ECMA-262 escape", errECMASyntax, c)
+		}
 		out.WriteString(p[i : i+2])
 		return 2, nil
 	}
-	r, _ := utf8.DecodeRuneInString(p[i+1:])
-	return 0, fmt.Errorf("%w: \\%c is not an ECMA-262 escape", errECMASyntax, r)
+	_, n := utf8.DecodeRuneInString(p[i+1:])
+	out.WriteString(p[i+1 : i+1+n])
+	return 1 + n, nil
 }
 
 // translateClassEscape translates \b, \B or \s, whose meaning depends on

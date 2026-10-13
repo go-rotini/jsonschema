@@ -7,6 +7,7 @@ import (
 	"go/format"
 	"go/token"
 	"maps"
+	"net/url"
 	"slices"
 	"sort"
 	"strconv"
@@ -692,44 +693,64 @@ func (b *goBuilder) refType(ref string) (string, bool) {
 	if ref == "#" {
 		return b.root, true
 	}
+	name, ok := defKey(ref)
+	if !ok {
+		return "any", false
+	}
+	if typ, ok := b.defNames[name]; ok {
+		return typ, true
+	}
+	return typeIdent(name), true
+}
+
+// defKey returns the "definitions" or "$defs" key that ref points to: the
+// fragment is percent-decoded, then its JSON Pointer token unescaped. The
+// second result is false when ref points to no single entry.
+func defKey(ref string) (string, bool) {
 	_, frag, _ := strings.Cut(ref, "#")
+	if u, err := url.PathUnescape(frag); err == nil {
+		frag = u
+	}
 	for _, prefix := range []string{"/definitions/", "/$defs/"} {
 		name, ok := strings.CutPrefix(frag, prefix)
 		if !ok || name == "" || strings.Contains(name, "/") {
 			continue
 		}
-		name = strings.NewReplacer("~1", "/", "~0", "~").Replace(name)
-		if typ, ok := b.defNames[name]; ok {
-			return typ, true
-		}
-		return typeIdent(name), true
+		return strings.NewReplacer("~1", "/", "~0", "~").Replace(name), true
 	}
-	return "any", false
+	return "", false
 }
 
 // refIsStruct reports whether the $ref ref, which refType names, becomes a
-// struct type: its target has properties or allOf. A target outside the
-// document is assumed to.
+// struct type: its target has properties or allOf, or is itself a $ref to
+// such a type. A target outside the document is assumed to.
 func (b *goBuilder) refIsStruct(ref string) bool {
-	target := b.rootSchema
-	if ref != "#" {
-		_, frag, _ := strings.Cut(ref, "#")
-		key := ""
-		for _, prefix := range []string{"/definitions/", "/$defs/"} {
-			if name, ok := strings.CutPrefix(frag, prefix); ok {
-				key = strings.NewReplacer("~1", "/", "~0", "~").Replace(name)
-				break
+	seen := map[string]bool{}
+	for {
+		target := b.rootSchema
+		if ref != "#" {
+			key, ok := defKey(ref)
+			def, found := b.defs[key]
+			if !ok || !found || !strings.HasPrefix(ref, "#") {
+				return true
 			}
+			target = mapOf(def)
 		}
-		def, ok := b.defs[key]
-		if !ok || !strings.HasPrefix(ref, "#") {
+		_, hasProps := target["properties"]
+		_, hasAllOf := target["allOf"].([]any)
+		if hasProps || hasAllOf {
 			return true
 		}
-		target = mapOf(def)
+		next, ok := target["$ref"].(string)
+		if !ok || seen[next] {
+			return false
+		}
+		if _, named := b.refType(next); !named {
+			return false
+		}
+		seen[next] = true
+		ref = next
 	}
-	_, hasProps := target["properties"]
-	_, hasAllOf := target["allOf"].([]any)
-	return hasProps || hasAllOf
 }
 
 // typeIdent returns the Go type name for a definition key: the key itself

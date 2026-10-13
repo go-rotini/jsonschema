@@ -279,10 +279,6 @@ func resolveDraftAndIDKey(obj map[string]any, inherited, descent Draft) (string,
 // current is returned unchanged. The boolean is true when a fresh resource
 // was opened.
 func openResourceIfNeeded(rm *resourceMap, current *resource, obj map[string]any, idKey string, subDraft Draft) (*resource, bool, error) {
-	// Before 2019-09, $ref replaces every sibling keyword, $id included.
-	if _, hasRef := obj["$ref"]; hasRef && subDraft <= Draft7 {
-		return current, false, nil
-	}
 	rawID, ok := obj[idKey]
 	if !ok {
 		return current, false, nil
@@ -294,11 +290,17 @@ func openResourceIfNeeded(rm *resourceMap, current *resource, obj map[string]any
 	// Pre-2019-09 drafts allowed a plain-name $id (e.g. {"$id": "#foo"})
 	// as an alternative anchor declaration; from 2019-09 on, $id must be
 	// absolute and a "#name" $id is treated as a sibling anchor instead.
+	// The name is honored next to $ref too: it changes no base URI, and
+	// schemas commonly name a $ref this way.
 	if subDraft <= Draft7 && strings.HasPrefix(idStr, "#") && !strings.HasPrefix(idStr, "#/") {
 		name := idStr[1:]
 		if name != "" {
 			current.anchors[name] = obj
 		}
+		return current, false, nil
+	}
+	// Before 2019-09, $ref replaces every other sibling keyword.
+	if _, hasRef := obj["$ref"]; hasRef && subDraft <= Draft7 {
 		return current, false, nil
 	}
 	absID, err := resolveURI(current.baseURI, idStr)

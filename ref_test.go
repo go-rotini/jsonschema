@@ -1048,3 +1048,87 @@ func TestMaxEvaluations(t *testing.T) {
 		t.Fatalf("large instance: err=%v", err)
 	}
 }
+
+// TestMaxEvaluationsWideUnions checks that the default budget accepts valid
+// documents whose values are checked against wide anyOf and oneOf unions:
+// errors from discarded branches do not count, and the budget grows with
+// the number of subschemas.
+func TestMaxEvaluationsWideUnions(t *testing.T) {
+	union := func(kw string, n int) *Schema {
+		var b strings.Builder
+		fmt.Fprintf(&b, `{"type":"array","items":{%q:[`, kw)
+		for i := range n {
+			if i > 0 {
+				b.WriteByte(',')
+			}
+			fmt.Fprintf(&b, `{"const":"value-%d"}`, i)
+		}
+		b.WriteString(`]}}`)
+		return MustCompile([]byte(b.String()))
+	}
+	list := func(items, last int) []any {
+		out := make([]any, items)
+		for i := range out {
+			out[i] = fmt.Sprintf("value-%d", last-i%3)
+		}
+		return out
+	}
+	cases := []struct {
+		kw           string
+		width, items int
+	}{
+		{"oneOf", 20, 10000},
+		{"anyOf", 20, 10000},
+		{"oneOf", 150, 1000},
+	}
+	for _, tc := range cases {
+		res, err := union(tc.kw, tc.width).ValidateValue(list(tc.items, tc.width-1))
+		if err != nil || !res.Valid {
+			t.Errorf("%s of %d, %d items: res=%v err=%v", tc.kw, tc.width, tc.items, res, err)
+		}
+	}
+
+	// A union over many referenced object schemas, as in large
+	// resource-type catalogs: each value is checked against every branch.
+	var b strings.Builder
+	b.WriteString(`{"type":"object","additionalProperties":{"anyOf":[`)
+	const width = 1000
+	for i := range width {
+		if i > 0 {
+			b.WriteByte(',')
+		}
+		fmt.Fprintf(&b, `{"$ref":"#/$defs/r%d"}`, i)
+	}
+	b.WriteString(`]},"$defs":{`)
+	for i := range width {
+		if i > 0 {
+			b.WriteByte(',')
+		}
+		fmt.Fprintf(&b, `"r%d":{"type":"object","required":["Type"],"properties":{"Type":{"enum":["T%d"]},"Properties":{"type":"object","properties":{"Name":{"type":"string"}}}}}`, i, i)
+	}
+	b.WriteString(`}}`)
+	catalog := MustCompile([]byte(b.String()))
+	doc := map[string]any{}
+	for i := range 200 {
+		doc[fmt.Sprintf("R%d", i)] = map[string]any{"Type": fmt.Sprintf("T%d", width-1-i), "Properties": map[string]any{"Name": "x"}}
+	}
+	if res, err := catalog.ValidateValue(doc); err != nil || !res.Valid {
+		t.Errorf("catalog: res=%v err=%v", res, err)
+	}
+}
+
+// TestDefaultMaxEvaluations checks that a cap set at compile time applies
+// to validations without options and that a run option overrides it.
+func TestDefaultMaxEvaluations(t *testing.T) {
+	s := MustCompile([]byte(`{"items":{"type":"integer"}}`), WithDefaultMaxEvaluations(3))
+	if _, err := s.Validate([]byte(`[1,2,3]`)); !errors.Is(err, ErrMaxEvaluations) {
+		t.Errorf("compile-time cap 3: err=%v", err)
+	}
+	if res, err := s.Validate([]byte(`[1,2,3]`), WithMaxEvaluations(4)); err != nil || !res.Valid {
+		t.Errorf("run cap 4: res=%v err=%v", res, err)
+	}
+	unlimited := MustCompile([]byte(`{"$defs":{"d":{"allOf":[{"$ref":"#/$defs/d"},{"type":"integer"}]}},"items":{"type":"integer"}}`), WithDefaultMaxEvaluations(-1))
+	if res, err := unlimited.ValidateValue(make([]any, 0)); err != nil || !res.Valid {
+		t.Errorf("no cap: res=%v err=%v", res, err)
+	}
+}

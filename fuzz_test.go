@@ -196,7 +196,7 @@ func FuzzTranslateECMA(f *testing.F) {
 		if validateRegex(p) != nil {
 			return
 		}
-		tr, err := translateECMAAll(p)
+		tr, err := translateECMAAll(p, true)
 		if err != nil {
 			t.Fatalf("validateRegex accepted %q, which does not translate: %v", p, err)
 		}

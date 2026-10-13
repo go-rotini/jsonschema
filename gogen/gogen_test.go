@@ -765,3 +765,29 @@ func TestGenerateAllOfEmbedsOnlyStructs(t *testing.T) {
 		t.Errorf("struct definition not embedded:\n%s", out)
 	}
 }
+
+// TestGenerateAllOfEmbedsThroughAliasAndEscapes checks that an allOf $ref
+// to a definition that only refers to a struct embeds it, and that a
+// percent-encoded $ref names the definition's type.
+func TestGenerateAllOfEmbedsThroughAliasAndEscapes(t *testing.T) {
+	src, err := gogen.Generate([]byte(`{"title":"T","allOf":[{"$ref":"#/$defs/A"},{"$ref":"#/$defs/a%20b"},{"$ref":"#/$defs/L"}],
+		"properties":{"name":{"type":"string"}},
+		"$defs":{"A":{"$ref":"#/$defs/B"},"B":{"type":"object","properties":{"x":{"type":"integer"}}},
+		"a b":{"type":"object","properties":{"y":{"type":"string"}}},
+		"L":{"$ref":"#/$defs/M"},"M":{"$ref":"#/$defs/L"}}}`), gogen.WithPackage("p"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	out := string(src)
+	for _, want := range []string{"\tA\n", "\tAB\n"} {
+		if !strings.Contains(out, want) {
+			t.Errorf("missing embed %q:\n%s", want, out)
+		}
+	}
+	if strings.Contains(out, "\tL\n") {
+		t.Errorf("a $ref cycle was embedded:\n%s", out)
+	}
+	if strings.Contains(out, "A20b") {
+		t.Errorf("percent escape kept in a type name:\n%s", out)
+	}
+}

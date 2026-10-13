@@ -184,3 +184,52 @@ func TestECMANonSpaceInClass(t *testing.T) {
 		}
 	}
 }
+
+// TestPatternAcceptsAnnexBAndRE2 checks that patterns written with the
+// identity escapes ECMA-262 Annex B allows, or with RE2 inline flags,
+// compile and match as they did when patterns were plain RE2.
+func TestPatternAcceptsAnnexBAndRE2(t *testing.T) {
+	cases := []struct {
+		pattern, instance string
+		want              bool
+	}{
+		{`^[a-z\_]+$`, `"a_b"`, true},
+		{`^[^\/~\^\: \[\]\\]+$`, `"refs"`, true},
+		{`^[^\/~\^\: \[\]\\]+$`, `"a:b"`, false},
+		{`^\-\@\#\%\!\"\ $`, `"-@#%!\" "`, true},
+		{`^a\éb$`, `"aéb"`, true},
+		{`(?i)^abc$`, `"ABC"`, true},
+		{`(?i:x)y`, `"Xy"`, true},
+		{`(?ms)^a.b$`, `"a\nb"`, true},
+		{`^\s$`, `" "`, true},
+	}
+	for _, tc := range cases {
+		schema := `{"pattern":` + jsonString(tc.pattern) + `}`
+		if got := validOf(t, schema, tc.instance); got != tc.want {
+			t.Errorf("pattern %s with %s: valid=%v, want %v", tc.pattern, tc.instance, got, tc.want)
+		}
+		if _, err := Compile([]byte(`{"patternProperties":{` + jsonString(tc.pattern) + `:{}}}`)); err != nil {
+			t.Errorf("patternProperties %s: %v", tc.pattern, err)
+		}
+	}
+}
+
+// TestQuantifiedAssertion checks that the regex format rejects a quantifier
+// on an assertion, which ECMA-262 forbids, while pattern still compiles it.
+func TestQuantifiedAssertion(t *testing.T) {
+	for _, p := range []string{`\b*`, `\B{2}`, `^*`, `$+`, `a^?`, `(?<=a)*b`, `(?<!a){1,2}b`} {
+		if validateRegex(p) == nil {
+			t.Errorf("regex format accepted %s", p)
+		}
+	}
+	for _, p := range []string{`\b*`, `^*`, `$+`} {
+		if _, err := Compile([]byte(`{"pattern":` + jsonString(p) + `}`)); err != nil {
+			t.Errorf("pattern %s: %v", p, err)
+		}
+	}
+	for _, p := range []string{`(?=a)*a`, `^a*`, `\ba{2}`, `(a)*`, `[$]*`, `[\b]+`, `\b{`, `\_\-`, `(?:^)a`} {
+		if err := validateRegex(p); err != nil {
+			t.Errorf("regex format rejected %s: %v", p, err)
+		}
+	}
+}

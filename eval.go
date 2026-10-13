@@ -2,7 +2,9 @@ package jsonschema
 
 import (
 	"fmt"
+	"math"
 	"net/url"
+	"reflect"
 	"sort"
 	"strings"
 	"sync"
@@ -489,10 +491,13 @@ type runCtx struct {
 	evalLimit  int
 	evalAuto   bool
 	overBudget bool
+	// errCost is the part of evals charged for the errors currently held.
+	errCost int
 }
 
-// Evaluation budget defaults: evalsPerValue evaluations for each value in
-// the instance, and at least minEvalBudget.
+// Evaluation budget defaults: for each value in the instance, as many
+// evaluations as the schema has compiled subschemas and at least
+// evalsPerValue; in all at least minEvalBudget.
 const (
 	evalsPerValue = 100
 	minEvalBudget = 1_000_000
@@ -500,20 +505,45 @@ const (
 
 // setEvalLimit sets the evaluation budget for validating instance.
 func (ctx *runCtx) setEvalLimit(instance any) {
-	if ctx.opts.maxEvaluations != 0 {
-		ctx.evalLimit = ctx.opts.maxEvaluations
+	limit := ctx.opts.maxEvaluations
+	if limit == 0 && ctx.schema != nil && ctx.schema.compileOpts != nil {
+		limit = ctx.schema.compileOpts.maxEvaluations
+	}
+	if limit != 0 {
+		ctx.evalLimit = limit
 		return
 	}
 	ctx.evalAuto = true
-	ctx.evalLimit = max(minEvalBudget, evalsPerValue*countValues(instance))
+	ctx.evalLimit = max(minEvalBudget, ctx.evalsFor(instance))
 }
 
 // growEvalLimit extends a default budget for decoded content about to be
 // validated.
 func (ctx *runCtx) growEvalLimit(content any) {
 	if ctx.evalAuto {
-		ctx.evalLimit += evalsPerValue * countValues(content)
+		ctx.evalLimit = satAdd(ctx.evalLimit, ctx.evalsFor(content))
 	}
+}
+
+// evalsFor returns the default budget share of the values in v.
+func (ctx *runCtx) evalsFor(v any) int {
+	per := evalsPerValue
+	if ctx.schema != nil {
+		per = max(per, ctx.schema.subschemas)
+	}
+	n := countValues(v)
+	if n > math.MaxInt/per {
+		return math.MaxInt
+	}
+	return n * per
+}
+
+// satAdd returns a+b for non-negative a and b, saturating at math.MaxInt.
+func satAdd(a, b int) int {
+	if a > math.MaxInt-b {
+		return math.MaxInt
+	}
+	return a + b
 }
 
 // chargeError counts the error just appended against the evaluation
@@ -521,23 +551,53 @@ func (ctx *runCtx) growEvalLimit(content any) {
 // the memory that errors from a branching schema can take.
 func (ctx *runCtx) chargeError() {
 	e := &ctx.errors[len(ctx.errors)-1]
-	ctx.evals += (128 + len(e.KeywordLocation) + len(e.AbsoluteKeywordLocation) +
-		len(e.InstanceLocation) + len(e.Message)) / 32
+	ctx.chargeErrors((128 + len(e.KeywordLocation) + len(e.AbsoluteKeywordLocation) +
+		len(e.InstanceLocation) + len(e.Message)) / 32)
+}
+
+// chargeErrors counts cost evaluations for errors held.
+func (ctx *runCtx) chargeErrors(cost int) {
+	ctx.errCost += cost
+	ctx.evals += cost
 	if ctx.evalLimit >= 0 && ctx.evals > ctx.evalLimit {
 		ctx.overBudget = true
 	}
 }
 
 // countValues returns the number of JSON values in v, v included, up to
-// maxCountedValues; the cap also ends the walk of a Go value that contains
-// itself.
+// maxCountedValues. Each array and object is counted once however often it
+// appears, so a Go value that shares or contains itself is counted in time
+// linear in its distinct parts.
 func countValues(v any) int {
 	n := 0
+	var seen map[uintptr]struct{}
 	stack := []any{v}
 	for len(stack) > 0 && n < maxCountedValues {
 		x := stack[len(stack)-1]
 		stack = stack[:len(stack)-1]
 		n++
+		var p uintptr
+		switch t := x.(type) {
+		case []any:
+			if len(t) == 0 {
+				continue
+			}
+			p = reflect.ValueOf(t).Pointer()
+		case map[string]any:
+			if len(t) == 0 {
+				continue
+			}
+			p = reflect.ValueOf(t).Pointer()
+		default:
+			continue
+		}
+		if seen == nil {
+			seen = map[uintptr]struct{}{}
+		}
+		if _, dup := seen[p]; dup {
+			continue
+		}
+		seen[p] = struct{}{}
 		switch t := x.(type) {
 		case []any:
 			stack = append(stack, t...)
@@ -721,9 +781,13 @@ type branchAnnotations struct {
 // buffers, so branch failures (oneOf / anyOf / if / not) do not contaminate
 // the outer context. The captured errors and annotations are returned for
 // the caller to merge. The outer stopFired flag is preserved across the
-// call.
-func (ctx *runCtx) evaluateBranch(sub *subschema, instance any) ([]ValidationError, branchAnnotations) {
+// call. The branch's errors are not left charged against the evaluation
+// budget, so errors that a passing anyOf or oneOf discards do not count;
+// cost is their charge, for a caller that keeps them to pass to
+// chargeErrors.
+func (ctx *runCtx) evaluateBranch(sub *subschema, instance any) (errs []ValidationError, annos branchAnnotations, cost int) {
 	saved := ctx.errors
+	savedCost := ctx.errCost
 	savedAnno := ctx.annoEntries
 	savedScope := ctx.scope
 	savedStop := ctx.stopFired
@@ -734,14 +798,17 @@ func (ctx *runCtx) evaluateBranch(sub *subschema, instance any) ([]ValidationErr
 	// Branches are speculative; their stopFired must not affect siblings.
 	ctx.stopFired = false
 	ctx.run(sub, instance)
-	br := ctx.errors
-	annos := branchAnnotations{entries: ctx.annoEntries, scope: ctx.scope}
+	errs = ctx.errors
+	annos = branchAnnotations{entries: ctx.annoEntries, scope: ctx.scope}
+	cost = ctx.errCost - savedCost
+	ctx.evals -= cost
+	ctx.errCost = savedCost
 	ctx.errors = saved
 	ctx.annoEntries = savedAnno
 	ctx.scope = savedScope
 	ctx.stopFired = savedStop
 	ctx.failCount = savedFails
-	return br, annos
+	return errs, annos, cost
 }
 
 // addError appends a ValidationError at the current instance/schema location.
@@ -1132,10 +1199,9 @@ func (b *evalBuilder) targetBase(target any, fallback string) string {
 // buildAll builds every subschema validation can reach: the targets of
 // every reference, and for dynamic references every schema in the resource
 // map that the dynamic scope could select. Remote documents are fetched
-// here, so a reference that cannot be resolved fails compilation. Once it
-// returns, the builder is frozen: validation only reads the subschema cache
-// and the resource map.
-func (b *evalBuilder) buildAll() error {
+// here. Once it returns, the builder is frozen: validation only reads the
+// subschema cache and the resource map.
+func (b *evalBuilder) buildAll() {
 	var w refWork
 	done := map[*subschema]bool{}
 	for {
@@ -1145,16 +1211,11 @@ func (b *evalBuilder) buildAll() error {
 		}
 		for _, sub := range pending {
 			done[sub] = true
-			if err := w.buildTargets(sub); err != nil {
-				return err
-			}
+			w.buildTargets(sub)
 		}
-		if err := w.buildDynamicTargets(b.rm); err != nil {
-			return err
-		}
+		w.buildDynamicTargets(b.rm)
 	}
 	b.frozen = true
-	return nil
 }
 
 // unvisited returns the cached subschemas not in done, sorted by location
@@ -1178,38 +1239,40 @@ type refWork struct {
 	recursive []*recursiveRefEval
 }
 
-// buildTargets builds the static targets of sub's reference keywords.
-func (w *refWork) buildTargets(sub *subschema) error {
+// buildTargets builds the static targets of sub's reference keywords. A
+// target that cannot be resolved or built does not fail Compile: the
+// reference reports the error when an instance reaches it.
+func (w *refWork) buildTargets(sub *subschema) {
 	for _, ev := range sub.evaluators {
-		var err error
 		switch e := ev.(type) {
 		case *refEval:
-			if e.target == nil {
-				return &CompileError{KeywordLocation: e.loc, Message: fmt.Sprintf("cannot resolve $ref %q", e.source)}
+			if e.err != nil || e.target == nil {
+				continue
 			}
-			e.sub, err = e.build(e.target)
+			if built, err := e.build(e.target); err != nil {
+				e.err = fmt.Errorf("cannot build subschema for %q: %w", e.source, err)
+			} else {
+				e.sub = built
+			}
 		case *dynamicRefEval:
 			w.dynamic = append(w.dynamic, e)
 			if e.target != nil {
-				_, err = e.build(e.target)
+				e.prebuild(e.target)
 			}
 		case *recursiveRefEval:
 			w.recursive = append(w.recursive, e)
 			if e.target != nil {
-				_, err = e.build(e.target)
+				e.prebuild(e.target)
 			}
 		}
-		if err != nil {
-			return err
-		}
 	}
-	return nil
 }
 
 // buildDynamicTargets builds every schema the dynamic scope could select:
 // each matching $dynamicAnchor for a $dynamicRef, and each resource root
-// with "$recursiveAnchor": true for a $recursiveRef.
-func (w *refWork) buildDynamicTargets(rm *resourceMap) error {
+// with "$recursiveAnchor": true for a $recursiveRef. As in buildTargets, a
+// target that cannot be built fails only the instances that reach it.
+func (w *refWork) buildDynamicTargets(rm *resourceMap) {
 	for _, uri := range rm.order {
 		res := rm.byURI[uri]
 		if res == nil {
@@ -1217,21 +1280,16 @@ func (w *refWork) buildDynamicTargets(rm *resourceMap) error {
 		}
 		for _, e := range w.dynamic {
 			if t, ok := res.dynamicAnchors[e.fragmentName]; ok && e.fragmentName != "" {
-				if _, err := e.build(t); err != nil {
-					return err
-				}
+				e.prebuild(t)
 			}
 		}
 		if !res.recursiveAnchor {
 			continue
 		}
 		for _, e := range w.recursive {
-			if _, err := e.build(res.root); err != nil {
-				return err
-			}
+			e.prebuild(res.root)
 		}
 	}
-	return nil
 }
 
 // draftAt returns the draft in effect at node: its own $schema, else the

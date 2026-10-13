@@ -48,6 +48,12 @@ type keywordBinding struct {
 // The schema's effective draft is determined by the $schema keyword if
 // present; otherwise the package falls back to the value passed via
 // [WithDefaultDraft], then [DraftDefault].
+//
+// Compile fetches every document the schema references, so validation
+// never calls the [Loader]. A $ref inside a fetched document that cannot be
+// resolved, or a $ref target that does not compile (such as a pattern
+// using lookaround), does not fail Compile: each validation that reaches
+// that reference records a [ValidationError] whose Cause is the error.
 func Compile(schemaJSON []byte, opts ...CompileOption) (*Schema, error) {
 	c := NewCompiler(opts...)
 	return c.Compile(schemaJSON)
@@ -428,10 +434,9 @@ func (c *Compiler) compile(value any, rawSource []byte, baseURI string) (*Schema
 	if err != nil {
 		return nil, err
 	}
-	if err := eb.buildAll(); err != nil {
-		return nil, err
-	}
+	eb.buildAll()
 	schema.root = root
+	schema.subschemas = len(eb.cache)
 
 	if c.opts.metaSchemaValidation {
 		if err := validateAgainstMetaSchema(schema, value, draft, metaSchemaURI); err != nil {

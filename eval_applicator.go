@@ -36,9 +36,10 @@ func (e *anyOfEval) keyword() string { return "anyOf" }
 // otherwise it stops at the first passing branch.
 func (e *anyOfEval) eval(ctx *runCtx, instance any) {
 	var allCauses []ValidationError
+	causesCost := 0
 	passed := false
 	for _, sub := range e.subs {
-		errs, annos := ctx.evaluateBranch(sub, instance)
+		errs, annos, cost := ctx.evaluateBranch(sub, instance)
 		if len(errs) == 0 {
 			passed = true
 			ctx.addBranchAnnotations(annos)
@@ -49,9 +50,11 @@ func (e *anyOfEval) eval(ctx *runCtx, instance any) {
 		}
 		if !passed {
 			allCauses = append(allCauses, errs...)
+			causesCost += cost
 		}
 	}
 	if !passed {
+		ctx.chargeErrors(causesCost)
 		ctx.addCausesError(e.loc, "anyOf", "no anyOf branch matched", allCauses)
 	}
 }
@@ -68,8 +71,9 @@ func (e *oneOfEval) eval(ctx *runCtx, instance any) {
 	var passingAnnos branchAnnotations
 	var passingIdx []int
 	var allCauses []ValidationError
+	causesCost := 0
 	for i, sub := range e.subs {
-		errs, annos := ctx.evaluateBranch(sub, instance)
+		errs, annos, cost := ctx.evaluateBranch(sub, instance)
 		if len(errs) == 0 {
 			passingIdx = append(passingIdx, i)
 			if len(passingIdx) == 2 {
@@ -79,9 +83,11 @@ func (e *oneOfEval) eval(ctx *runCtx, instance any) {
 			passingAnnos = annos
 		} else {
 			allCauses = append(allCauses, errs...)
+			causesCost += cost
 		}
 	}
 	if len(passingIdx) == 0 {
+		ctx.chargeErrors(causesCost)
 		ctx.addCausesError(e.loc, "oneOf", "no oneOf branch matched", allCauses)
 		return
 	}
@@ -96,7 +102,7 @@ type notEval struct {
 func (e *notEval) keyword() string { return "not" }
 
 func (e *notEval) eval(ctx *runCtx, instance any) {
-	errs, _ := ctx.evaluateBranch(e.sub, instance)
+	errs, _, _ := ctx.evaluateBranch(e.sub, instance)
 	if len(errs) == 0 {
 		ctx.addError(e.loc, "not", "", "value matched 'not' subschema")
 	}
@@ -172,7 +178,7 @@ type ifThenElseEval struct {
 func (e *ifThenElseEval) keyword() string { return "if" }
 
 func (e *ifThenElseEval) eval(ctx *runCtx, instance any) {
-	errs, annos := ctx.evaluateBranch(e.ifSub, instance)
+	errs, annos, _ := ctx.evaluateBranch(e.ifSub, instance)
 	ifPassed := len(errs) == 0
 	if ifPassed {
 		ctx.addBranchAnnotations(annos)
@@ -721,7 +727,7 @@ func (e *containsEval) eval(ctx *runCtx, instance any) {
 		ctx.pushInstance(itoaInt(i))
 		depth := ctx.refDepth
 		ctx.refDepth = 0
-		errs, _ := ctx.evaluateBranch(e.sub, item)
+		errs, _, _ := ctx.evaluateBranch(e.sub, item)
 		ctx.refDepth = depth
 		ctx.popInstance()
 		if len(errs) == 0 {

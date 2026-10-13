@@ -143,8 +143,8 @@ func TestLoaderDenyPrivate(t *testing.T) {
 	}))
 	t.Cleanup(srv.Close)
 	l := &Loader{AllowHTTP: true, DenyPrivate: true}
-	if _, err := l.Load(srv.URL + "/a.json"); !errors.Is(err, errPrivateAddress) {
-		t.Errorf("DenyPrivate Load of loopback err = %v, want errPrivateAddress", err)
+	if _, err := l.Load(srv.URL + "/a.json"); !errors.Is(err, ErrPrivateAddress) {
+		t.Errorf("DenyPrivate Load of loopback err = %v, want ErrPrivateAddress", err)
 	}
 	open := &Loader{AllowHTTP: true}
 	if _, err := open.Load(srv.URL + "/a.json"); err != nil {
@@ -191,8 +191,8 @@ func TestIsPublicAddr(t *testing.T) {
 // silently ignored when a custom Client is set.
 func TestDenyPrivateWithCustomClientFails(t *testing.T) {
 	l := &Loader{Client: &http.Client{}, DenyPrivate: true}
-	if _, err := l.Load("https://example.com/s.json"); !errors.Is(err, errDenyPrivateClient) {
-		t.Errorf("err = %v; want errDenyPrivateClient", err)
+	if _, err := l.Load("https://example.com/s.json"); !errors.Is(err, ErrDenyPrivateClient) {
+		t.Errorf("err = %v; want ErrDenyPrivateClient", err)
 	}
 }
 

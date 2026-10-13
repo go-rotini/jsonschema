@@ -52,10 +52,17 @@ var (
 	errBodyTooLarge     = errors.New("http: body exceeds MaxBodySize")
 	errTooManyRedirects = errors.New("http: too many redirects")
 	errInsecureRedirect = errors.New("http: redirect from https to http without AllowHTTP")
-	errPrivateAddress   = errors.New("http: address is loopback, private, link-local or unspecified")
-	// errDenyPrivateClient reports DenyPrivate set with a custom Client,
+)
+
+// Errors a [Loader] with DenyPrivate set returns, wrapped in a
+// [*jsonschema.LoaderError]; test for them with [errors.Is].
+var (
+	// ErrPrivateAddress reports a fetch refused because the host resolved
+	// to a loopback, private, link-local or unspecified address.
+	ErrPrivateAddress = errors.New("http: address is loopback, private, link-local or unspecified")
+	// ErrDenyPrivateClient reports DenyPrivate set with a custom Client,
 	// whose dialer the Loader cannot check.
-	errDenyPrivateClient = errors.New("http: DenyPrivate needs the built-in client; Client is set")
+	ErrDenyPrivateClient = errors.New("http: DenyPrivate needs the built-in client; Client is set")
 )
 
 // Loader is a [jsonschema.Loader] that resolves http:// and https:// URIs
@@ -205,7 +212,7 @@ func (l *Loader) fetch(uri string) ([]byte, error) {
 	if client == nil {
 		client = l.builtinClient()
 	} else if l.DenyPrivate {
-		return nil, &jsonschema.LoaderError{URI: uri, Cause: errDenyPrivateClient}
+		return nil, &jsonschema.LoaderError{URI: uri, Cause: ErrDenyPrivateClient}
 	}
 	state := &fetchState{allowHTTP: l.AllowHTTP}
 	ctx, cancel := context.WithTimeout(context.WithValue(context.Background(), fetchStateKey{}, state), timeout)
@@ -295,10 +302,10 @@ func defaultHTTPTransport(denyPrivate bool) *http.Transport {
 func denyPrivateControl(_, address string, _ syscall.RawConn) error {
 	ap, err := netip.ParseAddrPort(address)
 	if err != nil {
-		return fmt.Errorf("%w: %s", errPrivateAddress, address)
+		return fmt.Errorf("%w: %s", ErrPrivateAddress, address)
 	}
 	if !isPublicAddr(ap.Addr()) {
-		return fmt.Errorf("%w: %s", errPrivateAddress, ap.Addr())
+		return fmt.Errorf("%w: %s", ErrPrivateAddress, ap.Addr())
 	}
 	return nil
 }

@@ -55,19 +55,51 @@ func TestRemoteRefsResolvedAtCompile(t *testing.T) {
 	}
 }
 
-// TestUnresolvableNestedRefFailsCompile checks that a $ref inside a fetched
-// document that cannot be resolved fails Compile rather than every
-// validation.
-func TestUnresolvableNestedRefFailsCompile(t *testing.T) {
+// TestUnresolvableRefFailsReachingInstances checks that a $ref that cannot
+// be resolved, or whose target cannot be built, compiles and fails only the
+// instances that reach it, without calling the loader during validation.
+func TestUnresolvableRefFailsReachingInstances(t *testing.T) {
 	l := &countingLoader{m: MapLoader{
 		"http://x/a.json": []byte(`{"$ref":"missing.json"}`),
 	}}
-	_, err := Compile([]byte(`{"$ref":"http://x/a.json"}`), WithLoader(l))
-	if _, ok := errors.AsType[*CompileError](err); !ok {
-		t.Fatalf("err = %v, want *CompileError", err)
+	s, err := Compile([]byte(`{"properties":{
+		"a":{"$ref":"http://x/a.json"},
+		"b":{"$ref":"#/$defs/look"}},
+		"$defs":{"look":{"pattern":"^(?!0)[0-9]+$"}}}`), WithLoader(l))
+	if err != nil {
+		t.Fatal(err)
 	}
-	if re, ok := errors.AsType[*RefError](err); !ok || re.BaseURI != "http://x/a.json" {
-		t.Fatalf("err = %v, want a RefError against the fetched document's base", err)
+	fetched := l.n.Load()
+	if res, err := s.Validate([]byte(`{"x":1}`)); err != nil || !res.Valid {
+		t.Fatalf("instance reaching no reference: res=%+v err=%v", res, err)
+	}
+	for _, inst := range []string{`{"a":1}`, `{"b":"1"}`} {
+		res, err := s.Validate([]byte(inst))
+		if err != nil || res.Valid || len(res.Errors) != 1 || res.Errors[0].Keyword != "$ref" {
+			t.Fatalf("%s: res=%+v err=%v", inst, res, err)
+		}
+	}
+	res, _ := s.Validate([]byte(`{"a":1}`))
+	if re, ok := errors.AsType[*RefError](&res.Errors[0]); !ok || re.BaseURI != "http://x/a.json" {
+		t.Fatalf("cause = %v, want a RefError against the fetched document's base", res.Errors[0].Cause)
+	}
+	res, _ = s.Validate([]byte(`{"b":"1"}`))
+	if !errors.Is(&res.Errors[0], errECMAUnsupported) {
+		t.Fatalf("cause = %v, want the unsupported-pattern error", res.Errors[0].Cause)
+	}
+	if got := l.n.Load(); got != fetched {
+		t.Fatalf("validation fetched %d documents", got-fetched)
+	}
+}
+
+// TestLegacyPlainNameIDNextToRef checks that a Draft 7 plain-name $id next
+// to $ref still names that schema, as schemas such as NIST OSCAL expect.
+func TestLegacyPlainNameIDNextToRef(t *testing.T) {
+	const schema = `{"$schema":"http://json-schema.org/draft-07/schema#",
+		"properties":{"v":{"$ref":"#value"}},
+		"definitions":{"value":{"$id":"#value","$ref":"#/definitions/str"},"str":{"type":"string"}}}`
+	if !validOf(t, schema, `{"v":"a"}`) || validOf(t, schema, `{"v":1}`) {
+		t.Error("plain-name $id next to $ref not honoured")
 	}
 }
 

@@ -159,9 +159,12 @@
 //     bytes before parsing.
 //   - [WithMaxKeyCount] caps the number of keys visited on one object.
 //   - [WithMaxEvaluations] caps the subschema evaluations of one
-//     validation (by default 100 per instance value, at least 1,000,000),
-//     so references that branch back on themselves cannot take
-//     exponential time; exceeding it returns [ErrMaxEvaluations].
+//     validation, so references that branch back on themselves cannot take
+//     exponential time; exceeding it returns [ErrMaxEvaluations]. By
+//     default it allows, for each instance value, as many evaluations as
+//     the compiled schema has subschemas (at least 100), and at least
+//     1,000,000 in all. [WithDefaultMaxEvaluations] sets the cap at
+//     compile time.
 //   - The compiler turns $ref cycles into lazy edges that are followed at
 //     validation time, bounded by [WithMaxRefDepth], so they cannot
 //     overflow the stack.
