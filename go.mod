@@ -2,7 +2,7 @@ module github.com/go-rotini/jsonschema
 
 go 1.26
 
-toolchain go1.26.4
+toolchain go1.26.9
 
 require (
 	github.com/go-rotini/jsonc v1.1.1
