@@ -108,11 +108,12 @@ func (e *contentSchemaEval) eval(ctx *runCtx, instance any) {
 	// describe this instance, so they are not kept.
 	ctx.growEvalLimit(parsed)
 	branch, _, cost := ctx.evaluateBranch(e.sub, parsed)
-	if len(branch) > 0 {
-		ctx.chargeErrors(cost)
-		ctx.addCausesError(e.loc, "contentSchema",
-			"decoded content does not validate against contentSchema", branch)
+	if len(branch) == 0 {
+		ctx.refundErrors(cost)
+		return
 	}
+	ctx.addCausesError(e.loc, "contentSchema",
+		"decoded content does not validate against contentSchema", branch, cost)
 }
 
 // errUnknownEncoding signals that contentEncoding named an unrecognized

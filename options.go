@@ -299,10 +299,12 @@ func WithCollectAnnotations(b bool) Option {
 // WithMaxEvaluations caps how many subschema evaluations one validation may
 // perform. A schema whose references branch, such as an allOf holding two
 // $refs back to itself, can otherwise need time exponential in its depth.
-// Each recorded error also counts, one evaluation per 32 bytes it holds, so
-// the cap bounds memory too. Exceeding the cap stops validation, which then
-// returns [ErrMaxEvaluations] and no [Result]. Errors that a passing anyOf
-// or oneOf discards do not count. n > 0 sets the cap and n < 0 removes it.
+// Each error held also counts, one evaluation per 32 bytes, so the cap
+// bounds memory too; this includes the errors of failed anyOf and oneOf
+// branches while the keyword is still being evaluated. Errors a passing
+// anyOf or oneOf discards stop counting once it passes. Exceeding the cap
+// stops validation, which then returns [ErrMaxEvaluations] and no
+// [Result]. n > 0 sets the cap and n < 0 removes it.
 // Default (0): the cap set by [WithDefaultMaxEvaluations] when the schema
 // was compiled with one; otherwise, for each value in the instance (every
 // object, array and scalar, decoded content included), as many evaluations

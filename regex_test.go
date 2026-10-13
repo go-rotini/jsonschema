@@ -233,3 +233,46 @@ func TestQuantifiedAssertion(t *testing.T) {
 		}
 	}
 }
+
+// TestModifierGroups checks that ECMA-262 modifier groups apply only inside
+// the group and leave the rest of the pattern its ECMA-262 meaning.
+func TestModifierGroups(t *testing.T) {
+	cases := []struct {
+		pattern, instance string
+		want              bool
+	}{
+		{`^(?i:a)b$`, `"Ab"`, true},
+		{`^(?i:a)b$`, `"AB"`, false},
+		{`^(?i:a(?-i:b))$`, `"Ab"`, true},
+		{`^(?i:a(?-i:b))$`, `"AB"`, false},
+		{`^(?i:a)\.$`, `"a."`, true},
+		{`(?i:a).`, `"a\r"`, false},
+		{`^(?i:a)?\S$`, `"%u00a0"`, false},
+		{`^(?i:a)?\S$`, `"\u000b"`, false},
+		{`[\s](?i:a)`, `" a"`, true},
+		{`^(?s:.)$`, `"\n"`, true},
+		{`^(?s:a)(.)$`, `"a\n"`, false},
+		{`^(?s:(?-s:.))$`, `"\n"`, false},
+		{`^(?is:A.)$`, `"a%u2028"`, true},
+		{`(?m:^b)`, `"a\nb"`, true},
+		{`^b`, `"a\nb"`, false},
+		{`^(?i-:a)$`, `"A"`, true},
+	}
+	for _, tc := range cases {
+		pattern, instance := uEsc(tc.pattern), uEsc(tc.instance)
+		schema := `{"pattern":` + jsonString(pattern) + `}`
+		if got := validOf(t, schema, instance); got != tc.want {
+			t.Errorf("pattern %s with %s: valid=%v, want %v", pattern, instance, got, tc.want)
+		}
+	}
+	for _, p := range []string{`(?i:a)*`, `(?-i:a)`, `(?ims:a)`, `(?i-ms:a)`, `(?s-:a)`} {
+		if err := validateRegex(p); err != nil {
+			t.Errorf("regex format rejected %s: %v", p, err)
+		}
+	}
+	for _, p := range []string{`(?-:a)`, `(?ii:a)`, `(?i-i:a)`, `(?x:a)`, `(?I:a)`, `(?i`, `(?i-s-m:a)`} {
+		if validateRegex(p) == nil {
+			t.Errorf("regex format accepted %s", p)
+		}
+	}
+}

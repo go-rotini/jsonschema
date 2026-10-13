@@ -564,6 +564,13 @@ func (ctx *runCtx) chargeErrors(cost int) {
 	}
 }
 
+// refundErrors takes back the charge of errors that were held and are
+// dropped.
+func (ctx *runCtx) refundErrors(cost int) {
+	ctx.errCost -= cost
+	ctx.evals -= cost
+}
+
 // countValues returns the number of JSON values in v, v included, up to
 // maxCountedValues. Each array and object is counted once however often it
 // appears, so a Go value that shares or contains itself is counted in time
@@ -781,10 +788,9 @@ type branchAnnotations struct {
 // buffers, so branch failures (oneOf / anyOf / if / not) do not contaminate
 // the outer context. The captured errors and annotations are returned for
 // the caller to merge. The outer stopFired flag is preserved across the
-// call. The branch's errors are not left charged against the evaluation
-// budget, so errors that a passing anyOf or oneOf discards do not count;
-// cost is their charge, for a caller that keeps them to pass to
-// chargeErrors.
+// call. The branch's errors stay charged against the evaluation budget
+// while the caller holds them; cost is their charge, which the caller
+// passes to refundErrors when it drops them.
 func (ctx *runCtx) evaluateBranch(sub *subschema, instance any) (errs []ValidationError, annos branchAnnotations, cost int) {
 	saved := ctx.errors
 	savedCost := ctx.errCost
@@ -801,8 +807,6 @@ func (ctx *runCtx) evaluateBranch(sub *subschema, instance any) (errs []Validati
 	errs = ctx.errors
 	annos = branchAnnotations{entries: ctx.annoEntries, scope: ctx.scope}
 	cost = ctx.errCost - savedCost
-	ctx.evals -= cost
-	ctx.errCost = savedCost
 	ctx.errors = saved
 	ctx.annoEntries = savedAnno
 	ctx.scope = savedScope
@@ -852,10 +856,12 @@ func (ctx *runCtx) addErrorWithCause(keywordLoc, keyword, _, msg string, cause e
 	}
 }
 
-// addCausesError appends a compound error with nested causes.
-func (ctx *runCtx) addCausesError(keywordLoc, keyword, msg string, causes []ValidationError) {
+// addCausesError appends a compound error with nested causes; causesCost
+// is the charge the causes hold, refunded if the error is not kept.
+func (ctx *runCtx) addCausesError(keywordLoc, keyword, msg string, causes []ValidationError, causesCost int) {
 	ctx.failCount++
 	if ctx.opts.maxErrors > 0 && len(ctx.errors) >= ctx.opts.maxErrors {
+		ctx.refundErrors(causesCost)
 		return
 	}
 	ctx.errors = append(ctx.errors, ValidationError{

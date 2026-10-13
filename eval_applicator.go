@@ -40,8 +40,15 @@ func (e *anyOfEval) eval(ctx *runCtx, instance any) {
 	passed := false
 	for _, sub := range e.subs {
 		errs, annos, cost := ctx.evaluateBranch(sub, instance)
+		if len(errs) == 0 || passed {
+			ctx.refundErrors(cost)
+		}
 		if len(errs) == 0 {
-			passed = true
+			if !passed {
+				passed = true
+				ctx.refundErrors(causesCost)
+				allCauses, causesCost = nil, 0
+			}
 			ctx.addBranchAnnotations(annos)
 			if !ctx.needScope && !ctx.public {
 				return
@@ -54,8 +61,7 @@ func (e *anyOfEval) eval(ctx *runCtx, instance any) {
 		}
 	}
 	if !passed {
-		ctx.chargeErrors(causesCost)
-		ctx.addCausesError(e.loc, "anyOf", "no anyOf branch matched", allCauses)
+		ctx.addCausesError(e.loc, "anyOf", "no anyOf branch matched", allCauses, causesCost)
 	}
 }
 
@@ -74,21 +80,26 @@ func (e *oneOfEval) eval(ctx *runCtx, instance any) {
 	causesCost := 0
 	for i, sub := range e.subs {
 		errs, annos, cost := ctx.evaluateBranch(sub, instance)
+		if len(errs) == 0 || len(passingIdx) > 0 {
+			// Once a branch has passed, no branch's errors are kept.
+			ctx.refundErrors(cost)
+		}
 		if len(errs) == 0 {
 			passingIdx = append(passingIdx, i)
 			if len(passingIdx) == 2 {
 				ctx.addError(e.loc, "oneOf", "", fmt.Sprintf("oneOf matched more than one branch (indices %d and %d); expected exactly one", passingIdx[0], passingIdx[1]))
 				return
 			}
+			ctx.refundErrors(causesCost)
+			allCauses, causesCost = nil, 0
 			passingAnnos = annos
-		} else {
+		} else if len(passingIdx) == 0 {
 			allCauses = append(allCauses, errs...)
 			causesCost += cost
 		}
 	}
 	if len(passingIdx) == 0 {
-		ctx.chargeErrors(causesCost)
-		ctx.addCausesError(e.loc, "oneOf", "no oneOf branch matched", allCauses)
+		ctx.addCausesError(e.loc, "oneOf", "no oneOf branch matched", allCauses, causesCost)
 		return
 	}
 	ctx.addBranchAnnotations(passingAnnos)
@@ -102,7 +113,8 @@ type notEval struct {
 func (e *notEval) keyword() string { return "not" }
 
 func (e *notEval) eval(ctx *runCtx, instance any) {
-	errs, _, _ := ctx.evaluateBranch(e.sub, instance)
+	errs, _, cost := ctx.evaluateBranch(e.sub, instance)
+	ctx.refundErrors(cost)
 	if len(errs) == 0 {
 		ctx.addError(e.loc, "not", "", "value matched 'not' subschema")
 	}
@@ -178,7 +190,8 @@ type ifThenElseEval struct {
 func (e *ifThenElseEval) keyword() string { return "if" }
 
 func (e *ifThenElseEval) eval(ctx *runCtx, instance any) {
-	errs, annos, _ := ctx.evaluateBranch(e.ifSub, instance)
+	errs, annos, cost := ctx.evaluateBranch(e.ifSub, instance)
+	ctx.refundErrors(cost)
 	ifPassed := len(errs) == 0
 	if ifPassed {
 		ctx.addBranchAnnotations(annos)
@@ -727,7 +740,8 @@ func (e *containsEval) eval(ctx *runCtx, instance any) {
 		ctx.pushInstance(itoaInt(i))
 		depth := ctx.refDepth
 		ctx.refDepth = 0
-		errs, _, _ := ctx.evaluateBranch(e.sub, item)
+		errs, _, cost := ctx.evaluateBranch(e.sub, item)
+		ctx.refundErrors(cost)
 		ctx.refDepth = depth
 		ctx.popInstance()
 		if len(errs) == 0 {

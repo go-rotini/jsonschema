@@ -52,8 +52,12 @@ type keywordBinding struct {
 // Compile fetches every document the schema references, so validation
 // never calls the [Loader]. A $ref inside a fetched document that cannot be
 // resolved, or a $ref target that does not compile (such as a pattern
-// using lookaround), does not fail Compile: each validation that reaches
-// that reference records a [ValidationError] whose Cause is the error.
+// using lookaround), does not fail Compile: each evaluation that reaches
+// that reference fails it, with a [ValidationError] whose Cause is the
+// error. That failure counts like any failing keyword, so where a failing
+// subschema is allowed it can let the instance pass: under not the
+// instance passes, if takes else, and anyOf or oneOf go on to their other
+// branches.
 func Compile(schemaJSON []byte, opts ...CompileOption) (*Schema, error) {
 	c := NewCompiler(opts...)
 	return c.Compile(schemaJSON)

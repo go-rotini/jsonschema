@@ -81,7 +81,7 @@ func validateDateTime(s string) error {
 	// Validate structure ourselves (Go's time.Parse is too permissive on
 	// offset bounds — it accepts -24:00 and +10:60). Then defer to time.Parse
 	// for the date-portion calendar arithmetic.
-	if len(s) < 20 {
+	if len(s) < 11 {
 		return formatErr("date-time", s, "too short")
 	}
 	if s[10] != 'T' && s[10] != 't' {
@@ -91,6 +91,9 @@ func validateDateTime(s string) error {
 		return formatErrCause("date-time", s, err)
 	}
 	if !isFullTime(s[11:]) {
+		if isFullTime(s[11:] + "Z") {
+			return formatErr("date-time", s, "time zone missing (Z or an offset such as +01:00)")
+		}
 		return formatErr("date-time", s, "invalid time component")
 	}
 	return nil
@@ -739,6 +742,9 @@ func validateRelativeJSONPointer(s string) error {
 
 // validateIPv4 accepts a dotted-quad address.
 func validateIPv4(s string) error {
+	if len(s) > len("255.255.255.255") {
+		return formatErr("ipv4", s, "too long")
+	}
 	addr, err := netip.ParseAddr(s)
 	if err != nil {
 		return formatErrCause("ipv4", s, err)
@@ -753,6 +759,9 @@ func validateIPv4(s string) error {
 func validateIPv6(s string) error {
 	if strings.Contains(s, "%") {
 		return formatErr("ipv6", s, "zone id not allowed")
+	}
+	if len(s) > len("ffff:ffff:ffff:ffff:ffff:ffff:255.255.255.255") {
+		return formatErr("ipv6", s, "too long")
 	}
 	addr, err := netip.ParseAddr(s)
 	if err != nil {
@@ -938,9 +947,9 @@ func idnMap(r rune) rune {
 // 5890/5891): after mapping fullwidth forms to ASCII, labels separated by
 // "." or an ideographic full stop, each an
 // ASCII label, a valid A-label, or a U-label of allowed characters, with
-// an ASCII form of at most 63 bytes per label and 253 in all. CONTEXTJ,
-// CONTEXTO and the Bidi rule, which need Unicode property tables, are not
-// checked.
+// an ASCII form of at most 63 bytes per label and 253 in all, and the
+// RFC 5892 CONTEXTO rules. CONTEXTJ and the Bidi rule, which need Unicode
+// property tables, are not checked.
 func validateIDNHostname(s string) error {
 	name := strings.Map(idnMap, s)
 	if name == "" || len(s) > 255*4 {
@@ -1195,8 +1204,8 @@ func validateAddrDomain(domain string, allowIDN bool) error {
 
 // validateRegex checks that s is ECMA-262 regex syntax: the "u" flag's
 // escapes, plus the identity escape of any character that is not an ASCII
-// letter or digit. Backreferences and lookaround are valid ECMA-262 even
-// though RE2 cannot run them.
+// letter or digit, and modifier groups such as (?i:...). Backreferences and
+// lookaround are valid ECMA-262 even though RE2 cannot run them.
 func validateRegex(s string) error {
 	// Constructs RE2 cannot run are valid ECMA-262; the translation stands
 	// placeholders in for them, so the rest is still checked.

@@ -1078,3 +1078,40 @@ func TestHostnameContextO(t *testing.T) {
 		}
 	}
 }
+
+// TestFormatErrorMessage checks that a format failure's message says why
+// the value failed without repeating the format name or quoting the value,
+// and that the FormatError cause keeps the value.
+func TestFormatErrorMessage(t *testing.T) {
+	cases := []struct {
+		format, value, want string
+	}{
+		{"date-time", "2024-01-02T03:04:05",
+			`value does not match format "date-time": time zone missing (Z or an offset such as +01:00)`},
+		{"date-time", "2024-01-02T03:04:05.123", `value does not match format "date-time": time zone missing (Z or an offset such as +01:00)`},
+		{"date-time", "2024-01-02", `value does not match format "date-time": too short`},
+		{"date-time", "2024-01-02T25:04:05Z", `value does not match format "date-time": invalid time component`},
+		{"ipv4", strings.Repeat("9", 10_000), `value does not match format "ipv4": too long`},
+		{"ipv6", strings.Repeat("1", 10_000), `value does not match format "ipv6": too long`},
+		{"uri", "http://h:port" + strings.Repeat("x", 10_000), `value does not match format "uri": invalid port ":portxxx`},
+	}
+	for _, tc := range cases {
+		s := MustCompile([]byte(`{"format":` + jsonString(tc.format) + `}`))
+		res, err := s.Validate([]byte(jsonString(tc.value)), WithFormatAssertion(true))
+		if err != nil || res.Valid || len(res.Errors) != 1 {
+			t.Fatalf("%s %.20q: res=%v err=%v", tc.format, tc.value, res, err)
+		}
+		e := res.Errors[0]
+		if !strings.HasPrefix(e.Message, tc.want) || strings.Contains(e.Message, tc.value) || len(e.Message) > 400 {
+			t.Errorf("%s %.20q: message %q, want %q", tc.format, tc.value, e.Message, tc.want)
+		}
+		var fe *FormatError
+		if !errors.As(e.Cause, &fe) || fe.Value != tc.value {
+			t.Errorf("%s %.20q: cause %v does not keep the value", tc.format, tc.value, e.Cause)
+		}
+	}
+	long := formatDetail(errors.New(strings.Repeat("é", 300)))
+	if len(long) > maxFormatDetail+len("…") || !strings.HasSuffix(long, "…") {
+		t.Errorf("long detail not cut: %d bytes", len(long))
+	}
+}

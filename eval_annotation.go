@@ -1,7 +1,11 @@
 package jsonschema
 
 import (
+	"errors"
+	"net/url"
 	"strconv"
+	"strings"
+	"unicode/utf8"
 )
 
 // annotationEval is the evaluator for purely-annotation keywords. It records
@@ -71,7 +75,7 @@ func (e *formatEval) eval(ctx *runCtx, instance any) {
 	}
 	if err := fn(s); err != nil {
 		ctx.addErrorWithCause(e.loc, "format", "format",
-			"value does not match format "+strconv.Quote(e.format)+": "+err.Error(),
+			"value does not match format "+strconv.Quote(e.format)+": "+formatDetail(err),
 			&FormatError{Format: e.format, Value: s, Cause: err})
 	}
 }
@@ -114,4 +118,30 @@ func registerFormatAndContentKeywords() {
 			return &annotationEval{loc: loc, kw: name, value: raw}, nil
 		})
 	}
+}
+
+// maxFormatDetail is the most bytes of a format failure's detail kept in a
+// ValidationError message.
+const maxFormatDetail = 256
+
+// formatDetail returns why a value failed a format, for a ValidationError
+// message: the cause of a [*FormatError] (and of a [*url.Error] within it),
+// so the message names neither the format nor the value twice, cut to
+// maxFormatDetail bytes. The full value stays in the FormatError.
+func formatDetail(err error) string {
+	if fe, ok := errors.AsType[*FormatError](err); ok && fe.Cause != nil {
+		err = fe.Cause
+	}
+	if ue, ok := errors.AsType[*url.Error](err); ok {
+		err = ue.Err
+	}
+	d := strings.TrimPrefix(err.Error(), errFormatInvalid.Error()+": ")
+	if len(d) <= maxFormatDetail {
+		return d
+	}
+	cut := maxFormatDetail
+	for cut > 0 && !utf8.RuneStart(d[cut]) {
+		cut--
+	}
+	return d[:cut] + "…"
 }

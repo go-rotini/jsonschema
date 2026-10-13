@@ -24,8 +24,12 @@ const ecmaSpace = `\t\n\v\f\r \x{a0}\x{1680}\x{2000}-\x{200a}\x{2028}\x{2029}\x{
 // compileECMA compiles a pattern or patternProperties key: ECMA-262 syntax
 // (the "u" flag's escapes, plus the identity escape of any character that
 // is not an ASCII letter or digit, such as \_ or \:) into an RE2 regexp with
-// the same meaning. A pattern that is not ECMA-262 but is RE2 syntax, such
-// as one using the inline flags (?i) or (?s), compiles with RE2's meaning.
+// the same meaning. Modifier groups such as (?i:...), (?s:...) and
+// (?-i:...) keep their ECMA-262 meaning, except that inside a group with
+// the m modifier, ^ and $ match only at \n, not also at \r, U+2028 or
+// U+2029. A pattern that is not ECMA-262 but is RE2 syntax, such as one
+// using the inline flags (?i) or (?s), compiles as RE2: then every
+// construct in it, . and \s included, takes its RE2 meaning.
 // Backreferences and lookaround have no RE2 equivalent and are reported as
 // errors.
 func compileECMA(p string) (*regexp.Regexp, error) {
@@ -92,11 +96,20 @@ type ecmaTranslator struct {
 	// classNonSpace records a \S in the current class.
 	classNonSpace bool
 	// strict rejects quantified assertions. afterAssertion is set when the
-	// last atom written is an assertion, and lookbehind records, for each
-	// open group, whether it is a lookbehind.
+	// last atom written is an assertion.
 	strict         bool
 	afterAssertion bool
-	lookbehind     []bool
+	// dotAll is set where . matches line terminators too (the s modifier).
+	dotAll bool
+	// groups holds a frame for each open group.
+	groups []groupFrame
+}
+
+// groupFrame describes an open group: whether it is a lookbehind, and the
+// dotAll state to restore when it closes.
+type groupFrame struct {
+	lookbehind bool
+	dotAll     bool
 }
 
 // unsupportedConstruct records an unsupported construct and writes a
@@ -160,17 +173,25 @@ func (t *ecmaTranslator) outsideClass(s string) (int, error) {
 	case '[':
 		return t.openClass(s), nil
 	case '.':
-		t.out.WriteString(`[^\n\r\x{2028}\x{2029}]`)
+		if t.dotAll {
+			t.out.WriteString(`[\x00-\x{10FFFF}]`)
+		} else {
+			t.out.WriteString(`[^\n\r\x{2028}\x{2029}]`)
+		}
 		return 1, nil
 	case '(':
-		t.lookbehind = append(t.lookbehind, strings.HasPrefix(s, "(?<=") || strings.HasPrefix(s, "(?<!"))
+		t.groups = append(t.groups, groupFrame{
+			lookbehind: strings.HasPrefix(s, "(?<=") || strings.HasPrefix(s, "(?<!"),
+			dotAll:     t.dotAll,
+		})
 		if strings.HasPrefix(s, "(?") {
 			return t.group(s)
 		}
 	case ')':
-		if k := len(t.lookbehind); k > 0 {
-			t.afterAssertion = t.lookbehind[k-1]
-			t.lookbehind = t.lookbehind[:k-1]
+		if k := len(t.groups); k > 0 {
+			t.afterAssertion = t.groups[k-1].lookbehind
+			t.dotAll = t.groups[k-1].dotAll
+			t.groups = t.groups[:k-1]
 		}
 	case '^', '$':
 		t.afterAssertion = true
@@ -308,7 +329,48 @@ func (t *ecmaTranslator) group(s string) (int, error) {
 		t.out.WriteByte('>')
 		return end + 1, nil
 	}
+	if n, ok := t.modifierGroup(s); ok {
+		return n, nil
+	}
 	return 0, fmt.Errorf("%w: %q is not an ECMA-262 group", errECMASyntax, s[:min(len(s), 4)])
+}
+
+// modifierGroup translates the modifier group opening at the start of s,
+// "(?" add "-" remove ":" with add and remove drawn from i, m and s, and
+// returns the number of bytes consumed. It reports false if s does not
+// open a valid modifier group. The i and m modifiers become RE2 flags;
+// s is applied to . by the translation itself.
+func (t *ecmaTranslator) modifierGroup(s string) (int, bool) {
+	colon := strings.IndexByte(s, ':')
+	if colon < 0 {
+		return 0, false
+	}
+	add, remove, _ := strings.Cut(s[2:colon], "-")
+	if add == "" && remove == "" {
+		return 0, false
+	}
+	var seen [3]bool
+	for _, c := range []byte(add + remove) {
+		k := strings.IndexByte("ims", c)
+		if k < 0 || seen[k] {
+			return 0, false
+		}
+		seen[k] = true
+	}
+	if strings.IndexByte(add, 's') >= 0 {
+		t.dotAll = true
+	}
+	if strings.IndexByte(remove, 's') >= 0 {
+		t.dotAll = false
+	}
+	add = strings.ReplaceAll(add, "s", "")
+	remove = strings.ReplaceAll(remove, "s", "")
+	t.out.WriteString("(?" + add)
+	if remove != "" {
+		t.out.WriteString("-" + remove)
+	}
+	t.out.WriteByte(':')
+	return colon + 1, true
 }
 
 func isGroupName(s string) bool {
