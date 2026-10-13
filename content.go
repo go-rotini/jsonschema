@@ -17,6 +17,8 @@ import (
 type contentEncodingEval struct {
 	loc      string
 	encoding string
+	// annot is encoding as an annotation value, boxed once.
+	annot any
 }
 
 func (e *contentEncodingEval) keyword() string { return "contentEncoding" }
@@ -26,7 +28,7 @@ func (e *contentEncodingEval) eval(ctx *runCtx, instance any) {
 	if !ok {
 		return
 	}
-	ctx.addAnnotation(e.loc, "contentEncoding", e.encoding)
+	ctx.addAnnotation(e.loc, "contentEncoding", e.annot)
 	if !ctx.opts.contentAssertion {
 		return
 	}
@@ -48,6 +50,8 @@ func (e *contentEncodingEval) eval(ctx *runCtx, instance any) {
 type contentMediaTypeEval struct {
 	loc       string
 	mediaType string
+	// annot is mediaType as an annotation value, boxed once.
+	annot any
 }
 
 func (e *contentMediaTypeEval) keyword() string { return "contentMediaType" }
@@ -57,7 +61,7 @@ func (e *contentMediaTypeEval) eval(ctx *runCtx, instance any) {
 	if !ok {
 		return
 	}
-	ctx.addAnnotation(e.loc, "contentMediaType", e.mediaType)
+	ctx.addAnnotation(e.loc, "contentMediaType", e.annot)
 	if !ctx.opts.contentAssertion {
 		return
 	}

@@ -522,9 +522,18 @@ func (c *Compiler) seedResources(rm *resourceMap) error {
 // keywords" — the strict-keyword option determines which side of that line
 // unknown keys fall on.
 func (c *Compiler) bindAndResolve(rm *resourceMap, node any, baseURI, location string, draft Draft, refStack []string) ([]keywordBinding, error) {
+	var out []keywordBinding
+	if err := c.bindInto(&out, rm, node, baseURI, location, draft, refStack); err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+// bindInto appends the bindings bindAndResolve returns for node to out.
+func (c *Compiler) bindInto(out *[]keywordBinding, rm *resourceMap, node any, baseURI, location string, draft Draft, refStack []string) error {
 	v, ok := node.(map[string]any)
 	if !ok {
-		return nil, nil
+		return nil
 	}
 	idKey, subDraft := bindResolveDraftKey(v, draft)
 	newBaseURI := baseURI
@@ -532,33 +541,30 @@ func (c *Compiler) bindAndResolve(rm *resourceMap, node any, baseURI, location s
 	if _, hasRef := v["$ref"]; !hasRef || subDraft > Draft7 {
 		var err error
 		if newBaseURI, err = bindResolveBaseURI(v, idKey, baseURI, location); err != nil {
-			return nil, err
+			return err
 		}
 	}
-	var out []keywordBinding
 	for _, key := range orderKeys(v) {
 		raw := v[key]
 		loc := location + "/" + escapePointerToken(key)
 		if _, known := LookupKeyword(key, draft); !known && c.opts.strictKeywords {
-			return nil, &CompileError{KeywordLocation: loc, Message: fmt.Sprintf("unknown keyword %q", key), Cause: ErrUnknownKeyword}
+			return &CompileError{KeywordLocation: loc, Message: fmt.Sprintf("unknown keyword %q", key), Cause: ErrUnknownKeyword}
 		}
 		if err := validateKeywordShape(key, raw, loc); err != nil {
-			return nil, err
+			return err
 		}
 		binding, err := c.buildBinding(rm, key, raw, newBaseURI, loc, subDraft, refStack)
 		if err != nil {
-			return nil, err
+			return err
 		}
-		out = append(out, binding)
+		*out = append(*out, binding)
 		if descendsInto(key, draft) {
-			children, err := c.bindAndResolveChild(rm, raw, newBaseURI, loc, subDraft, append(refStack, newBaseURI), key)
-			if err != nil {
-				return nil, err
+			if err := c.bindChildInto(out, rm, raw, newBaseURI, loc, subDraft, append(refStack, newBaseURI), key); err != nil {
+				return err
 			}
-			out = append(out, children...)
 		}
 	}
-	return out, nil
+	return nil
 }
 
 // bindResolveDraftKey returns the draft and id-keyword pair active inside v.
@@ -625,79 +631,66 @@ func (c *Compiler) buildBinding(rm *resourceMap, key string, raw any, baseURI, l
 	return binding, nil
 }
 
-// bindAndResolveChild dispatches descent into keyword-specific child shapes.
-func (c *Compiler) bindAndResolveChild(rm *resourceMap, raw any, baseURI, location string, draft Draft, refStack []string, key string) ([]keywordBinding, error) {
-	var out []keywordBinding
+// bindChildInto dispatches descent into keyword-specific child shapes.
+func (c *Compiler) bindChildInto(out *[]keywordBinding, rm *resourceMap, raw any, baseURI, location string, draft Draft, refStack []string, key string) error {
 	switch key {
 	case keyProperties, keyPatternProperties, keyDefs, keyDefinitions, "dependentSchemas":
 		m, ok := raw.(map[string]any)
 		if !ok {
-			return nil, nil
+			return nil
 		}
 		for _, k := range orderKeys(m) {
 			child := m[k]
 			loc := location + "/" + escapePointerToken(k)
-			children, err := c.bindAndResolve(rm, child, baseURI, loc, draft, refStack)
-			if err != nil {
-				return nil, err
+			if err := c.bindInto(out, rm, child, baseURI, loc, draft, refStack); err != nil {
+				return err
 			}
-			out = append(out, children...)
 		}
 	case "items", "prefixItems":
 		switch t := raw.(type) {
 		case []any:
 			for i, child := range t {
 				loc := location + "/" + escapePointerToken(itoa(i))
-				children, err := c.bindAndResolve(rm, child, baseURI, loc, draft, refStack)
-				if err != nil {
-					return nil, err
+				if err := c.bindInto(out, rm, child, baseURI, loc, draft, refStack); err != nil {
+					return err
 				}
-				out = append(out, children...)
 			}
 		default:
-			children, err := c.bindAndResolve(rm, t, baseURI, location, draft, refStack)
-			if err != nil {
-				return nil, err
+			if err := c.bindInto(out, rm, t, baseURI, location, draft, refStack); err != nil {
+				return err
 			}
-			out = append(out, children...)
 		}
 	case "allOf", "anyOf", "oneOf":
 		arr, ok := raw.([]any)
 		if !ok {
-			return nil, nil
+			return nil
 		}
 		for i, child := range arr {
 			loc := location + "/" + escapePointerToken(itoa(i))
-			children, err := c.bindAndResolve(rm, child, baseURI, loc, draft, refStack)
-			if err != nil {
-				return nil, err
+			if err := c.bindInto(out, rm, child, baseURI, loc, draft, refStack); err != nil {
+				return err
 			}
-			out = append(out, children...)
 		}
 	case "dependencies":
 		m, ok := raw.(map[string]any)
 		if !ok {
-			return nil, nil
+			return nil
 		}
 		for _, k := range orderKeys(m) {
 			child := m[k]
 			loc := location + "/" + escapePointerToken(k)
 			if _, ok := child.(map[string]any); ok {
-				children, err := c.bindAndResolve(rm, child, baseURI, loc, draft, refStack)
-				if err != nil {
-					return nil, err
+				if err := c.bindInto(out, rm, child, baseURI, loc, draft, refStack); err != nil {
+					return err
 				}
-				out = append(out, children...)
 			}
 		}
 	default:
-		children, err := c.bindAndResolve(rm, raw, baseURI, location, draft, refStack)
-		if err != nil {
-			return nil, err
+		if err := c.bindInto(out, rm, raw, baseURI, location, draft, refStack); err != nil {
+			return err
 		}
-		out = append(out, children...)
 	}
-	return out, nil
+	return nil
 }
 
 // validateKeywordShape verifies that a keyword's raw JSON value has the
@@ -881,6 +874,9 @@ func itoa(i int) string {
 // decodeSchemaBytes parses schemaJSON via [encoding/json.Decoder] with
 // UseNumber set so multipleOf and friends preserve full precision.
 func decodeSchemaBytes(schemaJSON []byte) (any, error) {
+	if v, ok := decodeJSONFast(schemaJSON); ok {
+		return v, nil
+	}
 	dec := json.NewDecoder(bytes.NewReader(schemaJSON))
 	dec.UseNumber()
 	var v any

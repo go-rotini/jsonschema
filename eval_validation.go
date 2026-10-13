@@ -15,8 +15,12 @@ import (
 type typeEval struct {
 	loc     string
 	allowed []string
+	// msg is the error message for a value of none of the allowed types.
+	msg string
 	// draft4 selects Draft 4's integer rule (see isDraft4Integer).
 	draft4 bool
+	// one backs allowed when the keyword names a single type.
+	one [1]string
 }
 
 func (e *typeEval) keyword() string { return "type" }
@@ -33,7 +37,7 @@ func (e *typeEval) eval(ctx *runCtx, instance any) {
 			return
 		}
 	}
-	ctx.addError(e.loc, "type", "", fmt.Sprintf("value is not of type %s", strings.Join(e.allowed, "/")))
+	ctx.addError(e.loc, "type", "", e.msg)
 }
 
 func matchesType(v any, t string) bool {
@@ -99,7 +103,9 @@ func buildType(_ *evalBuilder, f *buildFrame, raw any, loc string) (evaluator, e
 	var allowed []string
 	switch t := raw.(type) {
 	case string:
-		allowed = []string{t}
+		e := &typeEval{loc: loc, one: [1]string{t}, msg: "value is not of type " + t, draft4: f != nil && f.draft == Draft4}
+		e.allowed = e.one[:]
+		return e, nil
 	case []any:
 		for _, x := range t {
 			if s, ok := x.(string); ok {
@@ -109,7 +115,7 @@ func buildType(_ *evalBuilder, f *buildFrame, raw any, loc string) (evaluator, e
 	default:
 		return nil, &CompileError{KeywordLocation: loc, Message: "type must be a string or array of strings"}
 	}
-	return &typeEval{loc: loc, allowed: allowed, draft4: f != nil && f.draft == Draft4}, nil
+	return &typeEval{loc: loc, allowed: allowed, msg: "value is not of type " + strings.Join(allowed, "/"), draft4: f != nil && f.draft == Draft4}, nil
 }
 
 type enumEval struct {
@@ -401,12 +407,12 @@ func registerStringKeywords() {
 		}
 		return &lengthEval{loc: loc, kw: "minLength", bound: n, upper: false}, nil
 	})
-	registerEvaluator("pattern", func(_ *evalBuilder, _ *buildFrame, raw any, loc string) (evaluator, error) {
+	registerEvaluator("pattern", func(b *evalBuilder, _ *buildFrame, raw any, loc string) (evaluator, error) {
 		s, ok := raw.(string)
 		if !ok {
 			return nil, &CompileError{KeywordLocation: loc, Message: "pattern must be a string"}
 		}
-		re, err := compileECMA(s)
+		re, err := b.compileRegex(s)
 		if err != nil {
 			return nil, &CompileError{KeywordLocation: loc, Message: "invalid pattern", Cause: err}
 		}

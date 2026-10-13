@@ -615,7 +615,7 @@ func TestCompilerCompileURLSingleFlight(t *testing.T) {
 
 // TestCompileDeepNestedBadShape covers the bindAndResolve path where a
 // recursively-resolved child schema returns an error that propagates up
-// through bindAndResolveChild → bindAndResolve.
+// through bindChildInto → bindInto.
 func TestCompileDeepNestedBadShape(t *testing.T) {
 	v := map[string]any{
 		"properties": map[string]any{
@@ -700,7 +700,7 @@ func TestCompileDependenciesArrayPasses(t *testing.T) {
 	}
 }
 
-// TestCompileDefaultBranchBadChild covers bindAndResolveChild's default
+// TestCompileDefaultBranchBadChild covers bindChildInto's default
 // branch (e.g. "not", "if", "then", "else") with a malformed nested
 // shape.
 func TestCompileDefaultBranchBadChild(t *testing.T) {

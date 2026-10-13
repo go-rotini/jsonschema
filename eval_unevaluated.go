@@ -1,5 +1,7 @@
 package jsonschema
 
+import "sort"
+
 type unevaluatedItemsEval struct {
 	loc string
 	sub *subschema
@@ -26,7 +28,7 @@ func (e *unevaluatedItemsEval) eval(ctx *runCtx, instance any) {
 		if _, c := s.contained[i]; c {
 			continue
 		}
-		ctx.evaluateChild(e.sub, arr[i], itoaInt(i), "unevaluatedItems")
+		ctx.evaluateItem(e.sub, arr[i], i)
 		visited = true
 	}
 	if visited {
@@ -52,16 +54,15 @@ func (e *unevaluatedPropertiesEval) eval(ctx *runCtx, instance any) {
 	if ctx.scope != nil {
 		covered = ctx.scope.props
 	}
-	var evaluated evaluatedKeys
-	for _, k := range sortedKeys(obj) {
-		if _, c := covered[k]; c {
-			continue
+	var evaluated []string
+	for k := range obj {
+		if _, c := covered[k]; !c {
+			evaluated = append(evaluated, k)
 		}
-		ctx.evaluateChild(e.sub, obj[k], k, "unevaluatedProperties")
-		if evaluated == nil {
-			evaluated = evaluatedKeys{}
-		}
-		evaluated[k] = struct{}{}
+	}
+	sort.Strings(evaluated)
+	for _, k := range evaluated {
+		ctx.evaluateChild(e.sub, obj[k], k)
 	}
 	recordKeys(ctx, "unevaluatedProperties", e.loc, evaluated)
 }

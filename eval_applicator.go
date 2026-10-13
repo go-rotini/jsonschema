@@ -15,12 +15,8 @@ type allOfEval struct {
 func (e *allOfEval) keyword() string { return "allOf" }
 
 func (e *allOfEval) eval(ctx *runCtx, instance any) {
-	for i, sub := range e.subs {
-		ctx.pushSchema("allOf")
-		ctx.pushSchema(itoaInt(i))
+	for _, sub := range e.subs {
 		ctx.evaluate(sub, instance)
-		ctx.popSchema()
-		ctx.popSchema()
 	}
 }
 
@@ -366,33 +362,35 @@ func (e *propertiesEval) eval(ctx *runCtx, instance any) {
 	if !ctx.checkMaxKeyCount(obj, e.loc) {
 		return
 	}
-	var evaluated evaluatedKeys
+	var evaluated []string
 	track := ctx.tracksEvaluated()
 	for _, k := range e.keys {
 		v, present := obj[k]
 		if !present {
 			continue
 		}
-		ctx.evaluateChild(e.subs[k], v, k, "properties/"+escapePointerToken(k))
+		ctx.evaluateChild(e.subs[k], v, k)
 		if !track {
 			continue
 		}
 		if evaluated == nil {
-			evaluated = evaluatedKeys{}
+			evaluated = make([]string, 0, min(len(e.keys), len(obj)))
 		}
-		evaluated[k] = struct{}{}
+		evaluated = append(evaluated, k)
 	}
 	recordKeys(ctx, keyProperties, e.loc, evaluated)
 }
 
 // recordKeys records the property names a keyword evaluated: in the scope
 // for unevaluatedProperties, and in the annotation log.
-func recordKeys(ctx *runCtx, keyword, loc string, keys evaluatedKeys) {
+func recordKeys(ctx *runCtx, keyword, loc string, keys []string) {
 	if len(keys) == 0 {
 		return
 	}
 	ctx.markProps(keys)
-	ctx.appendAnnotationEntry(loc, keyword, keys)
+	if ctx.public {
+		ctx.appendAnnotationEntry(loc, keyword, keys)
+	}
 }
 
 type patternPropertiesEval struct {
@@ -416,19 +414,35 @@ func (e *patternPropertiesEval) eval(ctx *runCtx, instance any) {
 	if !ctx.checkMaxKeyCount(obj, e.loc) {
 		return
 	}
-	var evaluated evaluatedKeys
-	track := ctx.tracksEvaluated()
-	for _, k := range sortedKeys(obj) {
+	// Only the names some pattern matches are walked, in sorted order.
+	var matched []string
+	for k := range obj {
 		for _, pp := range e.patterns {
 			if pp.re.MatchString(k) {
-				ctx.evaluateChild(pp.sub, obj[k], k, "patternProperties/"+escapePointerToken(pp.src))
+				matched = append(matched, k)
+				break
+			}
+		}
+	}
+	if len(matched) == 0 {
+		return
+	}
+	sort.Strings(matched)
+	var evaluated []string
+	track := ctx.tracksEvaluated()
+	for _, k := range matched {
+		for _, pp := range e.patterns {
+			if len(e.patterns) == 1 || pp.re.MatchString(k) {
+				ctx.evaluateChild(pp.sub, obj[k], k)
 				if !track {
 					continue
 				}
-				if evaluated == nil {
-					evaluated = evaluatedKeys{}
+				if n := len(evaluated); n == 0 || evaluated[n-1] != k {
+					if evaluated == nil {
+						evaluated = make([]string, 0, len(matched))
+					}
+					evaluated = append(evaluated, k)
 				}
-				evaluated[k] = struct{}{}
 			}
 		}
 	}
@@ -479,22 +493,24 @@ func (e *additionalPropertiesEval) eval(ctx *runCtx, instance any) {
 	if !ctx.checkMaxKeyCount(obj, e.loc) {
 		return
 	}
-	var evaluated evaluatedKeys
-	track := ctx.tracksEvaluated()
-	for _, k := range sortedKeys(obj) {
-		if e.covered(k) {
-			continue
+	// Only the names the siblings leave uncovered are walked, in sorted
+	// order.
+	var extra []string
+	for k := range obj {
+		if !e.covered(k) {
+			extra = append(extra, k)
 		}
-		ctx.evaluateChild(e.sub, obj[k], k, "additionalProperties")
-		if !track {
-			continue
-		}
-		if evaluated == nil {
-			evaluated = evaluatedKeys{}
-		}
-		evaluated[k] = struct{}{}
 	}
-	recordKeys(ctx, "additionalProperties", e.loc, evaluated)
+	if len(extra) == 0 {
+		return
+	}
+	sort.Strings(extra)
+	for _, k := range extra {
+		ctx.evaluateChild(e.sub, obj[k], k)
+	}
+	if ctx.tracksEvaluated() {
+		recordKeys(ctx, "additionalProperties", e.loc, extra)
+	}
 }
 
 type propertyNamesEval struct {
@@ -513,15 +529,15 @@ func (e *propertyNamesEval) eval(ctx *runCtx, instance any) {
 		return
 	}
 	for _, k := range sortedKeys(obj) {
-		ctx.evaluateChild(e.sub, k, k, "propertyNames")
+		ctx.evaluateChild(e.sub, k, k)
 	}
 }
 
 // compilePatternKeys compiles the keys of a patternProperties object.
-func compilePatternKeys(m map[string]any, loc string) (map[string]*regexp.Regexp, error) {
+func (b *evalBuilder) compilePatternKeys(m map[string]any, loc string) (map[string]*regexp.Regexp, error) {
 	out := make(map[string]*regexp.Regexp, len(m))
 	for k := range m {
-		re, err := compileECMA(k)
+		re, err := b.compileRegex(k)
 		if err != nil {
 			return nil, &CompileError{KeywordLocation: loc, Message: "invalid pattern in patternProperties", Cause: err}
 		}
@@ -553,7 +569,7 @@ func registerObjectApplicatorKeywords() {
 		if !ok {
 			return nil, &CompileError{KeywordLocation: loc, Message: "patternProperties must be an object"}
 		}
-		res, err := compilePatternKeys(m, loc)
+		res, err := b.compilePatternKeys(m, loc)
 		if err != nil {
 			return nil, err
 		}
@@ -582,7 +598,7 @@ func registerObjectApplicatorKeywords() {
 				}
 			}
 			if pats, ok := parent[keyPatternProperties].(map[string]any); ok {
-				res, err := compilePatternKeys(pats, strings.TrimSuffix(loc, "additionalProperties")+keyPatternProperties)
+				res, err := b.compilePatternKeys(pats, strings.TrimSuffix(loc, "additionalProperties")+keyPatternProperties)
 				if err != nil {
 					return nil, err
 				}
@@ -616,7 +632,7 @@ func (e *prefixItemsEval) eval(ctx *runCtx, instance any) {
 	}
 	n := min(len(e.subs), len(arr))
 	for i := range n {
-		ctx.evaluateChild(e.subs[i], arr[i], itoaInt(i), "prefixItems/"+itoaInt(i))
+		ctx.evaluateItem(e.subs[i], arr[i], i)
 	}
 	recordPrefix(ctx, "prefixItems", e.loc, n)
 }
@@ -658,13 +674,13 @@ func (e *itemsEval) eval(ctx *runCtx, instance any) {
 	if e.isPrefix {
 		n := min(len(e.subs), len(arr))
 		for i := range n {
-			ctx.evaluateChild(e.subs[i], arr[i], itoaInt(i), "items/"+itoaInt(i))
+			ctx.evaluateItem(e.subs[i], arr[i], i)
 		}
 		recordPrefix(ctx, "items", e.loc, n)
 		return
 	}
 	for i := e.start; i < len(arr); i++ {
-		ctx.evaluateChild(e.sub, arr[i], itoaInt(i), "items")
+		ctx.evaluateItem(e.sub, arr[i], i)
 	}
 	if len(arr) > e.start {
 		recordAllItems(ctx, "items", e.loc)
@@ -714,7 +730,7 @@ func (e *additionalItemsEval) eval(ctx *runCtx, instance any) {
 		return
 	}
 	for i := start; i < len(arr); i++ {
-		ctx.evaluateChild(e.sub, arr[i], itoaInt(i), "additionalItems")
+		ctx.evaluateItem(e.sub, arr[i], i)
 	}
 	recordAllItems(ctx, "additionalItems", e.loc)
 }
@@ -737,7 +753,7 @@ func (e *containsEval) eval(ctx *runCtx, instance any) {
 	}
 	var matched []int
 	for i, item := range arr {
-		ctx.pushInstance(itoaInt(i))
+		ctx.pushIndex(i)
 		depth := ctx.refDepth
 		ctx.refDepth = 0
 		errs, _, cost := ctx.evaluateBranch(e.sub, item)

@@ -34,6 +34,8 @@ func (e *annotationEval) eval(ctx *runCtx, instance any) {
 type formatEval struct {
 	loc    string
 	format string
+	// annot is format as an annotation value, boxed once.
+	annot any
 	// assert is set when the meta-schema's vocabulary makes format an
 	// assertion, whatever [WithFormatAssertion] says.
 	assert bool
@@ -51,7 +53,7 @@ func (e *formatEval) eval(ctx *runCtx, instance any) {
 		// (JSON Schema Validation 2020-12 §7.1).
 		return
 	}
-	ctx.addAnnotation(e.loc, "format", e.format)
+	ctx.addAnnotation(e.loc, "format", e.annot)
 	if !ctx.opts.formatAssertion && !e.assert {
 		return
 	}
@@ -87,7 +89,7 @@ func registerFormatAndContentKeywords() {
 			return nil, &CompileError{KeywordLocation: loc, Message: "format must be a string"}
 		}
 		parent, _ := f.parent.(map[string]any)
-		return &formatEval{loc: loc, format: s, assert: b.formatAsserts && b.inCompiledDocument(parent),
+		return &formatEval{loc: loc, format: s, annot: s, assert: b.formatAsserts && b.inCompiledDocument(parent),
 			rfc1123: f.draft == Draft4 || f.draft == Draft6}, nil
 	})
 	registerEvaluator("contentEncoding", func(_ *evalBuilder, _ *buildFrame, raw any, loc string) (evaluator, error) {
@@ -95,14 +97,14 @@ func registerFormatAndContentKeywords() {
 		if !ok {
 			return nil, &CompileError{KeywordLocation: loc, Message: "contentEncoding must be a string"}
 		}
-		return &contentEncodingEval{loc: loc, encoding: s}, nil
+		return &contentEncodingEval{loc: loc, encoding: s, annot: s}, nil
 	})
 	registerEvaluator("contentMediaType", func(_ *evalBuilder, _ *buildFrame, raw any, loc string) (evaluator, error) {
 		s, ok := raw.(string)
 		if !ok {
 			return nil, &CompileError{KeywordLocation: loc, Message: "contentMediaType must be a string"}
 		}
-		return &contentMediaTypeEval{loc: loc, mediaType: s}, nil
+		return &contentMediaTypeEval{loc: loc, mediaType: s, annot: s}, nil
 	})
 	registerEvaluator("contentSchema", func(b *evalBuilder, f *buildFrame, raw any, loc string) (evaluator, error) {
 		sub, err := b.buildSubschemaFrame(f, raw, loc, f.base, f.resource)

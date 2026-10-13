@@ -60,11 +60,11 @@ func (s *Schema) Validate(instanceJSON []byte, opts ...Option) (*Result, error) 
 	if ro.maxInstanceSize > 0 && len(instanceJSON) > ro.maxInstanceSize {
 		return nil, ErrInstanceTooLarge
 	}
-	value, err := decodeInstanceBytes(instanceJSON)
+	value, count, err := decodeInstanceCount(instanceJSON)
 	if err != nil {
 		return nil, err
 	}
-	return s.validateWithOptions(value, ro)
+	return s.validateWithOptions(value, count, ro)
 }
 
 // ValidateValue validates an already-decoded Go value against the schema.
@@ -82,15 +82,16 @@ func (s *Schema) ValidateValue(v any, opts ...Option) (*Result, error) {
 	for _, o := range opts {
 		o(ro)
 	}
-	return s.validateWithOptions(v, ro)
+	return s.validateWithOptions(v, -1, ro)
 }
 
 // validateWithOptions is the inner entry point shared by [*Schema.Validate]
-// and [*Schema.ValidateValue]; ro is the already-resolved option set.
-func (s *Schema) validateWithOptions(v any, ro *runOptions) (*Result, error) {
+// and [*Schema.ValidateValue]; count is the number of values in v, or
+// negative when not known, and ro is the already-resolved option set.
+func (s *Schema) validateWithOptions(v any, count int, ro *runOptions) (*Result, error) {
 	ctx := newRunCtx(s, ro)
 	defer ctx.release()
-	ctx.setEvalLimit(v)
+	ctx.setEvalLimitCount(v, count)
 	if root := s.evalRoot(); root != nil {
 		ctx.evaluate(root, v)
 	}
@@ -167,17 +168,27 @@ func validationFailureError(errs []ValidationError) error {
 // precision-sensitive keywords compare against the wire form. Trailing
 // non-whitespace is rejected to block concatenated-document smuggling.
 func decodeInstanceBytes(data []byte) (any, error) {
+	v, _, err := decodeInstanceCount(data)
+	return v, err
+}
+
+// decodeInstanceCount is decodeInstanceBytes that also returns the number
+// of values decoded, or -1 when it is not known.
+func decodeInstanceCount(data []byte) (any, int, error) {
+	if v, n, ok := decodeJSONFastCount(data); ok {
+		return v, n, nil
+	}
 	dec := json.NewDecoder(bytes.NewReader(data))
 	dec.UseNumber()
 	var v any
 	if err := dec.Decode(&v); err != nil {
-		return nil, fmt.Errorf("jsonschema: decode instance: %w", err)
+		return nil, -1, fmt.Errorf("jsonschema: decode instance: %w", err)
 	}
 	var trailing any
 	if err := dec.Decode(&trailing); err == nil {
-		return nil, fmt.Errorf("jsonschema: decode instance: %w", errTrailingContent)
+		return nil, -1, fmt.Errorf("jsonschema: decode instance: %w", errTrailingContent)
 	} else if !errors.Is(err, io.EOF) {
-		return nil, fmt.Errorf("jsonschema: decode instance: %w", err)
+		return nil, -1, fmt.Errorf("jsonschema: decode instance: %w", err)
 	}
-	return v, nil
+	return v, -1, nil
 }
