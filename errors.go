@@ -649,3 +649,14 @@ func unescapeJSONPointerToken(t string) string {
 func isJSONWS(b byte) bool {
 	return b == ' ' || b == '\t' || b == '\n' || b == '\r'
 }
+
+// wrapError is a package-level sentinel that wraps another: what fmt.Errorf with one %w
+// builds, laid out as static data so it costs nothing at init.
+type wrapError struct {
+	msg string
+	err error
+}
+
+func (e *wrapError) Error() string { return e.msg }
+
+func (e *wrapError) Unwrap() error { return e.err }

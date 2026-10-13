@@ -809,11 +809,11 @@ func validateHostnameRFC1123(s string) error {
 }
 
 var (
-	errHyphens34   = fmt.Errorf("%w: hyphens in positions 3-4", errFormatInvalid)
-	errBadALabel   = fmt.Errorf("%w: invalid A-label", errFormatInvalid)
-	errBadULabel   = fmt.Errorf("%w: invalid U-label", errFormatInvalid)
-	errLabelLength = fmt.Errorf("%w: label too long", errFormatInvalid)
-	errContextO    = fmt.Errorf("%w: character not allowed in this context", errFormatInvalid)
+	errHyphens34   error = &wrapError{msg: "invalid format value: hyphens in positions 3-4", err: errFormatInvalid}
+	errBadALabel   error = &wrapError{msg: "invalid format value: invalid A-label", err: errFormatInvalid}
+	errBadULabel   error = &wrapError{msg: "invalid format value: invalid U-label", err: errFormatInvalid}
+	errLabelLength error = &wrapError{msg: "invalid format value: label too long", err: errFormatInvalid}
+	errContextO    error = &wrapError{msg: "invalid format value: character not allowed in this context", err: errFormatInvalid}
 )
 
 // checkLDHLabel checks the IDNA rules for an ASCII label: "--" in the
