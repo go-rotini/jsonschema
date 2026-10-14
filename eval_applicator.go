@@ -3,6 +3,8 @@ package jsonschema
 import (
 	"fmt"
 	"regexp"
+	"sort"
+	"strings"
 )
 
 type allOfEval struct {
@@ -13,12 +15,8 @@ type allOfEval struct {
 func (e *allOfEval) keyword() string { return "allOf" }
 
 func (e *allOfEval) eval(ctx *runCtx, instance any) {
-	for i, sub := range e.subs {
-		ctx.pushSchema("allOf")
-		ctx.pushSchema(itoaInt(i))
+	for _, sub := range e.subs {
 		ctx.evaluate(sub, instance)
-		ctx.popSchema()
-		ctx.popSchema()
 	}
 }
 
@@ -29,28 +27,37 @@ type anyOfEval struct {
 
 func (e *anyOfEval) keyword() string { return "anyOf" }
 
+// eval evaluates every branch while an unevaluated* keyword may read the
+// annotations of passing branches, or the annotations are reported;
+// otherwise it stops at the first passing branch.
 func (e *anyOfEval) eval(ctx *runCtx, instance any) {
 	var allCauses []ValidationError
-	passing := -1
-	var passingAnnos []annotationEntry
-	for i, sub := range e.subs {
-		errs, annos := ctx.evaluateBranch(sub, instance)
+	causesCost := 0
+	passed := false
+	for _, sub := range e.subs {
+		errs, annos, cost := ctx.evaluateBranch(sub, instance)
+		if len(errs) == 0 || passed {
+			ctx.refundErrors(cost)
+		}
 		if len(errs) == 0 {
-			if passing < 0 {
-				passing = i
-				passingAnnos = annos
-				// Continue to merge annotations from all passing branches
-				ctx.addBranchAnnotations(annos)
-			} else {
-				ctx.addBranchAnnotations(annos)
+			if !passed {
+				passed = true
+				ctx.refundErrors(causesCost)
+				allCauses, causesCost = nil, 0
 			}
-		} else {
+			ctx.addBranchAnnotations(annos)
+			if !ctx.needScope && !ctx.public {
+				return
+			}
+			continue
+		}
+		if !passed {
 			allCauses = append(allCauses, errs...)
+			causesCost += cost
 		}
 	}
-	_ = passingAnnos
-	if passing < 0 {
-		ctx.addCausesError(e.loc, "anyOf", "no anyOf branch matched", allCauses)
+	if !passed {
+		ctx.addCausesError(e.loc, "anyOf", "no anyOf branch matched", allCauses, causesCost)
 	}
 }
 
@@ -61,31 +68,37 @@ type oneOfEval struct {
 
 func (e *oneOfEval) keyword() string { return "oneOf" }
 
+// eval stops at the second passing branch: the keyword has failed by then.
 func (e *oneOfEval) eval(ctx *runCtx, instance any) {
-	passCount := 0
-	var passingAnnos []annotationEntry
+	var passingAnnos branchAnnotations
 	var passingIdx []int
 	var allCauses []ValidationError
+	causesCost := 0
 	for i, sub := range e.subs {
-		errs, annos := ctx.evaluateBranch(sub, instance)
+		errs, annos, cost := ctx.evaluateBranch(sub, instance)
+		if len(errs) == 0 || len(passingIdx) > 0 {
+			// Once a branch has passed, no branch's errors are kept.
+			ctx.refundErrors(cost)
+		}
 		if len(errs) == 0 {
-			passCount++
-			if passCount == 1 {
-				passingAnnos = annos
-			}
 			passingIdx = append(passingIdx, i)
-		} else {
+			if len(passingIdx) == 2 {
+				ctx.addError(e.loc, "oneOf", "", fmt.Sprintf("oneOf matched more than one branch (indices %d and %d); expected exactly one", passingIdx[0], passingIdx[1]))
+				return
+			}
+			ctx.refundErrors(causesCost)
+			allCauses, causesCost = nil, 0
+			passingAnnos = annos
+		} else if len(passingIdx) == 0 {
 			allCauses = append(allCauses, errs...)
+			causesCost += cost
 		}
 	}
-	switch passCount {
-	case 0:
-		ctx.addCausesError(e.loc, "oneOf", "no oneOf branch matched", allCauses)
-	case 1:
-		ctx.addBranchAnnotations(passingAnnos)
-	default:
-		ctx.addError(e.loc, "oneOf", "", fmt.Sprintf("oneOf matched %d branches (indices %v); expected exactly one", passCount, passingIdx))
+	if len(passingIdx) == 0 {
+		ctx.addCausesError(e.loc, "oneOf", "no oneOf branch matched", allCauses, causesCost)
+		return
 	}
+	ctx.addBranchAnnotations(passingAnnos)
 }
 
 type notEval struct {
@@ -96,7 +109,8 @@ type notEval struct {
 func (e *notEval) keyword() string { return "not" }
 
 func (e *notEval) eval(ctx *runCtx, instance any) {
-	errs, _ := ctx.evaluateBranch(e.sub, instance)
+	errs, _, cost := ctx.evaluateBranch(e.sub, instance)
+	ctx.refundErrors(cost)
 	if len(errs) == 0 {
 		ctx.addError(e.loc, "not", "", "value matched 'not' subschema")
 	}
@@ -172,7 +186,8 @@ type ifThenElseEval struct {
 func (e *ifThenElseEval) keyword() string { return "if" }
 
 func (e *ifThenElseEval) eval(ctx *runCtx, instance any) {
-	errs, annos := ctx.evaluateBranch(e.ifSub, instance)
+	errs, annos, cost := ctx.evaluateBranch(e.ifSub, instance)
+	ctx.refundErrors(cost)
 	ifPassed := len(errs) == 0
 	if ifPassed {
 		ctx.addBranchAnnotations(annos)
@@ -233,6 +248,7 @@ func strParentLoc(loc string) string { return loc }
 
 type dependentSchemasEval struct {
 	loc  string
+	keys []string // sorted, so errors come in a stable order
 	deps map[string]*subschema
 }
 
@@ -243,16 +259,17 @@ func (e *dependentSchemasEval) eval(ctx *runCtx, instance any) {
 	if !ok {
 		return
 	}
-	for k, sub := range e.deps {
+	for _, k := range e.keys {
 		if _, present := obj[k]; !present {
 			continue
 		}
-		ctx.evaluate(sub, instance)
+		ctx.evaluate(e.deps[k], instance)
 	}
 }
 
 type dependenciesEval struct {
 	loc      string
+	keys     []string // sorted, so errors come in a stable order
 	schemas  map[string]*subschema
 	required map[string][]string
 }
@@ -264,17 +281,15 @@ func (e *dependenciesEval) eval(ctx *runCtx, instance any) {
 	if !ok {
 		return
 	}
-	for k, sub := range e.schemas {
+	for _, k := range e.keys {
 		if _, present := obj[k]; !present {
 			continue
 		}
-		ctx.evaluate(sub, instance)
-	}
-	for k, req := range e.required {
-		if _, present := obj[k]; !present {
+		if sub, ok := e.schemas[k]; ok {
+			ctx.evaluate(sub, instance)
 			continue
 		}
-		for _, r := range req {
+		for _, r := range e.required[k] {
 			if _, p := obj[r]; !p {
 				ctx.addError(e.loc, "dependencies", "", fmt.Sprintf("property %q requires %q", k, r))
 			}
@@ -288,16 +303,17 @@ func registerDependencyKeywords() {
 		if !ok {
 			return nil, &CompileError{KeywordLocation: loc, Message: "dependentSchemas must be an object"}
 		}
-		deps := map[string]*subschema{}
-		for k, v := range m {
+		keys := orderKeys(m)
+		deps := make(map[string]*subschema, len(m))
+		for _, k := range keys {
 			subLoc := loc + "/" + escapePointerToken(k)
-			sub, err := b.buildSubschemaFrame(f, v, subLoc, f.base, f.resource)
+			sub, err := b.buildSubschemaFrame(f, m[k], subLoc, f.base, f.resource)
 			if err != nil {
 				return nil, err
 			}
 			deps[k] = sub
 		}
-		return &dependentSchemasEval{loc: loc, deps: deps}, nil
+		return &dependentSchemasEval{loc: loc, keys: keys, deps: deps}, nil
 	})
 	registerEvaluator("dependencies", func(b *evalBuilder, f *buildFrame, raw any, loc string) (evaluator, error) {
 		m, ok := raw.(map[string]any)
@@ -306,9 +322,10 @@ func registerDependencyKeywords() {
 		}
 		schemas := map[string]*subschema{}
 		required := map[string][]string{}
-		for k, v := range m {
+		keys := orderKeys(m)
+		for _, k := range keys {
 			subLoc := loc + "/" + escapePointerToken(k)
-			switch t := v.(type) {
+			switch t := m[k].(type) {
 			case map[string]any, bool:
 				sub, err := b.buildSubschemaFrame(f, t, subLoc, f.base, f.resource)
 				if err != nil {
@@ -316,21 +333,22 @@ func registerDependencyKeywords() {
 				}
 				schemas[k] = sub
 			case []any:
-				keys := make([]string, 0, len(t))
+				names := make([]string, 0, len(t))
 				for _, item := range t {
 					if s, ok := item.(string); ok {
-						keys = append(keys, s)
+						names = append(names, s)
 					}
 				}
-				required[k] = keys
+				required[k] = names
 			}
 		}
-		return &dependenciesEval{loc: loc, schemas: schemas, required: required}, nil
+		return &dependenciesEval{loc: loc, keys: keys, schemas: schemas, required: required}, nil
 	})
 }
 
 type propertiesEval struct {
 	loc  string
+	keys []string // sorted, so errors come in a stable order
 	subs map[string]*subschema
 }
 
@@ -344,17 +362,34 @@ func (e *propertiesEval) eval(ctx *runCtx, instance any) {
 	if !ctx.checkMaxKeyCount(obj, e.loc) {
 		return
 	}
-	evaluated := evaluatedKeys{}
-	for k, sub := range e.subs {
+	var evaluated []string
+	track := ctx.tracksEvaluated()
+	for _, k := range e.keys {
 		v, present := obj[k]
 		if !present {
 			continue
 		}
-		ctx.evaluateChild(sub, v, k, "properties/"+escapePointerToken(k))
-		evaluated[k] = struct{}{}
+		ctx.evaluateChild(e.subs[k], v, k)
+		if !track {
+			continue
+		}
+		if evaluated == nil {
+			evaluated = make([]string, 0, min(len(e.keys), len(obj)))
+		}
+		evaluated = append(evaluated, k)
 	}
-	if len(evaluated) > 0 {
-		mergeKeysAnnotation(ctx, "properties", e.loc, evaluated)
+	recordKeys(ctx, keyProperties, e.loc, evaluated)
+}
+
+// recordKeys records the property names a keyword evaluated: in the scope
+// for unevaluatedProperties, and in the annotation log.
+func recordKeys(ctx *runCtx, keyword, loc string, keys []string) {
+	if len(keys) == 0 {
+		return
+	}
+	ctx.markProps(keys)
+	if ctx.public {
+		ctx.appendAnnotationEntry(loc, keyword, keys)
 	}
 }
 
@@ -379,26 +414,76 @@ func (e *patternPropertiesEval) eval(ctx *runCtx, instance any) {
 	if !ctx.checkMaxKeyCount(obj, e.loc) {
 		return
 	}
-	evaluated := evaluatedKeys{}
-	for k, v := range obj {
+	// Only the names some pattern matches are walked, in sorted order.
+	var matched []string
+	for k := range obj {
 		for _, pp := range e.patterns {
 			if pp.re.MatchString(k) {
-				ctx.evaluateChild(pp.sub, v, k, "patternProperties/"+escapePointerToken(pp.src))
-				evaluated[k] = struct{}{}
+				matched = append(matched, k)
+				break
 			}
 		}
 	}
-	if len(evaluated) > 0 {
-		mergeKeysAnnotation(ctx, "patternProperties", e.loc, evaluated)
+	if len(matched) == 0 {
+		return
 	}
+	sort.Strings(matched)
+	var evaluated []string
+	track := ctx.tracksEvaluated()
+	for _, k := range matched {
+		for _, pp := range e.patterns {
+			if len(e.patterns) == 1 || pp.re.MatchString(k) {
+				ctx.evaluateChild(pp.sub, obj[k], k)
+				if !track {
+					continue
+				}
+				if n := len(evaluated); n == 0 || evaluated[n-1] != k {
+					if evaluated == nil {
+						evaluated = make([]string, 0, len(matched))
+					}
+					evaluated = append(evaluated, k)
+				}
+			}
+		}
+	}
+	recordKeys(ctx, keyPatternProperties, e.loc, evaluated)
 }
 
+// sortedKeys returns obj's keys in order, so evaluators that walk an
+// instance object report errors in a stable order.
+func sortedKeys(obj map[string]any) []string {
+	keys := make([]string, 0, len(obj))
+	for k := range obj {
+		keys = append(keys, k)
+	}
+	sort.Strings(keys)
+	return keys
+}
+
+// additionalPropertiesEval applies sub to the properties that the sibling
+// properties and patternProperties keywords do not cover. The cover is
+// taken from those siblings at build time, so annotations from any other
+// subschema cannot affect it.
 type additionalPropertiesEval struct {
-	loc string
-	sub *subschema
+	loc      string
+	sub      *subschema
+	named    map[string]struct{}
+	patterns []*regexp.Regexp
 }
 
 func (e *additionalPropertiesEval) keyword() string { return "additionalProperties" }
+
+func (e *additionalPropertiesEval) covered(k string) bool {
+	if _, ok := e.named[k]; ok {
+		return true
+	}
+	for _, re := range e.patterns {
+		if re.MatchString(k) {
+			return true
+		}
+	}
+	return false
+}
 
 func (e *additionalPropertiesEval) eval(ctx *runCtx, instance any) {
 	obj, ok := instance.(map[string]any)
@@ -408,31 +493,23 @@ func (e *additionalPropertiesEval) eval(ctx *runCtx, instance any) {
 	if !ctx.checkMaxKeyCount(obj, e.loc) {
 		return
 	}
-	covered := evaluatedKeys{}
-	if v, ok := ctx.getAnnotation("properties"); ok {
-		if k, ok := v.(evaluatedKeys); ok {
-			for kk := range k {
-				covered[kk] = struct{}{}
-			}
+	// Only the names the siblings leave uncovered are walked, in sorted
+	// order.
+	var extra []string
+	for k := range obj {
+		if !e.covered(k) {
+			extra = append(extra, k)
 		}
 	}
-	if v, ok := ctx.getAnnotation("patternProperties"); ok {
-		if k, ok := v.(evaluatedKeys); ok {
-			for kk := range k {
-				covered[kk] = struct{}{}
-			}
-		}
+	if len(extra) == 0 {
+		return
 	}
-	evaluated := evaluatedKeys{}
-	for k, v := range obj {
-		if _, c := covered[k]; c {
-			continue
-		}
-		ctx.evaluateChild(e.sub, v, k, "additionalProperties")
-		evaluated[k] = struct{}{}
+	sort.Strings(extra)
+	for _, k := range extra {
+		ctx.evaluateChild(e.sub, obj[k], k)
 	}
-	if len(evaluated) > 0 {
-		mergeKeysAnnotation(ctx, "additionalProperties", e.loc, evaluated)
+	if ctx.tracksEvaluated() {
+		recordKeys(ctx, "additionalProperties", e.loc, extra)
 	}
 }
 
@@ -451,9 +528,22 @@ func (e *propertyNamesEval) eval(ctx *runCtx, instance any) {
 	if !ctx.checkMaxKeyCount(obj, e.loc) {
 		return
 	}
-	for k := range obj {
-		ctx.evaluateChild(e.sub, k, k, "propertyNames")
+	for _, k := range sortedKeys(obj) {
+		ctx.evaluateChild(e.sub, k, k)
 	}
+}
+
+// compilePatternKeys compiles the keys of a patternProperties object.
+func (b *evalBuilder) compilePatternKeys(m map[string]any, loc string) (map[string]*regexp.Regexp, error) {
+	out := make(map[string]*regexp.Regexp, len(m))
+	for k := range m {
+		re, err := b.compileRegex(k)
+		if err != nil {
+			return nil, &CompileError{KeywordLocation: loc, Message: "invalid pattern in patternProperties", Cause: err}
+		}
+		out[k] = re
+	}
+	return out, nil
 }
 
 func registerObjectApplicatorKeywords() {
@@ -462,34 +552,35 @@ func registerObjectApplicatorKeywords() {
 		if !ok {
 			return nil, &CompileError{KeywordLocation: loc, Message: "properties must be an object"}
 		}
-		subs := map[string]*subschema{}
-		for k, v := range m {
+		keys := orderKeys(m)
+		subs := make(map[string]*subschema, len(m))
+		for _, k := range keys {
 			subLoc := loc + "/" + escapePointerToken(k)
-			sub, err := b.buildSubschemaFrame(f, v, subLoc, f.base, f.resource)
+			sub, err := b.buildSubschemaFrame(f, m[k], subLoc, f.base, f.resource)
 			if err != nil {
 				return nil, err
 			}
 			subs[k] = sub
 		}
-		return &propertiesEval{loc: loc, subs: subs}, nil
+		return &propertiesEval{loc: loc, keys: keys, subs: subs}, nil
 	})
 	registerEvaluator("patternProperties", func(b *evalBuilder, f *buildFrame, raw any, loc string) (evaluator, error) {
 		m, ok := raw.(map[string]any)
 		if !ok {
 			return nil, &CompileError{KeywordLocation: loc, Message: "patternProperties must be an object"}
 		}
+		res, err := b.compilePatternKeys(m, loc)
+		if err != nil {
+			return nil, err
+		}
 		patterns := make([]patternProp, 0, len(m))
-		for k, v := range m {
-			re, err := regexp.Compile(translateECMA(k))
-			if err != nil {
-				return nil, &CompileError{KeywordLocation: loc, Message: "invalid pattern in patternProperties", Cause: err}
-			}
+		for _, k := range orderKeys(m) {
 			subLoc := loc + "/" + escapePointerToken(k)
-			sub, err := b.buildSubschemaFrame(f, v, subLoc, f.base, f.resource)
+			sub, err := b.buildSubschemaFrame(f, m[k], subLoc, f.base, f.resource)
 			if err != nil {
 				return nil, err
 			}
-			patterns = append(patterns, patternProp{src: k, re: re, sub: sub})
+			patterns = append(patterns, patternProp{src: k, re: res[k], sub: sub})
 		}
 		return &patternPropertiesEval{loc: loc, patterns: patterns}, nil
 	})
@@ -498,7 +589,25 @@ func registerObjectApplicatorKeywords() {
 		if err != nil {
 			return nil, err
 		}
-		return &additionalPropertiesEval{loc: loc, sub: sub}, nil
+		ev := &additionalPropertiesEval{loc: loc, sub: sub}
+		if parent, ok := f.parent.(map[string]any); ok {
+			if props, ok := parent[keyProperties].(map[string]any); ok {
+				ev.named = make(map[string]struct{}, len(props))
+				for k := range props {
+					ev.named[k] = struct{}{}
+				}
+			}
+			if pats, ok := parent[keyPatternProperties].(map[string]any); ok {
+				res, err := b.compilePatternKeys(pats, strings.TrimSuffix(loc, "additionalProperties")+keyPatternProperties)
+				if err != nil {
+					return nil, err
+				}
+				for _, k := range orderKeys(pats) {
+					ev.patterns = append(ev.patterns, res[k])
+				}
+			}
+		}
+		return ev, nil
 	})
 	registerEvaluator("propertyNames", func(b *evalBuilder, f *buildFrame, raw any, loc string) (evaluator, error) {
 		sub, err := b.buildSubschemaFrame(f, raw, loc, f.base, f.resource)
@@ -506,30 +615,6 @@ func registerObjectApplicatorKeywords() {
 			return nil, err
 		}
 		return &propertyNamesEval{loc: loc, sub: sub}, nil
-	})
-}
-
-// mergeKeysAnnotation records `keyword`'s evaluatedKeys annotation, unioning
-// with any existing entry so multiple branches can contribute.
-func mergeKeysAnnotation(ctx *runCtx, keyword, loc string, keys evaluatedKeys) {
-	loc1 := ctx.instanceLocation()
-	if ctx.annotations[loc1] == nil {
-		ctx.annotations[loc1] = map[string]any{}
-	}
-	if existing, ok := ctx.annotations[loc1][keyword]; ok {
-		if existingKeys, ok := existing.(evaluatedKeys); ok {
-			for k := range keys {
-				existingKeys[k] = struct{}{}
-			}
-			return
-		}
-	}
-	ctx.annotations[loc1][keyword] = keys
-	ctx.annoEntries = append(ctx.annoEntries, annotationEntry{
-		keywordLoc:  loc,
-		instanceLoc: loc1,
-		keyword:     keyword,
-		value:       keys,
 	})
 }
 
@@ -547,20 +632,36 @@ func (e *prefixItemsEval) eval(ctx *runCtx, instance any) {
 	}
 	n := min(len(e.subs), len(arr))
 	for i := range n {
-		ctx.evaluateChild(e.subs[i], arr[i], itoaInt(i), "prefixItems/"+itoaInt(i))
+		ctx.evaluateItem(e.subs[i], arr[i], i)
 	}
-	if n > 0 {
-		recordItemsAnno(ctx, "prefixItems", e.loc, evaluatedItems(n-1))
+	recordPrefix(ctx, "prefixItems", e.loc, n)
+}
+
+// recordPrefix records that the first n items were evaluated.
+func recordPrefix(ctx *runCtx, keyword, loc string, n int) {
+	if n == 0 {
+		return
 	}
+	ctx.markPrefix(n)
+	ctx.appendAnnotationEntry(loc, keyword, evaluatedItems(n-1))
+}
+
+// recordAllItems records that a keyword evaluated every remaining item.
+func recordAllItems(ctx *runCtx, keyword, loc string) {
+	ctx.markAllItems()
+	ctx.appendAnnotationEntry(loc, keyword, evaluatedItemsAll{})
 }
 
 // itemsEval handles 2020-12 `items` (a single schema applied past the
-// prefixItems prefix) AND the legacy single-schema `items` (Draft 4-2019-09).
+// sibling prefixItems) and the legacy `items` of earlier drafts (a single
+// schema for every item, or an array of schemas for a prefix).
 type itemsEval struct {
 	loc      string
 	sub      *subschema
 	isPrefix bool // legacy form: items is an array (treat like prefixItems)
 	subs     []*subschema
+	// start is the number of sibling prefixItems.
+	start int
 }
 
 func (e *itemsEval) keyword() string { return "items" }
@@ -571,27 +672,18 @@ func (e *itemsEval) eval(ctx *runCtx, instance any) {
 		return
 	}
 	if e.isPrefix {
-		// Pre-2020-12 items-as-array form (now spelled prefixItems).
 		n := min(len(e.subs), len(arr))
 		for i := range n {
-			ctx.evaluateChild(e.subs[i], arr[i], itoaInt(i), "items/"+itoaInt(i))
+			ctx.evaluateItem(e.subs[i], arr[i], i)
 		}
-		if n > 0 {
-			recordItemsAnno(ctx, "items", e.loc, evaluatedItems(n-1))
-		}
+		recordPrefix(ctx, "items", e.loc, n)
 		return
 	}
-	start := 0
-	if v, ok := ctx.getAnnotation("prefixItems"); ok {
-		if iv, ok := v.(evaluatedItems); ok {
-			start = int(iv) + 1
-		}
+	for i := e.start; i < len(arr); i++ {
+		ctx.evaluateItem(e.sub, arr[i], i)
 	}
-	for i := start; i < len(arr); i++ {
-		ctx.evaluateChild(e.sub, arr[i], itoaInt(i), "items")
-	}
-	if len(arr) > start {
-		recordItemsAnno(ctx, "items", e.loc, evaluatedItemsAll{})
+	if len(arr) > e.start {
+		recordAllItems(ctx, "items", e.loc)
 	}
 }
 
@@ -614,7 +706,7 @@ func siblingItemsArrayLen(f *buildFrame) int {
 	return len(arr)
 }
 
-// additionalItemsEval implements pre-2019-09 "additionalItems": it covers
+// additionalItemsEval implements pre-2020-12 "additionalItems": it covers
 // indices past the sibling "items" array prefix. itemsArrayLen is -1 when
 // items is missing or a single schema (the evaluator is then a no-op).
 type additionalItemsEval struct {
@@ -638,9 +730,9 @@ func (e *additionalItemsEval) eval(ctx *runCtx, instance any) {
 		return
 	}
 	for i := start; i < len(arr); i++ {
-		ctx.evaluateChild(e.sub, arr[i], itoaInt(i), "additionalItems")
+		ctx.evaluateItem(e.sub, arr[i], i)
 	}
-	recordItemsAnno(ctx, "additionalItems", e.loc, evaluatedItemsAll{})
+	recordAllItems(ctx, "additionalItems", e.loc)
 }
 
 type containsEval struct {
@@ -659,15 +751,20 @@ func (e *containsEval) eval(ctx *runCtx, instance any) {
 	if !ok {
 		return
 	}
-	count := 0
-	matched := evaluatedKeys{}
+	var matched []int
 	for i, item := range arr {
-		errs, _ := ctx.evaluateBranch(e.sub, item)
+		ctx.pushIndex(i)
+		depth := ctx.refDepth
+		ctx.refDepth = 0
+		errs, _, cost := ctx.evaluateBranch(e.sub, item)
+		ctx.refundErrors(cost)
+		ctx.refDepth = depth
+		ctx.popInstance()
 		if len(errs) == 0 {
-			count++
-			matched[itoaInt(i)] = struct{}{}
+			matched = append(matched, i)
 		}
 	}
+	count := len(matched)
 	minC := 1
 	if e.hasMin {
 		minC = e.minContains
@@ -678,50 +775,17 @@ func (e *containsEval) eval(ctx *runCtx, instance any) {
 	if e.hasMax && count > e.maxContains {
 		ctx.addError(e.loc, "contains", "", fmt.Sprintf("contains matched %d items; maxContains is %d", count, e.maxContains))
 	}
-	if count > 0 {
-		// Annotate matched indices so unevaluatedItems can read them.
-		mergeContainsAnnotation(ctx, e.loc, matched)
+	if count == 0 {
+		return
 	}
-}
-
-func mergeContainsAnnotation(ctx *runCtx, loc string, keys evaluatedKeys) {
-	loc1 := ctx.instanceLocation()
-	if ctx.annotations[loc1] == nil {
-		ctx.annotations[loc1] = map[string]any{}
-	}
-	if existing, ok := ctx.annotations[loc1]["contains"]; ok {
-		if existingKeys, ok := existing.(evaluatedKeys); ok {
-			for k := range keys {
-				existingKeys[k] = struct{}{}
-			}
-			return
+	ctx.markContained(matched)
+	if ctx.public {
+		keys := make(evaluatedKeys, count)
+		for _, i := range matched {
+			keys[itoaInt(i)] = struct{}{}
 		}
+		ctx.appendAnnotationEntry(e.loc, "contains", keys)
 	}
-	ctx.annotations[loc1]["contains"] = keys
-	ctx.annoEntries = append(ctx.annoEntries, annotationEntry{
-		keywordLoc:  loc,
-		instanceLoc: loc1,
-		keyword:     "contains",
-		value:       keys,
-	})
-}
-
-func recordItemsAnno(ctx *runCtx, keyword, loc string, value any) {
-	loc1 := ctx.instanceLocation()
-	if ctx.annotations[loc1] == nil {
-		ctx.annotations[loc1] = map[string]any{}
-	}
-	if existing, ok := ctx.annotations[loc1][keyword]; ok {
-		ctx.annotations[loc1][keyword] = mergeAnnotation(existing, value)
-	} else {
-		ctx.annotations[loc1][keyword] = value
-	}
-	ctx.annoEntries = append(ctx.annoEntries, annotationEntry{
-		keywordLoc:  loc,
-		instanceLoc: loc1,
-		keyword:     keyword,
-		value:       value,
-	})
 }
 
 func registerArrayApplicatorKeywords() {
@@ -741,27 +805,7 @@ func registerArrayApplicatorKeywords() {
 		}
 		return &prefixItemsEval{loc: loc, subs: subs}, nil
 	})
-	registerEvaluator("items", func(b *evalBuilder, f *buildFrame, raw any, loc string) (evaluator, error) {
-		// 2020-12 items is always a schema; pre-2020-12 also allowed an
-		// array of schemas (the legacy "tuple" form).
-		if arr, ok := raw.([]any); ok && f.draft < Draft202012 {
-			subs := make([]*subschema, 0, len(arr))
-			for i, item := range arr {
-				itemLoc := loc + "/" + itoaInt(i)
-				sub, err := b.buildSubschemaFrame(f, item, itemLoc, f.base, f.resource)
-				if err != nil {
-					return nil, err
-				}
-				subs = append(subs, sub)
-			}
-			return &itemsEval{loc: loc, isPrefix: true, subs: subs}, nil
-		}
-		sub, err := b.buildSubschemaFrame(f, raw, loc, f.base, f.resource)
-		if err != nil {
-			return nil, err
-		}
-		return &itemsEval{loc: loc, sub: sub}, nil
-	})
+	registerEvaluator("items", buildItems)
 	registerEvaluator("additionalItems", func(b *evalBuilder, f *buildFrame, raw any, loc string) (evaluator, error) {
 		sub, err := b.buildSubschemaFrame(f, raw, loc, f.base, f.resource)
 		if err != nil {
@@ -800,4 +844,34 @@ func registerArrayApplicatorKeywords() {
 	registerEvaluator("minContains", func(_ *evalBuilder, _ *buildFrame, _ any, _ string) (evaluator, error) {
 		return nil, nil //nolint:nilnil // intentional: keyword has no runtime effect when standalone.
 	})
+}
+
+// buildItems builds "items": a schema for the items past the sibling
+// prefixItems, or before 2020-12 also an array of schemas for a prefix.
+func buildItems(b *evalBuilder, f *buildFrame, raw any, loc string) (evaluator, error) {
+	// 2020-12 items is always a schema; pre-2020-12 also allowed an
+	// array of schemas (the legacy "tuple" form).
+	if arr, ok := raw.([]any); ok && f.draft < Draft202012 {
+		subs := make([]*subschema, 0, len(arr))
+		for i, item := range arr {
+			itemLoc := loc + "/" + itoaInt(i)
+			sub, err := b.buildSubschemaFrame(f, item, itemLoc, f.base, f.resource)
+			if err != nil {
+				return nil, err
+			}
+			subs = append(subs, sub)
+		}
+		return &itemsEval{loc: loc, isPrefix: true, subs: subs}, nil
+	}
+	sub, err := b.buildSubschemaFrame(f, raw, loc, f.base, f.resource)
+	if err != nil {
+		return nil, err
+	}
+	ev := &itemsEval{loc: loc, sub: sub}
+	if parent, ok := f.parent.(map[string]any); ok && f.draft >= Draft202012 {
+		if prefix, ok := parent[keyPrefixItems].([]any); ok {
+			ev.start = len(prefix)
+		}
+	}
+	return ev, nil
 }

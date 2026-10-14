@@ -5,10 +5,9 @@ import (
 	"strings"
 )
 
-// Schema is a compiled JSON Schema. Once produced by [Compile] (or its
-// siblings), a Schema is immutable and safe for concurrent validation —
-// callers may freely share a single [*Schema] across goroutines and call
-// any of the Validate-family methods concurrently.
+// Schema is a compiled JSON Schema, produced by [Compile] and related
+// functions. A Schema is safe for concurrent use: share one across
+// goroutines and call its Validate-family methods concurrently.
 type Schema struct {
 	// source is the canonical JSON byte sequence the schema was compiled
 	// from. [Schema.MarshalJSON] returns this verbatim so a *Schema embeds
@@ -20,13 +19,14 @@ type Schema struct {
 	// id is the schema's resolved $id (absolute URI). Empty when no $id
 	// was declared at the root.
 	id string
-	// metaSchemaURI is the URI from the $schema keyword (or
-	// draft.MetaSchemaURL() when $schema is absent).
+	// metaSchemaURI is the URI from the root $schema keyword; empty when
+	// $schema is absent ([Schema.MetaSchemaURI] then falls back to the
+	// draft's URL).
 	metaSchemaURI string
 	// resources is the resource tree built at compile time. The validator
 	// walks this for ref / dynamicRef resolution.
 	resources *resourceMap
-	// bindings carries one entry per recognized keyword instance, captured
+	// bindings carries one entry per schema-object member, captured
 	// for introspection helpers and metadata-only consumers.
 	bindings []keywordBinding
 	// root is the runtime evaluator tree — a parallel structure that the
@@ -35,6 +35,9 @@ type Schema struct {
 	// compileOpts carries the options the schema was compiled with.
 	// Validation re-uses the loader and ref-depth limits stored here.
 	compileOpts *compileOptions
+	// subschemas is the number of subschemas Compile built; it scales the
+	// default evaluation cap.
+	subschemas int
 }
 
 // Draft returns the draft this schema was compiled against.
@@ -117,25 +120,22 @@ func (s *Schema) Resources() []string {
 	return out
 }
 
-// Vocabularies returns the set of vocabulary URIs declared by the schema's
-// effective $vocabulary keyword (or, when absent, the standard set for the
-// schema's draft). Returns a fresh slice each call; safe for callers to
-// mutate.
+// Vocabularies returns vocabulary URIs for the schema in a fresh slice.
 //
-// In v0.1, $vocabulary at the schema root is recognized as a structural
-// keyword but not honored as an opt-in selector — the returned set is
-// always the standard vocabularies for [Schema.Draft]. When the root
-// schema declares a [VocabOAS]-aware $schema (the [OASDialectURL]),
-// [VocabOAS] is included alongside the draft's standard set. Custom
-// vocabulary registration is reserved for v0.2.
+// When the root schema declares $vocabulary, the result is the URIs it
+// marks true, in no particular order; a schema's own $vocabulary is a
+// meta-schema declaration and does not change how the schema itself
+// validates. Otherwise the result is the standard Draft 2020-12 vocabulary
+// URIs (whatever the schema's draft), plus [VocabOAS] when $schema is
+// [OASDialectURL]. Validation honors the $vocabulary of a custom
+// meta-schema named by $schema when the [Loader] can fetch it: keywords of
+// a standard vocabulary it leaves out do not apply.
 func (s *Schema) Vocabularies() []string {
 	if s == nil {
 		return nil
 	}
 	stdSet := stdVocabularySet(s.draft)
-	// If the root schema declared $vocabulary, prefer that set verbatim
-	// (even though we don't honor opt-in/opt-out semantics yet — this lets
-	// introspecting tools see what the schema asked for).
+	// If the root schema declared $vocabulary, report that set verbatim.
 	if uris := rootVocabularyURIs(s); uris != nil {
 		out := make([]string, len(uris))
 		copy(out, uris)
@@ -149,15 +149,11 @@ func (s *Schema) Vocabularies() []string {
 	return out
 }
 
-// Bindings returns the keyword bindings extracted at compile time. Each
-// binding records the keyword name, its source location, and the keyword's
-// raw value. Returns a fresh slice each call; the slice is safe for callers
-// to mutate, but the embedded RawValue may share storage with the schema's
-// parsed source.
-//
-// In v0.1, ref-resolution targets are not exposed in the public binding —
-// only Name, Location, and RawValue are populated. v0.2 may extend
-// [KeywordBinding] with a typed Resolved field.
+// Bindings returns the keyword bindings extracted at compile time, one per
+// member of each schema object the compiler walked (unknown keywords
+// included), in no guaranteed order. The slice is
+// fresh on each call, but each RawValue may share storage with the
+// compiled schema and must not be modified.
 func (s *Schema) Bindings() []KeywordBinding {
 	if s == nil || len(s.bindings) == 0 {
 		return nil
@@ -209,7 +205,7 @@ func stdVocabularySet(d Draft) []string {
 }
 
 // rootVocabularyURIs extracts the URIs declared by a $vocabulary keyword
-// at the schema root, in declaration order. Returns nil if no $vocabulary
+// at the schema root, in map-iteration order. Returns nil if no $vocabulary
 // is present (or the binding is malformed).
 func rootVocabularyURIs(s *Schema) []string {
 	for _, b := range s.bindings {
@@ -238,9 +234,10 @@ func rootVocabularyURIs(s *Schema) []string {
 	return nil
 }
 
-// Anchors returns the plain-name anchors declared in the root resource.
-// Returns nil when the schema is nil or was constructed without a resource
-// map. The returned slice is freshly allocated; callers may mutate it.
+// Anchors returns the anchor names ($anchor and $dynamicAnchor) declared in
+// the root resource, in no particular order. Returns nil when the schema is
+// nil or was constructed without a resource map. The slice is fresh on each
+// call.
 func (s *Schema) Anchors() []string {
 	if s == nil || s.resources == nil {
 		return nil

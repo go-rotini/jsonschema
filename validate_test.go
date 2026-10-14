@@ -580,60 +580,43 @@ func TestValidate_NilSchemaErrors(t *testing.T) {
 	}
 }
 
-// TestNumberToRat_PathologicalNumbers exercises [numberToRat] across the
-// out-of-band JSON-number shapes that the validation runtime might see
-// when the upstream JSON parser is configured with [json.Number] (so
-// number text reaches us verbatim without float64 round-tripping).
-//
-// The test pins the package's documented "best-effort, never crash"
-// contract: arbitrary-precision big.Rat handles huge magnitudes; NaN /
-// Inf / leading-zero strings are accepted as numeric and converted via
-// the available code paths; truly empty / sign-only text fails cleanly.
-func TestNumberToRat_PathologicalNumbers(t *testing.T) {
+// TestParseNumber_PathologicalNumbers exercises [parseNumber] across the
+// out-of-band number shapes the validator can see: huge exponents, the
+// NaN / Inf text the YAML and TOML adapters produce, native Go kinds, and
+// text that is not a number.
+func TestParseNumber_PathologicalNumbers(t *testing.T) {
 	cases := []struct {
 		name   string
 		in     any
 		wantOK bool
 	}{
-		// Arbitrary-precision big.Rat handles this without overflow.
 		{"huge_positive_exponent", json.Number("1e1000"), true},
 		{"huge_negative_exponent", json.Number("-1e1000"), true},
-		// NaN / Inf as json.Number — SetString fails, Int64 fails, Float64
-		// succeeds with NaN/Inf which SetFloat64 silently zeroes. The
-		// function reports "ok" with a 0/1 rat. We pin this so a future
-		// fix can deliberately change the contract.
+		{"exponent_beyond_range", json.Number("1e99999999999999999999"), true},
 		{"json_number_nan", json.Number("NaN"), true},
 		{"json_number_inf", json.Number("Inf"), true},
-		// Leading-zero integer strings parse fine for big.Rat.
 		{"leading_zeros", json.Number("007"), true},
-		// Above MaxInt64 and outside float64's integer-precision range.
 		{"big_integer_above_int64", json.Number("100000000000000000000"), true},
-		// Empty / sign-only strings are not numeric.
 		{"empty_string", json.Number(""), false},
 		{"bare_minus", json.Number("-"), false},
-		// Native Go numeric kinds the function explicitly handles.
+		{"bare_exponent", json.Number("1e"), false},
+		{"trailing_garbage", json.Number("1x"), false},
 		{"native_float64", float64(3.14), true},
 		{"native_float64_zero", float64(0), true},
-		{"native_float64_nan", math.NaN(), false},
-		{"native_float64_pos_inf", math.Inf(1), false},
-		{"native_float64_neg_inf", math.Inf(-1), false},
+		{"native_float64_nan", math.NaN(), true},
+		{"native_float64_pos_inf", math.Inf(1), true},
 		{"native_int", int(42), true},
 		{"native_int_negative", int(-42), true},
 		{"native_int64", int64(1 << 40), true},
 		{"native_int32", int32(-1234), true},
-		// Unsupported types report (nil, false) without panicking.
 		{"unsupported_string", "not a number", false},
 		{"unsupported_bool", true, false},
 		{"unsupported_nil", nil, false},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			r, ok := numberToRat(tc.in)
-			if ok != tc.wantOK {
-				t.Fatalf("numberToRat(%v) ok = %v; want %v", tc.in, ok, tc.wantOK)
-			}
-			if ok && r == nil {
-				t.Errorf("numberToRat(%v) returned nil rat with ok=true", tc.in)
+			if _, ok := parseNumber(tc.in); ok != tc.wantOK {
+				t.Fatalf("parseNumber(%v) ok = %v; want %v", tc.in, ok, tc.wantOK)
 			}
 		})
 	}
@@ -880,5 +863,21 @@ func TestValidationFailureErrorMultiCause(t *testing.T) {
 	}
 	if len(ve.Causes) != 1 {
 		t.Errorf("Causes = %d, want 1", len(ve.Causes))
+	}
+}
+
+// TestJSONNumberBeyondUint64 checks that a json.Number holding an integer
+// beyond the uint64 range is both a number and an integer.
+func TestJSONNumberBeyondUint64(t *testing.T) {
+	for _, schema := range []string{`{"type":"number"}`, `{"type":"integer"}`} {
+		s := MustCompile([]byte(schema))
+		for _, v := range []json.Number{"18446744073709551616", "-99999999999999999999999", "1e30", "5"} {
+			if res, err := s.ValidateValue(v); err != nil || !res.Valid {
+				t.Errorf("%s %s: res=%v err=%v", schema, v, res, err)
+			}
+		}
+	}
+	if res, err := MustCompile([]byte(`{"type":"integer"}`)).ValidateValue(json.Number("1.5")); err != nil || res.Valid {
+		t.Errorf("1.5 accepted as an integer: res=%v err=%v", res, err)
 	}
 }

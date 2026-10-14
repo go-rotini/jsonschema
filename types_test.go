@@ -53,9 +53,8 @@ func TestRefCollisionPolicyString(t *testing.T) {
 
 func TestMapSliceRoundTrip(t *testing.T) {
 	// MapSlice is preserved through encoding/json marshaling because each
-	// MapItem is a regular struct. The test confirms the type wires up
-	// correctly even though the encoder does not yet preserve order — the
-	// schema generator (Phase 7) will own ordering at the JSON layer.
+	// MapItem is a regular struct; it marshals as an array of {Key, Value}
+	// objects, not as a JSON object.
 	ms := MapSlice{
 		{Key: "first", Value: 1},
 		{Key: "second", Value: "two"},

@@ -142,8 +142,10 @@ func parseJSONSchemaTag(tag string, fieldType reflect.Type, fieldPath string) (t
 	return spec, nil
 }
 
-// tokenizeJSONSchemaTag splits a tag value on unescaped commas, honoring
-// the `\,`, `\|`, `\\` escapes from §6.5.
+// tokenizeJSONSchemaTag splits a tag value on unescaped commas. A backslash
+// escapes the next byte (`\,` for a literal comma, `\|` for a literal pipe,
+// `\\` for a backslash); escapes are kept here and resolved later by
+// [unescapeTagValue].
 func tokenizeJSONSchemaTag(tag string) []string {
 	var out []string
 	var cur strings.Builder
@@ -193,8 +195,8 @@ func splitTagOption(tok string) (name, value string, hasValue bool) {
 	return strings.TrimSpace(unescapeTagValue(tok)), "", false
 }
 
-// unescapeTagValue resolves the `\,`, `\|`, `\\` escapes from §6.5.
-// Unknown `\x` sequences collapse to the literal x.
+// unescapeTagValue resolves the tag escapes `\,` (comma), `\|` (pipe) and
+// `\\` (backslash). Any other `\x` sequence collapses to the literal x.
 func unescapeTagValue(s string) string {
 	if !strings.ContainsRune(s, '\\') {
 		return s

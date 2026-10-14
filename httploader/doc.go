@@ -9,6 +9,7 @@
 //
 // [Default] keeps meta-schema refs offline and fetches everything else over
 // HTTPS. Build a [Loader] directly to set a client, a timeout, a body cap, a
-// response cache, plain-http access or request headers, and combine it with
-// other loaders through [jsonschema.ChainLoader].
+// response cache, plain-http access, request headers or a refusal to connect
+// to private addresses, and combine it with other loaders through
+// [jsonschema.ChainLoader].
 package httploader

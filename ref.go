@@ -4,6 +4,7 @@ import (
 	"errors"
 	"fmt"
 	"net/url"
+	"reflect"
 	"slices"
 	"strconv"
 	"strings"
@@ -33,6 +34,7 @@ const (
 	keyAnyOf             = "anyOf"
 	keyOneOf             = "oneOf"
 	keyProperties        = "properties"
+	keyDynamicRef        = "$dynamicRef"
 )
 
 // resolveURI resolves ref against base per RFC 3986. Either argument may be
@@ -88,6 +90,41 @@ type resourceMap struct {
 	// [Schema.Resources] accessor can return root-first plus nested in
 	// declaration order.
 	order []string
+	// policy decides what happens when a second resource claims a URI
+	// already in byURI.
+	policy RefCollisionPolicy
+	// locations maps each walked schema object, by map identity, to its
+	// canonical location. It feeds the absolute keyword locations in
+	// validation output.
+	locations map[uintptr]schemaLocation
+}
+
+// add registers res under uri, applying rm.policy when a different resource
+// already holds uri. A resource with the same content as the holder is not a
+// collision and replaces it.
+func (rm *resourceMap) add(uri string, res *resource, idKey string) error {
+	existing, dup := rm.byURI[uri]
+	if !dup || existing == nil {
+		rm.byURI[uri] = res
+		rm.order = append(rm.order, uri)
+		return nil
+	}
+	if reflect.DeepEqual(existing.root, res.root) {
+		rm.byURI[uri] = res
+		return nil
+	}
+	switch rm.policy {
+	case RefCollisionFirstWins:
+		return nil
+	case RefCollisionLastWins:
+		rm.byURI[uri] = res
+		return nil
+	default:
+		return &CompileError{
+			KeywordLocation: idKey,
+			Message:         fmt.Sprintf("duplicate $id %q", uri),
+		}
+	}
 }
 
 // resource is a single $id-bounded subtree within a compiled schema graph.
@@ -115,6 +152,9 @@ type resource struct {
 	// draft is the effective draft for this resource. Inherited from the
 	// containing resource unless an explicit $schema is declared.
 	draft Draft
+	// external is true for a resource that came from a registered or
+	// fetched document rather than the schema being compiled.
+	external bool
 }
 
 // newResourceMap allocates an empty [resourceMap] ready for [walkResource].
@@ -125,24 +165,44 @@ func newResourceMap() *resourceMap {
 // walkResource walks node and populates rm with every resource boundary
 // rooted at node. baseURI is the absolute URI for the root resource; draft
 // drives keyword-name selection (id vs. $id, etc.).
+// The root resource replaces any resource already registered under baseURI,
+// and baseURI becomes rm's root URI.
 func walkResource(rm *resourceMap, node any, baseURI string, draft Draft) error {
-	root := &resource{
-		baseURI:        baseURI,
+	root := newResource(baseURI, node, draft)
+	if _, dup := rm.byURI[baseURI]; !dup {
+		rm.order = append(rm.order, baseURI)
+	}
+	rm.byURI[baseURI] = root
+	rm.rootURI = baseURI
+	return walkNode(rm, root, node, draft, "")
+}
+
+// walkDocument walks a document other than the schema being compiled (a
+// registered or fetched resource) into rm under uri, applying rm.policy if
+// uri is already taken. rm's root URI is left unchanged.
+func walkDocument(rm *resourceMap, node any, uri string, draft Draft) error {
+	res := newResource(uri, node, draft)
+	res.external = true
+	if err := rm.add(uri, res, "$id"); err != nil {
+		return err
+	}
+	return walkNode(rm, res, node, draft, "")
+}
+
+func newResource(uri string, node any, draft Draft) *resource {
+	return &resource{
+		baseURI:        uri,
 		root:           node,
 		anchors:        map[string]any{},
 		dynamicAnchors: map[string]any{},
 		draft:          draft,
 	}
-	rm.byURI[baseURI] = root
-	rm.rootURI = baseURI
-	rm.order = append(rm.order, baseURI)
-	return walkNode(rm, root, node, draft)
 }
 
 // walkNode recurses through node, opening a new resource whenever a nested
-// object declares its own $id. Boolean schemas contribute no anchors or
-// refs and are skipped silently.
-func walkNode(rm *resourceMap, current *resource, node any, draft Draft) error {
+// object declares its own $id. ptr is node's JSON Pointer within current.
+// Boolean schemas contribute no anchors or refs and are skipped silently.
+func walkNode(rm *resourceMap, current *resource, node any, draft Draft, ptr string) error {
 	obj, ok := node.(map[string]any)
 	if !ok {
 		return nil
@@ -153,17 +213,48 @@ func walkNode(rm *resourceMap, current *resource, node any, draft Draft) error {
 	if err != nil {
 		return err
 	}
+	if target != current {
+		ptr = ""
+	}
+	rm.recordLocation(obj, target.baseURI, ptr)
 	isResourceRoot := opened || sameMap(target.root, obj)
 	registerAnchors(target, obj, isResourceRoot)
-	for k, v := range obj {
+	// Sorted keys make the walk order, and so the [RefCollisionPolicy]
+	// outcome, deterministic.
+	for _, k := range orderKeys(obj) {
 		if !descendsInto(k, draft) {
 			continue
 		}
-		if err := walkChild(rm, target, k, v, subDraft); err != nil {
+		if err := walkChild(rm, target, k, obj[k], subDraft, ptr+"/"+escapePointerToken(k)); err != nil {
 			return err
 		}
 	}
 	return nil
+}
+
+// schemaLocation is the canonical location of a subschema: the URI of the
+// resource that holds it and its JSON Pointer within that resource.
+type schemaLocation struct {
+	uri string
+	ptr string
+}
+
+// recordLocation notes obj's canonical location, keeping the first one
+// recorded.
+func (rm *resourceMap) recordLocation(obj map[string]any, uri, ptr string) {
+	if rm.locations == nil {
+		rm.locations = map[uintptr]schemaLocation{}
+	}
+	key := reflect.ValueOf(obj).Pointer()
+	if _, seen := rm.locations[key]; !seen {
+		rm.locations[key] = schemaLocation{uri: uri, ptr: ptr}
+	}
+}
+
+// location returns obj's canonical location, if it was walked.
+func (rm *resourceMap) location(obj map[string]any) (schemaLocation, bool) {
+	l, ok := rm.locations[reflect.ValueOf(obj).Pointer()]
+	return l, ok
 }
 
 // resolveDraftAndIDKey pulls a per-resource $schema override out of obj (if
@@ -199,6 +290,8 @@ func openResourceIfNeeded(rm *resourceMap, current *resource, obj map[string]any
 	// Pre-2019-09 drafts allowed a plain-name $id (e.g. {"$id": "#foo"})
 	// as an alternative anchor declaration; from 2019-09 on, $id must be
 	// absolute and a "#name" $id is treated as a sibling anchor instead.
+	// The name is honored next to $ref too: it changes no base URI, and
+	// schemas commonly name a $ref this way.
 	if subDraft <= Draft7 && strings.HasPrefix(idStr, "#") && !strings.HasPrefix(idStr, "#/") {
 		name := idStr[1:]
 		if name != "" {
@@ -206,29 +299,26 @@ func openResourceIfNeeded(rm *resourceMap, current *resource, obj map[string]any
 		}
 		return current, false, nil
 	}
+	// Before 2019-09, $ref replaces every other sibling keyword.
+	if _, hasRef := obj["$ref"]; hasRef && subDraft <= Draft7 {
+		return current, false, nil
+	}
 	absID, err := resolveURI(current.baseURI, idStr)
 	if err != nil {
 		return nil, false, &CompileError{KeywordLocation: idKey, Message: "invalid " + idKey, Cause: err}
 	}
 	absID, _ = splitFragment(absID)
-	if existing, dup := rm.byURI[absID]; dup && existing != nil && !sameMap(existing.root, obj) {
-		// Duplicate $id would silently shadow the earlier resource; the
-		// sameMap guard lets the root walk re-enter its own $id without
-		// tripping. Other [RefCollisionPolicy] values are reserved for v0.2.
-		return nil, false, &CompileError{
-			KeywordLocation: idKey,
-			Message:         fmt.Sprintf("duplicate $id %q", absID),
-		}
+	if existing := rm.byURI[absID]; existing != nil && sameMap(existing.root, obj) {
+		// A document root re-entering its own $id.
+		return existing, true, nil
 	}
-	res := &resource{
-		baseURI:        absID,
-		root:           obj,
-		anchors:        map[string]any{},
-		dynamicAnchors: map[string]any{},
-		draft:          subDraft,
+	// Under [RefCollisionFirstWins] a losing resource is still walked, so
+	// its anchors stay scoped to it rather than leaking into the winner.
+	res := newResource(absID, obj, subDraft)
+	res.external = current.external
+	if err := rm.add(absID, res, idKey); err != nil {
+		return nil, false, err
 	}
-	rm.byURI[absID] = res
-	rm.order = append(rm.order, absID)
 	return res, true, nil
 }
 
@@ -261,72 +351,68 @@ func registerAnchors(target *resource, obj map[string]any, isResourceRoot bool) 
 // walkChild dispatches descent into k's value v. The dispatch list mirrors
 // JSON Schema's per-keyword child shape (object-of-schemas, array-of-schemas,
 // or a single subschema).
-func walkChild(rm *resourceMap, target *resource, k string, v any, subDraft Draft) error {
+func walkChild(rm *resourceMap, target *resource, k string, v any, subDraft Draft, ptr string) error {
 	switch k {
 	case keyProperties, keyPatternProperties, keyDefs, keyDefinitions, keyDependentSchemas:
-		return walkSchemaMap(rm, target, v, subDraft)
+		return walkSchemaMap(rm, target, v, subDraft, ptr)
 	case keyItems, keyPrefixItems:
-		return walkItemsLike(rm, target, v, subDraft)
+		return walkItemsLike(rm, target, v, subDraft, ptr)
 	case keyAllOf, keyAnyOf, keyOneOf:
-		return walkSchemaArray(rm, target, v, subDraft)
+		return walkSchemaArray(rm, target, v, subDraft, ptr)
 	case keyDependencies:
-		return walkDependencies(rm, target, v, subDraft)
+		return walkDependencies(rm, target, v, subDraft, ptr)
 	default:
-		return walkNode(rm, target, v, subDraft)
+		return walkNode(rm, target, v, subDraft, ptr)
 	}
 }
 
-func walkSchemaMap(rm *resourceMap, target *resource, v any, subDraft Draft) error {
+func walkSchemaMap(rm *resourceMap, target *resource, v any, subDraft Draft, ptr string) error {
 	m, ok := v.(map[string]any)
 	if !ok {
 		return nil
 	}
-	for _, child := range m {
-		if err := walkNode(rm, target, child, subDraft); err != nil {
+	for _, k := range orderKeys(m) {
+		if err := walkNode(rm, target, m[k], subDraft, ptr+"/"+escapePointerToken(k)); err != nil {
 			return err
 		}
 	}
 	return nil
 }
 
-func walkSchemaArray(rm *resourceMap, target *resource, v any, subDraft Draft) error {
+func walkSchemaArray(rm *resourceMap, target *resource, v any, subDraft Draft, ptr string) error {
 	arr, ok := v.([]any)
 	if !ok {
 		return nil
 	}
-	for _, child := range arr {
-		if err := walkNode(rm, target, child, subDraft); err != nil {
+	for i, child := range arr {
+		if err := walkNode(rm, target, child, subDraft, ptr+"/"+itoa(i)); err != nil {
 			return err
 		}
 	}
 	return nil
 }
 
-func walkItemsLike(rm *resourceMap, target *resource, v any, subDraft Draft) error {
+func walkItemsLike(rm *resourceMap, target *resource, v any, subDraft Draft, ptr string) error {
 	switch t := v.(type) {
 	case []any:
-		for _, child := range t {
-			if err := walkNode(rm, target, child, subDraft); err != nil {
-				return err
-			}
-		}
-		return nil
+		return walkSchemaArray(rm, target, t, subDraft, ptr)
 	case map[string]any:
-		return walkNode(rm, target, t, subDraft)
+		return walkNode(rm, target, t, subDraft, ptr)
 	}
 	return nil
 }
 
-func walkDependencies(rm *resourceMap, target *resource, v any, subDraft Draft) error {
+func walkDependencies(rm *resourceMap, target *resource, v any, subDraft Draft, ptr string) error {
 	m, ok := v.(map[string]any)
 	if !ok {
 		return nil
 	}
-	for _, child := range m {
+	for _, k := range orderKeys(m) {
+		child := m[k]
 		// Pre-2019-09 dependencies could be either a schema or a list of
 		// property names; only the schema variant carries subschemas.
 		if _, ok := child.(map[string]any); ok {
-			if err := walkNode(rm, target, child, subDraft); err != nil {
+			if err := walkNode(rm, target, child, subDraft, ptr+"/"+escapePointerToken(k)); err != nil {
 				return err
 			}
 		}
@@ -432,7 +518,7 @@ func fetchExternalResource(rm *resourceMap, loader Loader, ref, baseURI, docPart
 			}
 		}
 	}
-	if err := walkResource(rm, parsed, docPart, extDraft); err != nil {
+	if err := walkDocument(rm, parsed, docPart, extDraft); err != nil {
 		return nil, &RefError{Ref: ref, BaseURI: baseURI, Cause: err}
 	}
 	res := rm.byURI[docPart]
@@ -524,5 +610,5 @@ func sameMap(a any, b map[string]any) bool {
 	if !ok {
 		return false
 	}
-	return fmt.Sprintf("%p", am) == fmt.Sprintf("%p", b)
+	return reflect.ValueOf(am).UnsafePointer() == reflect.ValueOf(b).UnsafePointer()
 }

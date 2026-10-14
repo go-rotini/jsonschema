@@ -11,6 +11,7 @@ import (
 	"math"
 	"math/big"
 	"reflect"
+	"slices"
 	"sync"
 	"time"
 )
@@ -188,6 +189,9 @@ type genCtx struct {
 	stack     map[reflect.Type]struct{}
 	defs      map[string]any
 	defsOrder []string
+	// nullWrappers maps each anyOf:[null, <T>] made for a pointer to its
+	// <T>.
+	nullWrappers map[*orderedMap]any
 }
 
 func newGenCtx(g *Generator) *genCtx {
@@ -257,8 +261,8 @@ func (c *genCtx) tryCustomEmitter(t reflect.Type, path string) (any, bool, error
 	return raw, true, nil
 }
 
-// tryPointer unwraps a pointer type into its underlying schema, applying
-// the WithNullablePointers wrapping when configured.
+// tryPointer unwraps a pointer type into its underlying schema, allowing
+// null as [WithNullablePointers] describes.
 func (c *genCtx) tryPointer(t reflect.Type, path string) (any, bool, error) {
 	if t.Kind() != reflect.Pointer {
 		return nil, false, nil
@@ -272,15 +276,54 @@ func (c *genCtx) tryPointer(t reflect.Type, path string) (any, bool, error) {
 	if err != nil {
 		return nil, true, err
 	}
-	if c.g.opts.nullablePointers {
-		out := newOrderedMap()
-		out.set("anyOf", []any{
-			orderedFromKV("type", "null"),
-			inner,
-		})
-		return out, true, nil
+	return c.nullablePointer(inner, path), true, nil
+}
+
+// nullablePointer returns the schema for a pointer whose element schema is
+// inner, at reflection path path.
+func (c *genCtx) nullablePointer(inner any, path string) any {
+	if c.g.opts.nullablePointersSet {
+		if !c.g.opts.nullablePointers {
+			return inner
+		}
+	} else if path == "$" || allowsNull(inner) {
+		return inner
 	}
-	return inner, true, nil
+	out := newOrderedMap()
+	out.set("anyOf", []any{
+		orderedFromKV("type", "null"),
+		inner,
+	})
+	if c.nullWrappers == nil {
+		c.nullWrappers = map[*orderedMap]any{}
+	}
+	c.nullWrappers[out] = inner
+	return out
+}
+
+// allowsNull reports whether schema's type list already includes null.
+func allowsNull(schema any) bool {
+	m, ok := schema.(*orderedMap)
+	if !ok {
+		return false
+	}
+	types, ok := m.vals["type"].([]any)
+	return ok && slices.Contains(types, any("null"))
+}
+
+// omitsNilPointer returns the element schema when fieldSchema is a pointer's
+// null wrapper and the field's omitempty or omitzero option leaves a nil
+// pointer out, so it never writes null; otherwise it returns fieldSchema.
+func (c *genCtx) omitsNilPointer(fieldSchema any, omits bool) any {
+	if !omits || c.g.opts.nullablePointersSet {
+		return fieldSchema
+	}
+	if m, ok := fieldSchema.(*orderedMap); ok {
+		if inner, ok := c.nullWrappers[m]; ok {
+			return inner
+		}
+	}
+	return fieldSchema
 }
 
 // tryWellKnown handles types where the JSON shape is fixed by convention:
@@ -434,7 +477,7 @@ func (c *genCtx) schemaForArray(t reflect.Type, path string) (any, error) {
 	elem := t.Elem()
 	if elem.Kind() == reflect.Uint8 {
 		m := newOrderedMap()
-		m.set("type", "string")
+		m.set("type", nilable(t, "string"))
 		m.set("contentEncoding", "base64")
 		return m, nil
 	}
@@ -443,7 +486,7 @@ func (c *genCtx) schemaForArray(t reflect.Type, path string) (any, error) {
 		return nil, err
 	}
 	m := newOrderedMap()
-	m.set("type", "array")
+	m.set("type", nilable(t, "array"))
 	m.set("items", itemSchema)
 	return m, nil
 }
@@ -452,10 +495,19 @@ func (c *genCtx) schemaForArray(t reflect.Type, path string) (any, error) {
 // the value type. Only string-keyed maps are supported (JSON objects can't
 // have non-string keys).
 func (c *genCtx) schemaForMap(t reflect.Type, path string) (any, error) {
-	if t.Key().Kind() != reflect.String {
+	// encoding/json writes a map key as the string itself, as its
+	// MarshalText output, or as a decimal integer, in that order.
+	var keyPattern string
+	switch k := t.Key(); {
+	case k.Kind() == reflect.String, k.Implements(textMarshalerType):
+	case isIntKind(k.Kind()):
+		keyPattern = quotedIntPattern
+	case isUintKind(k.Kind()):
+		keyPattern = quotedUintPattern
+	default:
 		return nil, &jsonschema.CompileError{
 			KeywordLocation: path,
-			Message:         fmt.Sprintf("Generate: map key must be string-kinded (got %s) for %s", t.Key().Kind(), t),
+			Message:         fmt.Sprintf("Generate: map key must be a string, an integer or an encoding.TextMarshaler (got %s) for %s", k.Kind(), t),
 		}
 	}
 	valSchema, err := c.schemaForType(t.Elem(), path+"/{}")
@@ -463,9 +515,20 @@ func (c *genCtx) schemaForMap(t reflect.Type, path string) (any, error) {
 		return nil, err
 	}
 	m := newOrderedMap()
-	m.set("type", "object")
+	m.set("type", nilable(t, "object"))
+	if keyPattern != "" {
+		m.set("propertyNames", orderedFromKV("pattern", keyPattern))
+	}
 	m.set("additionalProperties", valSchema)
 	return m, nil
+}
+
+func isIntKind(k reflect.Kind) bool {
+	return k >= reflect.Int && k <= reflect.Int64
+}
+
+func isUintKind(k reflect.Kind) bool {
+	return k >= reflect.Uint && k <= reflect.Uintptr
 }
 
 // schemaForStruct walks the field set of a struct, honoring json + jsonschema
@@ -515,76 +578,12 @@ func (c *genCtx) schemaForStruct(t reflect.Type, path string) (any, error) {
 	return m, nil
 }
 
-// collectStructFields walks the field set and populates props / required.
-// Embedded anonymous structs are inlined (matches encoding/json semantics).
-func (c *genCtx) collectStructFields(t reflect.Type, path string, props *orderedMap, required *[]any, requiredSeen map[string]bool) error {
-	for f := range t.Fields() {
-		if !f.IsExported() {
-			continue
-		}
-		jsonTag, _ := f.Tag.Lookup("json")
-		jsonName, jsonOpts := parseJSONTag(jsonTag)
-		if jsonName == "-" && jsonOpts == "" {
-			continue
-		}
-
-		// Embedded anonymous struct without an explicit json name: inline
-		// its fields (matches encoding/json semantics).
-		if f.Anonymous && jsonName == "" {
-			ft := f.Type
-			for ft.Kind() == reflect.Pointer {
-				ft = ft.Elem()
-			}
-			if ft.Kind() == reflect.Struct {
-				if err := c.collectStructFields(ft, path+"."+f.Name, props, required, requiredSeen); err != nil {
-					return err
-				}
-				continue
-			}
-		}
-
-		name := jsonName
-		if name == "" {
-			name = f.Name
-		}
-
-		fieldPath := path + "." + f.Name
-		schemaTag, _ := f.Tag.Lookup("jsonschema")
-		spec, err := parseJSONSchemaTag(schemaTag, f.Type, fieldPath)
-		if err != nil {
-			return err
-		}
-
-		var fieldSchema any
-		if spec.hasRef {
-			refMap := newOrderedMap()
-			refMap.set("$ref", spec.ref)
-			fieldSchema = refMap
-		} else {
-			fieldSchema, err = c.schemaForType(f.Type, fieldPath)
-			if err != nil {
-				return err
-			}
-		}
-		fieldSchema = c.applyTagSpecToSchema(fieldSchema, &spec, t, f, fieldPath)
-
-		props.set(name, fieldSchema)
-
-		omitempty := hasJSONTagOption(jsonOpts, "omitempty")
-		if spec.hasReq && !omitempty && !requiredSeen[name] {
-			requiredSeen[name] = true
-			*required = append(*required, name)
-		}
-	}
-	return nil
-}
-
 // applyTagSpecToSchema folds the parsed tag spec into fieldSchema and
 // returns the updated schema; callers must reassign because boolean
 // schemas are promoted to objects when the tag adds keywords.
 //
-// v0.1 attaches metadata as siblings to $ref. 2019-09+ allows this; older
-// drafts forbid it but most validators accept it in practice.
+// Metadata is attached as siblings of $ref. Draft 2019-09 and later apply
+// $ref siblings; Draft 7 and earlier ignore them.
 func (c *genCtx) applyTagSpecToSchema(fieldSchema any, spec *tagSpec, owner reflect.Type, sf reflect.StructField, fieldPath string) any {
 	m, ok := fieldSchema.(*orderedMap)
 	if !ok {
@@ -595,7 +594,18 @@ func (c *genCtx) applyTagSpecToSchema(fieldSchema any, spec *tagSpec, owner refl
 	}
 	c.applyTagDescription(m, spec, owner, sf)
 	applyTagMetadata(m, spec)
-	applyTagAssertions(m, spec)
+	// A pointer's assertions belong to its element schema, so that null
+	// still passes.
+	target := m
+	if inner, ok := c.nullWrappers[m]; ok && spec.hasAssertion() {
+		im, isMap := inner.(*orderedMap)
+		if !isMap {
+			im = newOrderedMap()
+		}
+		m.set("anyOf", []any{orderedFromKV("type", "null"), im})
+		target = im
+	}
+	applyTagAssertions(target, spec)
 	_ = fieldPath
 	return m
 }
@@ -738,7 +748,7 @@ func (s *tagSpec) hasAssertion() bool {
 // allocateDefName picks a stable $defs name for t, disambiguating
 // cross-package name collisions with a numeric suffix.
 func (c *genCtx) allocateDefName(t reflect.Type) string {
-	base := t.Name()
+	base := defNameBase(t.Name())
 	if base == "" {
 		base = "anon"
 	}
@@ -775,6 +785,41 @@ func (c *genCtx) refToDef(name string) *orderedMap {
 	m := newOrderedMap()
 	m.set("$ref", "#/"+defsKey+"/"+name)
 	return m
+}
+
+// defNameBase turns a Go type name into a $defs name that needs no escaping
+// in a $ref. Package paths inside a generic instantiation are cut to their
+// last element, and every byte other than a letter, digit, '_', '.' or '-'
+// becomes '_': Tree[encoding/json.Number] becomes Tree_json.Number.
+func defNameBase(typeName string) string {
+	var cut []byte
+	start := 0
+	for i := range len(typeName) {
+		switch typeName[i] {
+		case '[', ']', ',', ' ', '*':
+			start = len(cut) + 1
+		case '/':
+			cut = cut[:start]
+			continue
+		}
+		cut = append(cut, typeName[i])
+	}
+	out := make([]byte, 0, len(cut))
+	for _, b := range cut {
+		ok := b == '_' || b == '.' || b == '-' ||
+			(b >= '0' && b <= '9') || (b >= 'a' && b <= 'z') || (b >= 'A' && b <= 'Z')
+		if !ok {
+			b = '_'
+		}
+		if b == '_' && len(out) > 0 && out[len(out)-1] == '_' {
+			continue
+		}
+		out = append(out, b)
+	}
+	for len(out) > 0 && out[len(out)-1] == '_' {
+		out = out[:len(out)-1]
+	}
+	return string(out)
 }
 
 // customEmitterToValue converts a *Schema returned by a custom emitter
@@ -976,4 +1021,27 @@ func anySliceCopy(in []any) []any {
 	out := make([]any, len(in))
 	copy(out, in)
 	return out
+}
+
+// nilable returns the "type" value for a value of Go type t whose JSON
+// type is typ: a nil slice or map marshals to null, so slice and map types
+// also allow null. Arrays never marshal to null.
+func nilable(t reflect.Type, typ string) any {
+	switch t.Kind() {
+	case reflect.Slice, reflect.Map:
+		return []any{typ, "null"}
+	}
+	return typ
+}
+
+// dropNull removes the null that nilable added to schema: an omitempty
+// field leaves out a nil (empty) slice or map, so it never writes null.
+func dropNull(schema any) {
+	m, ok := schema.(*orderedMap)
+	if !ok {
+		return
+	}
+	if types, ok := m.vals["type"].([]any); ok && len(types) == 2 && types[1] == "null" {
+		m.vals["type"] = types[0]
+	}
 }

@@ -25,16 +25,18 @@ type outputNode struct {
 	annotations   []*outputNode
 }
 
-// Output renders the result in the requested format per Draft 2020-12 §12.
-// The four formats are:
+// Output renders the result in one of the output formats defined in JSON
+// Schema Core 2020-12 §12:
 //
 //   - [OutputFlag]: {"valid": true|false} only.
-//   - [OutputBasic]: a flat list of assertion outcomes with location info.
-//   - [OutputDetailed]: a nested tree of failures, collapsing passing groups.
+//   - [OutputBasic]: a flat list of errors (or, for a valid result,
+//     annotations) with location info.
+//   - [OutputDetailed]: a nested tree of failures, pruning passing groups.
 //   - [OutputVerbose]: the full nested tree, including passing groups.
 //
-// The returned bytes are valid JSON and validate against the Draft 2020-12
-// output meta-schema (https://json-schema.org/draft/2020-12/output/schema).
+// An unrecognized format renders as [OutputFlag], and a nil Result as
+// {"valid":false}. The returned bytes are valid JSON and validate against
+// the Draft 2020-12 output meta-schema ([OutputMetaSchema]).
 func (r *Result) Output(format OutputFormat) []byte {
 	if r == nil {
 		return []byte(`{"valid":false}`)
@@ -552,8 +554,8 @@ func compileOutputMetaSchema() *Schema {
 }
 
 // OutputMetaSchema returns the compiled Draft 2020-12 output-format
-// meta-schema (memoized; embedded). It returns nil only when the embedded
-// bytes fail to compile, which would indicate a build-time mistake.
+// meta-schema, compiled once from an embedded copy. It returns nil only if
+// the embedded bytes fail to compile.
 func OutputMetaSchema() *Schema {
 	outputMetaSchemaOnce.Do(func() { outputMetaSchema = compileOutputMetaSchema() })
 	return outputMetaSchema

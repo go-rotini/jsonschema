@@ -31,12 +31,10 @@ type Loader interface {
 	Load(uri string) ([]byte, error)
 }
 
-// MapLoader is a [Loader] backed by a static map of URI to bytes. It is
-// useful in tests, in [Compiler.AddResource], and as the storage for the
-// embedded standard meta-schemas in the default loader chain.
-//
-// Lookups tolerate a trailing # on the requested URI (so an `$id` that ends
-// in `#` matches an entry stored without it, and vice versa).
+// MapLoader is a [Loader] backed by a static map of URI to bytes; [MetaLoader]
+// is one. A URI not in the map is rejected with [ErrLoaderRejected]. Lookups
+// tolerate a trailing # (an `$id` that ends in `#` matches an entry stored
+// without it, and vice versa). Load returns a copy of the stored bytes.
 type MapLoader map[string][]byte
 
 // Load implements [Loader].
@@ -61,15 +59,19 @@ func (m MapLoader) Load(uri string) ([]byte, error) {
 	return nil, &LoaderError{URI: uri, Cause: ErrLoaderRejected}
 }
 
-// FileLoader resolves file:// URIs against the local filesystem. The Root
-// field is mandatory: any path that escapes Root (via .., absolute paths
-// outside Root, etc.) is rejected. When Root is the empty string, FileLoader
-// refuses every URI (returning [ErrLoaderRejected]) — callers must opt in
-// explicitly to file-system access.
+// FileLoader resolves file:// URIs against the local file system. The URI
+// path is taken relative to Root (file:///a/b.json reads Root/a/b.json).
+// Any other scheme, a ".." segment, or a path or symlink that escapes Root
+// is rejected with [ErrLoaderRejected]. An empty Root rejects every URI, so
+// file-system access is always an explicit opt-in. Only regular files are
+// read, through an [os.Root], and no larger than MaxSize.
 type FileLoader struct {
 	// Root is the directory file:// URIs resolve against. Required; an
 	// empty Root disables the loader entirely.
 	Root string
+	// MaxSize limits the size of a file the loader reads. Zero means 64 MiB;
+	// a negative value means no limit.
+	MaxSize int64
 }
 
 // Load implements [Loader].
@@ -123,7 +125,7 @@ func (l FileLoader) Load(uri string) ([]byte, error) {
 	if err != nil || rel3 == ".." || strings.HasPrefix(rel3, ".."+string(filepath.Separator)) {
 		return nil, &LoaderError{URI: uri, Cause: fmt.Errorf("%w: %w", errSymlinkEscapesRoot, ErrLoaderRejected)}
 	}
-	data, err := readFile(resolvedPath)
+	data, err := readFile(resolvedRoot, rel3, l.MaxSize)
 	if err != nil {
 		return nil, &LoaderError{URI: uri, Cause: err}
 	}
@@ -140,7 +142,8 @@ var readFile = readFileImpl
 
 // EmbedLoader wraps an [embed.FS] so schemas bundled into the binary can be
 // referenced via embed:// URIs (e.g. embed://schemas/user.json resolves to
-// the FS path "schemas/user.json").
+// the FS path "schemas/user.json"). Other schemes are rejected with
+// [ErrLoaderRejected].
 type EmbedLoader struct {
 	// FS is the embedded filesystem to serve from. Required.
 	FS embed.FS
@@ -170,7 +173,9 @@ func (l EmbedLoader) Load(uri string) ([]byte, error) {
 
 // ChainLoader tries each [Loader] in order and returns the first non-rejected
 // result. A rejection is any error that wraps [ErrLoaderRejected]; any other
-// error short-circuits the chain so that a real I/O failure surfaces.
+// error stops the chain so that a real I/O failure surfaces. When every
+// loader rejects the URI, the last rejection is returned; an empty chain
+// rejects every URI.
 type ChainLoader []Loader
 
 // Load implements [Loader].
@@ -219,8 +224,6 @@ var (
 // package:
 //
 //	jsonschema.Compile(src, jsonschema.WithLoader(httploader.Default()))
-//
-// The returned Loader is shared across calls.
 func DefaultLoader() Loader {
 	return defaultLoader{}
 }

@@ -1,10 +1,10 @@
 {
   "_doc": "Per-draft pass counts for the JSON Schema Test Suite. Updated when conformance pass counts change. A drop fails CI; an increase warns and prints the new count for the maintainer to commit.",
   "drafts": {
-    "draft2020-12": {"pass": 1284, "total": 1301},
-    "draft2019-09": {"pass": 1249, "total": 1261},
-    "draft7":       {"pass": 923,  "total": 929},
-    "draft6":       {"pass": 835,  "total": 841},
-    "draft4":       {"pass": 610,  "total": 618}
+    "draft2020-12": {"pass": 1301, "total": 1301},
+    "draft2019-09": {"pass": 1261, "total": 1261},
+    "draft7":       {"pass": 929,  "total": 929},
+    "draft6":       {"pass": 841,  "total": 841},
+    "draft4":       {"pass": 618,  "total": 618}
   }
 }

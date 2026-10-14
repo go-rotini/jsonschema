@@ -106,6 +106,41 @@ func TestWithRefCollisionPolicyError(t *testing.T) {
 	}
 }
 
+// TestWithRefCollisionPolicyFirstLastWins checks that the policy decides
+// which duplicate-$id subschema a $ref reaches. "a" walks before "b".
+func TestWithRefCollisionPolicyFirstLastWins(t *testing.T) {
+	src := []byte(`{
+		"$id":"https://example.com/root",
+		"$defs":{
+			"a":{"$id":"https://example.com/dup","type":"string"},
+			"b":{"$id":"https://example.com/dup","type":"integer"}
+		},
+		"$ref":"https://example.com/dup"
+	}`)
+	cases := []struct {
+		policy  RefCollisionPolicy
+		valid   string
+		invalid string
+	}{
+		{RefCollisionFirstWins, `"s"`, `1`},
+		{RefCollisionLastWins, `1`, `"s"`},
+	}
+	for _, tc := range cases {
+		for range 20 {
+			s, err := Compile(src, WithRefCollisionPolicy(tc.policy))
+			if err != nil {
+				t.Fatalf("%v: Compile: %v", tc.policy, err)
+			}
+			if res, _ := s.Validate([]byte(tc.valid)); !res.Valid {
+				t.Fatalf("%v: %s should be valid, errors %v", tc.policy, tc.valid, res.Errors)
+			}
+			if res, _ := s.Validate([]byte(tc.invalid)); res.Valid {
+				t.Fatalf("%v: %s should be invalid", tc.policy, tc.invalid)
+			}
+		}
+	}
+}
+
 // TestWithReadOnlyAndWriteOnlyDirection covers the direction-aware required
 // gating. A property marked `readOnly: true` should not be enforced under
 // WithWriteOnly; one marked `writeOnly: true` should not be enforced under

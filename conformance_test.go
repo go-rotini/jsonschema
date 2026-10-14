@@ -61,9 +61,9 @@ func (r *suiteResults) record(name string, pass, total int) {
 }
 
 // TestJSONSchemaTestSuite runs the cloned JSON Schema Test Suite against the
-// validator. We currently target Draft 2020-12 (primary) and report per-draft
-// pass rates; the optional/ subdirectory is excluded (formats / content
-// assertion live in Phase 6).
+// validator and reports per-draft pass rates. The optional/ subdirectory
+// (format and content assertion, among others) is excluded; those behaviors
+// have their own tests in this package.
 func TestJSONSchemaTestSuite(t *testing.T) {
 	if _, err := os.Stat(suiteRoot); os.IsNotExist(err) {
 		t.Skipf("test suite not cloned at %s; run `make clone-test-suite`", suiteRoot)
@@ -197,7 +197,7 @@ func runSuiteDraft(t *testing.T, dir string, draft Draft, results *suiteResults)
 			return err
 		}
 		if info.IsDir() {
-			// Skip the optional/ tree (formats + content assertion = Phase 6).
+			// Skip the optional/ tree (format and content assertion, among others).
 			if info.Name() == "optional" {
 				return filepath.SkipDir
 			}
@@ -328,8 +328,8 @@ func buildSuiteLoader(t *testing.T) Loader {
 	return chain
 }
 
-// TestJSONSchemaEdgeCases is a small set of bespoke conformance probes that
-// the official suite doesn't cover but our spec § matrix calls for.
+// TestJSONSchemaEdgeCases is a small set of conformance probes that the
+// official suite doesn't cover.
 func TestJSONSchemaEdgeCases(t *testing.T) {
 	cases := []struct {
 		name   string
@@ -528,4 +528,83 @@ func runOptionalSuiteFile(t *testing.T, path string, draft Draft, loader Loader,
 		}
 	}
 	return pass, fail
+}
+
+// outputSuiteCase mirrors one group of the suite's output-tests: each test
+// carries, per output format, a schema the rendered output must satisfy.
+type outputSuiteCase struct {
+	Description string          `json:"description"`
+	Schema      json.RawMessage `json:"schema"`
+	Tests       []struct {
+		Description string                     `json:"description"`
+		Data        json.RawMessage            `json:"data"`
+		Output      map[string]json.RawMessage `json:"output"`
+	} `json:"tests"`
+}
+
+// TestJSONSchemaTestSuiteOutput runs the suite's output-tests for the
+// drafts that use the flag / basic / detailed / verbose formats.
+func TestJSONSchemaTestSuiteOutput(t *testing.T) {
+	root := filepath.Join(suiteRoot, "output-tests")
+	if _, err := os.Stat(root); os.IsNotExist(err) {
+		t.Skipf("output tests not cloned at %s", root)
+	}
+	formats := map[string]OutputFormat{
+		"flag": OutputFlag, "basic": OutputBasic, "detailed": OutputDetailed, "verbose": OutputVerbose,
+	}
+	for _, cfg := range []struct {
+		dir, id string
+		draft   Draft
+	}{
+		{"draft2020-12", "https://json-schema.org/draft/2020-12/output/schema", Draft202012},
+		{"draft2019-09", "https://json-schema.org/draft/2019-09/output/schema", Draft201909},
+	} {
+		t.Run(cfg.dir, func(t *testing.T) {
+			outSchema, err := os.ReadFile(filepath.Join(root, cfg.dir, "output-schema.json"))
+			if err != nil {
+				t.Fatal(err)
+			}
+			loader := ChainLoader{MapLoader{cfg.id: outSchema}, DefaultLoader()}
+			files, _ := filepath.Glob(filepath.Join(root, cfg.dir, "content", "*.json"))
+			for _, path := range files {
+				data, err := os.ReadFile(path)
+				if err != nil {
+					t.Fatal(err)
+				}
+				var groups []outputSuiteCase
+				if err := json.Unmarshal(data, &groups); err != nil {
+					t.Fatalf("parse %s: %v", path, err)
+				}
+				for _, g := range groups {
+					s, err := Compile(g.Schema, WithDefaultDraft(cfg.draft))
+					if err != nil {
+						t.Errorf("%s: %s: compile: %v", filepath.Base(path), g.Description, err)
+						continue
+					}
+					for _, ts := range g.Tests {
+						res, err := s.Validate(ts.Data)
+						if err != nil {
+							t.Errorf("%s: %s / %s: %v", filepath.Base(path), g.Description, ts.Description, err)
+							continue
+						}
+						for name, check := range ts.Output {
+							f, ok := formats[name]
+							if !ok {
+								continue
+							}
+							cs, err := Compile(check, WithLoader(loader))
+							if err != nil {
+								t.Errorf("%s: %s / %s: compile %s check: %v", filepath.Base(path), g.Description, ts.Description, name, err)
+								continue
+							}
+							out := res.Output(f)
+							if vr, err := cs.Validate(out); err != nil || !vr.Valid {
+								t.Errorf("%s: %s / %s: %s output fails its check:\n%s", filepath.Base(path), g.Description, ts.Description, name, out)
+							}
+						}
+					}
+				}
+			}
+		})
+	}
 }

@@ -336,3 +336,28 @@ func TestContentEncodingBadBase64(t *testing.T) {
 		t.Errorf("WithContentAssertion: expected invalid for bad base64")
 	}
 }
+
+// TestContentSchemaKeepsNumberPrecision checks that decoded JSON content
+// keeps full number precision and that its annotations are not mixed into
+// those of the instance.
+func TestContentSchemaKeepsNumberPrecision(t *testing.T) {
+	s := MustCompile([]byte(`{"contentMediaType":"application/json",
+		"contentSchema":{"const":12345678901234567891,"properties":{"a":{}}}}`))
+	res, err := s.Validate([]byte(`"12345678901234567890"`), WithContentAssertion(true))
+	if err != nil || res.Valid {
+		t.Fatalf("rounded big integer accepted: res=%+v err=%v", res, err)
+	}
+	s = MustCompile([]byte(`{"contentMediaType":"application/json","contentSchema":{"properties":{"a":{}}}}`))
+	res, err = s.Validate([]byte(`"{\"a\":1}"`), WithContentAssertion(true))
+	if err == nil && !res.Valid {
+		t.Fatalf("res=%+v", res)
+	}
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, a := range res.Annotations {
+		if a.Keyword == "properties" {
+			t.Errorf("decoded content's annotation leaked: %+v", a)
+		}
+	}
+}

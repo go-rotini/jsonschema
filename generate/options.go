@@ -8,8 +8,7 @@ import (
 )
 
 // Option configures the schema generator. Pass options to [Generate],
-// [Bytes], [FromType], or [New]; later constructors return a
-// reusable [*Generator] that amortizes option parsing across many types.
+// [Bytes], [FromType], or [New], which returns a reusable [*Generator].
 type Option func(*options)
 
 // options carries the generator's configuration.
@@ -20,6 +19,7 @@ type options struct {
 	omitDescriptions          bool
 	durationAsString          bool
 	nullablePointers          bool
+	nullablePointersSet       bool
 	orderedProperties         bool
 	additionalPropertiesFalse bool
 	emitSchemaDeclaration     bool
@@ -59,13 +59,22 @@ func WithOmitDescriptions(b bool) Option {
 
 // WithDurationAsString emits time.Duration as
 // {"type":"string","format":"duration"} instead of integer nanoseconds.
+// Default: false.
 func WithDurationAsString(b bool) Option {
 	return func(o *options) { o.durationAsString = b }
 }
 
-// WithNullablePointers emits *T as anyOf:[null, T]. Default: false.
+// WithNullablePointers sets how *T is emitted for every pointer, root
+// type and omitempty fields included: true emits anyOf:[null, <T>] and
+// false emits <T>. Without this option a pointer allows null where
+// encoding/json can write one: everywhere except the root type and a
+// struct field tagged omitempty or omitzero, which leaves a nil pointer
+// out.
 func WithNullablePointers(b bool) Option {
-	return func(o *options) { o.nullablePointers = b }
+	return func(o *options) {
+		o.nullablePointers = b
+		o.nullablePointersSet = true
+	}
 }
 
 // WithOrderedProperties controls whether emitted struct schemas

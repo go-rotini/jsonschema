@@ -50,6 +50,7 @@ import (
 	"errors"
 	"fmt"
 	"maps"
+	"slices"
 	"strconv"
 	"strings"
 
@@ -58,9 +59,9 @@ import (
 	"github.com/go-rotini/yaml"
 )
 
-// Sentinel errors returned by the multi-format adapters. All errors
-// emitted by these adapters wrap one of these so callers can match via
-// [errors.Is].
+// Sentinel errors for YAML and TOML input that parses but cannot be turned
+// into a JSON value. Parse errors from the underlying format package, and
+// compile or validation errors, are wrapped as they are.
 var (
 	// ErrInvalidYAML indicates a structural problem in YAML input that the
 	// adapter could not convert to a JSON-compatible value (e.g. unresolved
@@ -72,22 +73,18 @@ var (
 	ErrInvalidTOML = errors.New("jsonschema: invalid toml")
 )
 
-// LoadJSON parses a JSON schema document and compiles it. It is a verbatim
-// alias for [Compile] provided for naming symmetry with [LoadJSONC],
-// [LoadYAML], and [LoadTOML] when callers dispatch on a runtime format
-// label.
+// LoadJSON is the same as [Compile]; it pairs with [LoadJSONC], [LoadYAML],
+// and [LoadTOML] for callers that dispatch on a format name.
 func LoadJSON(schemaJSON []byte, opts ...CompileOption) (*Schema, error) {
 	return Compile(schemaJSON, opts...)
 }
 
-// LoadJSONURL fetches a JSON schema document from uri using the configured
-// loader and compiles it. Alias for [CompileURL].
+// LoadJSONURL is the same as [CompileURL].
 func LoadJSONURL(uri string, opts ...CompileOption) (*Schema, error) {
 	return CompileURL(uri, opts...)
 }
 
-// LoadJSONValue compiles an already-decoded Go value as a JSON schema.
-// Alias for [CompileValue].
+// LoadJSONValue is the same as [CompileValue].
 func LoadJSONValue(v any, opts ...CompileOption) (*Schema, error) {
 	return CompileValue(v, opts...)
 }
@@ -124,8 +121,9 @@ func LoadJSONC(schemaJSONC []byte, opts ...CompileOption) (*Schema, error) {
 }
 
 // LoadYAML parses a YAML schema document and compiles it as a JSON Schema.
-// The first document in the stream is used; multi-document streams are
-// rejected with [ErrInvalidYAML].
+// The input must hold at most one document; a multi-document stream is
+// rejected with [ErrInvalidYAML]. Plain scalars that read as numbers keep
+// their source text as [Number] values.
 func LoadYAML(schemaYAML []byte, opts ...CompileOption) (*Schema, error) {
 	v, err := decodeYAML(schemaYAML)
 	if err != nil {
@@ -139,6 +137,8 @@ func LoadYAML(schemaYAML []byte, opts ...CompileOption) (*Schema, error) {
 }
 
 // LoadTOML parses a TOML schema document and compiles it as a JSON Schema.
+// Integers become base-10 [Number] values, floats keep their source text,
+// and date and time values become strings.
 func LoadTOML(schemaTOML []byte, opts ...CompileOption) (*Schema, error) {
 	v, err := decodeTOML(schemaTOML)
 	if err != nil {
@@ -151,40 +151,42 @@ func LoadTOML(schemaTOML []byte, opts ...CompileOption) (*Schema, error) {
 	return s, nil
 }
 
-// LoadJSONCURL fetches a JSONC schema document from uri using the
-// configured loader and compiles it. Mirrors [CompileURL] for the JSONC
-// adapter.
+// LoadJSONCURL fetches a JSONC schema document from uri with the
+// [WithLoader] loader (default [DefaultLoader]) and compiles it with
+// [LoadJSONC], using uri as the base URI as [CompileURL] does.
 func LoadJSONCURL(uri string, opts ...CompileOption) (*Schema, error) {
 	data, err := loadURLBytes(uri, opts)
 	if err != nil {
 		return nil, fmt.Errorf("jsonschema: load jsonc url: %w", err)
 	}
-	return LoadJSONC(data, opts...)
+	return LoadJSONC(data, withURLBase(opts, uri)...)
 }
 
-// LoadYAMLURL fetches a YAML schema document from uri using the configured
-// loader and compiles it. Mirrors [CompileURL] for the YAML adapter.
+// LoadYAMLURL fetches a YAML schema document from uri with the [WithLoader]
+// loader (default [DefaultLoader]) and compiles it with [LoadYAML], using uri
+// as the base URI as [CompileURL] does.
 func LoadYAMLURL(uri string, opts ...CompileOption) (*Schema, error) {
 	data, err := loadURLBytes(uri, opts)
 	if err != nil {
 		return nil, fmt.Errorf("jsonschema: load yaml url: %w", err)
 	}
-	return LoadYAML(data, opts...)
+	return LoadYAML(data, withURLBase(opts, uri)...)
 }
 
-// LoadTOMLURL fetches a TOML schema document from uri using the configured
-// loader and compiles it. Mirrors [CompileURL] for the TOML adapter.
+// LoadTOMLURL fetches a TOML schema document from uri with the [WithLoader]
+// loader (default [DefaultLoader]) and compiles it with [LoadTOML], using uri
+// as the base URI as [CompileURL] does.
 func LoadTOMLURL(uri string, opts ...CompileOption) (*Schema, error) {
 	data, err := loadURLBytes(uri, opts)
 	if err != nil {
 		return nil, fmt.Errorf("jsonschema: load toml url: %w", err)
 	}
-	return LoadTOML(data, opts...)
+	return LoadTOML(data, withURLBase(opts, uri)...)
 }
 
-// LoadJSONCValue compiles an already-decoded Go value as if it had been
-// produced by the JSONC adapter. Provided for symmetry with [CompileValue]
-// when the caller has run their own JSONC decoder.
+// LoadJSONCValue compiles a value the caller decoded from JSONC. It is
+// [CompileValue] with a JSONC-specific error prefix; v must use the shapes
+// described at [Schema.ValidateValue].
 func LoadJSONCValue(v any, opts ...CompileOption) (*Schema, error) {
 	s, err := CompileValue(v, opts...)
 	if err != nil {
@@ -193,9 +195,9 @@ func LoadJSONCValue(v any, opts ...CompileOption) (*Schema, error) {
 	return s, nil
 }
 
-// LoadYAMLValue compiles an already-decoded Go value as if it had been
-// produced by the YAML adapter. Provided for symmetry with [CompileValue]
-// when the caller has run their own YAML decoder.
+// LoadYAMLValue compiles a value the caller decoded from YAML. It is
+// [CompileValue] with a YAML-specific error prefix; v must use the shapes
+// described at [Schema.ValidateValue].
 func LoadYAMLValue(v any, opts ...CompileOption) (*Schema, error) {
 	s, err := CompileValue(v, opts...)
 	if err != nil {
@@ -204,9 +206,9 @@ func LoadYAMLValue(v any, opts ...CompileOption) (*Schema, error) {
 	return s, nil
 }
 
-// LoadTOMLValue compiles an already-decoded Go value as if it had been
-// produced by the TOML adapter. Provided for symmetry with [CompileValue]
-// when the caller has run their own TOML decoder.
+// LoadTOMLValue compiles a value the caller decoded from TOML. It is
+// [CompileValue] with a TOML-specific error prefix; v must use the shapes
+// described at [Schema.ValidateValue].
 func LoadTOMLValue(v any, opts ...CompileOption) (*Schema, error) {
 	s, err := CompileValue(v, opts...)
 	if err != nil {
@@ -294,6 +296,12 @@ func MustLoadTOMLValue(v any, opts ...CompileOption) *Schema {
 		panic(err)
 	}
 	return s
+}
+
+// withURLBase returns opts followed by [WithBaseURI](uri), without touching
+// the caller's slice.
+func withURLBase(opts []CompileOption, uri string) []CompileOption {
+	return append(slices.Clip(opts), WithBaseURI(uri))
 }
 
 // loadURLBytes fetches uri's raw bytes using the loader configured by opts
@@ -403,39 +411,78 @@ func decodeYAML(data []byte) (any, error) {
 		}
 		root = doc.Children[0]
 	}
-	anchors := map[string]*yaml.Node{}
-	collectAnchors(root, anchors)
-	return convertYAMLNode(root, anchors, map[*yaml.Node]bool{})
+	targets := map[*yaml.Node]*yaml.Node{}
+	parsed := collectAnchors(root, map[string]*yaml.Node{}, targets)
+	c := &yamlConverter{
+		targets: targets,
+		seen:    map[*yaml.Node]bool{},
+		limit:   max(minYAMLNodeLimit, yamlNodeLimitFactor*parsed),
+	}
+	return c.convert(root)
 }
 
-func collectAnchors(n *yaml.Node, out map[string]*yaml.Node) {
+// minYAMLNodeLimit and yamlNodeLimitFactor bound the number of values a
+// YAML document may expand to through aliases: 100 times the number of
+// parsed nodes, and at least 10,000. Without the bound a few nested aliases
+// ("billion laughs") expand exponentially.
+const (
+	minYAMLNodeLimit    = 10_000
+	yamlNodeLimitFactor = 100
+)
+
+// collectAnchors walks n in document order, recording in targets the node
+// each alias refers to: the most recent node before it with that anchor,
+// as anchors holds them during the walk. It returns the number of nodes
+// visited.
+func collectAnchors(n *yaml.Node, anchors map[string]*yaml.Node, targets map[*yaml.Node]*yaml.Node) int {
 	if n == nil {
-		return
+		return 0
 	}
 	if n.Anchor != "" {
-		out[n.Anchor] = n
+		anchors[n.Anchor] = n
 	}
+	if n.Kind == yaml.AliasNode {
+		if t, ok := anchors[n.Alias]; ok {
+			targets[n] = t
+		}
+	}
+	count := 1
 	for _, c := range n.Children {
-		collectAnchors(c, out)
+		count += collectAnchors(c, anchors, targets)
 	}
+	return count
 }
 
-func convertYAMLNode(n *yaml.Node, anchors map[string]*yaml.Node, seen map[*yaml.Node]bool) (any, error) {
+// yamlConverter turns a YAML AST into a Go value tree, expanding aliases.
+// seen holds the anchors being expanded, to reject cycles; nodes counts the
+// values produced so far, which may not exceed limit.
+type yamlConverter struct {
+	targets map[*yaml.Node]*yaml.Node
+	seen    map[*yaml.Node]bool
+	nodes   int
+	limit   int
+}
+
+func (c *yamlConverter) convert(n *yaml.Node) (any, error) {
 	if n == nil {
 		return nil, nil //nolint:nilnil // YAML missing node is JSON null
 	}
+	c.nodes++
+	if c.nodes > c.limit {
+		return nil, fmt.Errorf("%w: alias expansion exceeds %d nodes", ErrInvalidYAML, c.limit)
+	}
 	switch n.Kind {
 	case yaml.AliasNode:
-		target, ok := anchors[n.Alias]
+		target, ok := c.targets[n]
 		if !ok {
 			return nil, fmt.Errorf("%w: unresolved alias %q", ErrInvalidYAML, n.Alias)
 		}
-		if seen[target] {
+		if c.seen[target] {
 			return nil, fmt.Errorf("%w: cyclic alias %q", ErrInvalidYAML, n.Alias)
 		}
-		seen[target] = true
-		v, err := convertYAMLNode(target, anchors, seen)
-		delete(seen, target)
+		c.seen[target] = true
+		v, err := c.convert(target)
+		delete(c.seen, target)
 		return v, err
 	case yaml.MappingNode:
 		out := make(map[string]any, len(n.Children)/2)
@@ -444,16 +491,16 @@ func convertYAMLNode(n *yaml.Node, anchors map[string]*yaml.Node, seen map[*yaml
 			valNode := n.Children[i+1]
 			// Merge key (<< : *anchor) — flatten mapping into out.
 			if keyNode != nil && keyNode.MergeKey {
-				if err := mergeYAMLInto(out, valNode, anchors, seen); err != nil {
+				if err := c.mergeInto(out, valNode); err != nil {
 					return nil, err
 				}
 				continue
 			}
-			keyStr, err := yamlKeyString(keyNode, anchors, seen)
+			keyStr, err := c.keyString(keyNode)
 			if err != nil {
 				return nil, err
 			}
-			val, err := convertYAMLNode(valNode, anchors, seen)
+			val, err := c.convert(valNode)
 			if err != nil {
 				return nil, err
 			}
@@ -462,8 +509,8 @@ func convertYAMLNode(n *yaml.Node, anchors map[string]*yaml.Node, seen map[*yaml
 		return out, nil
 	case yaml.SequenceNode:
 		out := make([]any, 0, len(n.Children))
-		for _, c := range n.Children {
-			v, err := convertYAMLNode(c, anchors, seen)
+		for _, child := range n.Children {
+			v, err := c.convert(child)
 			if err != nil {
 				return nil, err
 			}
@@ -476,17 +523,17 @@ func convertYAMLNode(n *yaml.Node, anchors map[string]*yaml.Node, seen map[*yaml
 		if len(n.Children) == 0 {
 			return nil, nil //nolint:nilnil // empty document
 		}
-		return convertYAMLNode(n.Children[0], anchors, seen)
+		return c.convert(n.Children[0])
 	default:
 		return n.Value, nil
 	}
 }
 
-func mergeYAMLInto(dst map[string]any, src *yaml.Node, anchors map[string]*yaml.Node, seen map[*yaml.Node]bool) error {
+func (c *yamlConverter) mergeInto(dst map[string]any, src *yaml.Node) error {
 	if src == nil {
 		return nil
 	}
-	v, err := convertYAMLNode(src, anchors, seen)
+	v, err := c.convert(src)
 	if err != nil {
 		return err
 	}
@@ -515,8 +562,8 @@ func mergeYAMLInto(dst map[string]any, src *yaml.Node, anchors map[string]*yaml.
 	return nil
 }
 
-func yamlKeyString(n *yaml.Node, anchors map[string]*yaml.Node, seen map[*yaml.Node]bool) (string, error) {
-	v, err := convertYAMLNode(n, anchors, seen)
+func (c *yamlConverter) keyString(n *yaml.Node) (string, error) {
+	v, err := c.convert(n)
 	if err != nil {
 		return "", err
 	}
@@ -570,7 +617,8 @@ func convertYAMLScalar(n *yaml.Node) any {
 }
 
 // isYAMLNumber reports whether val parses as a YAML 1.2 core-schema integer
-// or float. Underscores are not allowed in YAML 1.2 numbers.
+// or float. Underscores are not allowed in YAML 1.2 numbers. Like the YAML
+// decoder, it also accepts 0b binary integers.
 func isYAMLNumber(val string) bool {
 	if val == "" {
 		return false
@@ -582,6 +630,10 @@ func isYAMLNumber(val string) bool {
 		".nan", ".NaN", ".NAN":
 		return true
 	}
+	// Base-0 parsing would accept Go's digit separators.
+	if strings.ContainsRune(val, '_') {
+		return false
+	}
 	// Integer (decimal, hex, octal).
 	if _, err := strconv.ParseInt(val, 0, 64); err == nil {
 		return true
@@ -589,18 +641,49 @@ func isYAMLNumber(val string) bool {
 	if _, err := strconv.ParseUint(val, 0, 64); err == nil {
 		return true
 	}
-	// Float.
-	if _, err := strconv.ParseFloat(val, 64); err == nil {
-		return true
+	return isYAMLDecimalFloat(val)
+}
+
+// isYAMLDecimalFloat reports whether val matches the YAML 1.2 core-schema
+// float form [-+]?(\.[0-9]+|[0-9]+(\.[0-9]*)?)([eE][-+]?[0-9]+)?. Unlike
+// [strconv.ParseFloat] it rejects "inf", "nan" and hexadecimal floats.
+func isYAMLDecimalFloat(val string) bool {
+	digits := func(s string) (rest string, n int) {
+		for n < len(s) && s[n] >= '0' && s[n] <= '9' {
+			n++
+		}
+		return s[n:], n
 	}
-	return false
+	s := strings.TrimLeft(val, "+-")
+	if len(val)-len(s) > 1 {
+		return false
+	}
+	s, intDigits := digits(s)
+	fracDigits := 0
+	if strings.HasPrefix(s, ".") {
+		s, fracDigits = digits(s[1:])
+	}
+	if intDigits == 0 && fracDigits == 0 {
+		return false
+	}
+	if s != "" && (s[0] == 'e' || s[0] == 'E') {
+		s = s[1:]
+		if s != "" && (s[0] == '+' || s[0] == '-') {
+			s = s[1:]
+		}
+		var expDigits int
+		if s, expDigits = digits(s); expDigits == 0 {
+			return false
+		}
+	}
+	return s == ""
 }
 
 // yamlNormalizeNumber returns a number string suitable for [json.Number].
 // Hex and octal literals are rewritten to base-10; scientific and decimal
 // literals are passed through verbatim. .inf / .nan are not representable
 // in JSON — we emit a float64 string ("Inf" / "NaN") which the validator's
-// numeric comparators handle as float64; this is a documented limitation.
+// numeric comparators handle as float64.
 func yamlNormalizeNumber(val string) string {
 	switch val {
 	case ".inf", ".Inf", ".INF", "+.inf", "+.Inf", "+.INF":

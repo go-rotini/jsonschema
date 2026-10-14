@@ -8,9 +8,10 @@ import (
 	"io"
 )
 
-// ValidateTo validates instanceJSON against schema and returns the decoded
-// value of type T on success, or the validation error on failure. It is the
-// generic counterpart to [*Schema.ValidateAndUnmarshal].
+// ValidateTo validates instanceJSON against schema and, on success, decodes
+// it into a value of type T with [encoding/json.Unmarshal]. It is the generic
+// counterpart to [*Schema.ValidateAndUnmarshal] and reports failures the
+// same way.
 func ValidateTo[T any](schema *Schema, instanceJSON []byte, opts ...Option) (T, error) {
 	var zero T
 	if schema == nil {
@@ -30,9 +31,8 @@ func ValidateTo[T any](schema *Schema, instanceJSON []byte, opts ...Option) (T, 
 	return v, nil
 }
 
-// MustValidateTo is the panic-on-error variant of [ValidateTo]. Intended for
-// package-init use of static, well-known instances; tests and one-shot CLIs
-// where a malformed input is a programming error.
+// MustValidateTo is the panic-on-error variant of [ValidateTo], for static,
+// known-good instances where a failure is a programming error.
 func MustValidateTo[T any](schema *Schema, instanceJSON []byte, opts ...Option) T {
 	v, err := ValidateTo[T](schema, instanceJSON, opts...)
 	if err != nil {
@@ -42,6 +42,9 @@ func MustValidateTo[T any](schema *Schema, instanceJSON []byte, opts ...Option) 
 }
 
 // Validate validates instanceJSON against the schema and returns a [*Result].
+// The returned error reports input that could not be validated (not valid
+// JSON, trailing content after the document, or over [WithMaxInstanceSize]);
+// a schema violation is reported in the Result, not as an error.
 //
 // Empty input ([]byte{} or all-whitespace) is rejected with an error wrapping
 // [io.EOF]. The literal `null` is a valid JSON value and validates against
@@ -57,14 +60,20 @@ func (s *Schema) Validate(instanceJSON []byte, opts ...Option) (*Result, error) 
 	if ro.maxInstanceSize > 0 && len(instanceJSON) > ro.maxInstanceSize {
 		return nil, ErrInstanceTooLarge
 	}
-	value, err := decodeInstanceBytes(instanceJSON)
+	value, count, err := decodeInstanceCount(instanceJSON)
 	if err != nil {
 		return nil, err
 	}
-	return s.validateWithOptions(value, ro)
+	return s.validateWithOptions(value, count, ro)
 }
 
 // ValidateValue validates an already-decoded Go value against the schema.
+// v must use the shapes [encoding/json.Unmarshal] produces into an any:
+// map[string]any, []any, string, bool, nil, and float64 or [Number]. Every
+// Go integer kind, float32 and a non-nil *[math/big.Int] are also accepted
+// as numbers, so a uint64 above the int64 range is an integer; an integer
+// beyond uint64 can be passed as a [Number] holding its digits. Other
+// types, such as structs, typed slices or [MapSlice], match no JSON type.
 func (s *Schema) ValidateValue(v any, opts ...Option) (*Result, error) {
 	if s == nil {
 		return nil, ErrSchemaNotCompiled
@@ -73,16 +82,21 @@ func (s *Schema) ValidateValue(v any, opts ...Option) (*Result, error) {
 	for _, o := range opts {
 		o(ro)
 	}
-	return s.validateWithOptions(v, ro)
+	return s.validateWithOptions(v, -1, ro)
 }
 
 // validateWithOptions is the inner entry point shared by [*Schema.Validate]
-// and [*Schema.ValidateValue]; ro is the already-resolved option set.
-func (s *Schema) validateWithOptions(v any, ro *runOptions) (*Result, error) {
+// and [*Schema.ValidateValue]; count is the number of values in v, or
+// negative when not known, and ro is the already-resolved option set.
+func (s *Schema) validateWithOptions(v any, count int, ro *runOptions) (*Result, error) {
 	ctx := newRunCtx(s, ro)
 	defer ctx.release()
+	ctx.setEvalLimitCount(v, count)
 	if root := s.evalRoot(); root != nil {
 		ctx.evaluate(root, v)
+	}
+	if ctx.overBudget {
+		return nil, ErrMaxEvaluations
 	}
 	res := &Result{Valid: len(ctx.errors) == 0, Errors: ctx.errors}
 	// Stop-on-first-error skips annotation collection: unevaluated* keywords
@@ -94,8 +108,8 @@ func (s *Schema) validateWithOptions(v any, ro *runOptions) (*Result, error) {
 	return res, nil
 }
 
-// ValidateReader streams instance bytes from r and validates them against
-// the schema.
+// ValidateReader reads all of r and validates the bytes as
+// [*Schema.Validate] does. A nil r returns [ErrNilReader].
 func (s *Schema) ValidateReader(r io.Reader, opts ...Option) (*Result, error) {
 	if s == nil {
 		return nil, ErrSchemaNotCompiled
@@ -110,8 +124,10 @@ func (s *Schema) ValidateReader(r io.Reader, opts ...Option) (*Result, error) {
 	return s.Validate(data, opts...)
 }
 
-// ValidateAndUnmarshal validates instanceJSON, then (on success) decodes it
-// into v.
+// ValidateAndUnmarshal validates instanceJSON and, on success, decodes it
+// into v with [encoding/json.Unmarshal] (skipped when v is nil). When the
+// instance is invalid it returns the first [*ValidationError], with the
+// remaining failures appended to its Causes.
 func (s *Schema) ValidateAndUnmarshal(instanceJSON []byte, v any, opts ...Option) error {
 	if s == nil {
 		return ErrSchemaNotCompiled
@@ -152,17 +168,27 @@ func validationFailureError(errs []ValidationError) error {
 // precision-sensitive keywords compare against the wire form. Trailing
 // non-whitespace is rejected to block concatenated-document smuggling.
 func decodeInstanceBytes(data []byte) (any, error) {
+	v, _, err := decodeInstanceCount(data)
+	return v, err
+}
+
+// decodeInstanceCount is decodeInstanceBytes that also returns the number
+// of values decoded, or -1 when it is not known.
+func decodeInstanceCount(data []byte) (any, int, error) {
+	if v, n, ok := decodeJSONFastCount(data); ok {
+		return v, n, nil
+	}
 	dec := json.NewDecoder(bytes.NewReader(data))
 	dec.UseNumber()
 	var v any
 	if err := dec.Decode(&v); err != nil {
-		return nil, fmt.Errorf("jsonschema: decode instance: %w", err)
+		return nil, -1, fmt.Errorf("jsonschema: decode instance: %w", err)
 	}
 	var trailing any
 	if err := dec.Decode(&trailing); err == nil {
-		return nil, fmt.Errorf("jsonschema: decode instance: %w", errTrailingContent)
+		return nil, -1, fmt.Errorf("jsonschema: decode instance: %w", errTrailingContent)
 	} else if !errors.Is(err, io.EOF) {
-		return nil, fmt.Errorf("jsonschema: decode instance: %w", err)
+		return nil, -1, fmt.Errorf("jsonschema: decode instance: %w", err)
 	}
-	return v, nil
+	return v, -1, nil
 }

@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"encoding/json"
 	"errors"
+	"runtime/debug"
 	"strings"
 	"testing"
 )
@@ -609,5 +610,37 @@ func TestRunBowtie_unexpectedArg(t *testing.T) {
 	}
 	if !strings.Contains(errOut.String(), `unexpected argument "--nope"`) {
 		t.Errorf("unexpected arg: stderr missing the rejection:\n%s", errOut.String())
+	}
+}
+
+// TestVersionFromBuildInfo covers the module-version lookup reported in the
+// start handshake.
+func TestVersionFromBuildInfo(t *testing.T) {
+	cases := []struct {
+		name string
+		info *debug.BuildInfo
+		ok   bool
+		want string
+	}{
+		{"no build info", nil, false, develVersion},
+		{"main module", &debug.BuildInfo{Main: debug.Module{Path: modulePath, Version: "v1.2.2"}}, true, "v1.2.2"},
+		{"main module devel", &debug.BuildInfo{Main: debug.Module{Path: modulePath, Version: "(devel)"}}, true, develVersion},
+		{"dependency", &debug.BuildInfo{
+			Main: debug.Module{Path: "example.com/tool", Version: "v0.0.1"},
+			Deps: []*debug.Module{{Path: modulePath, Version: "v1.3.0"}},
+		}, true, "v1.3.0"},
+		{"replaced dependency", &debug.BuildInfo{
+			Main: debug.Module{Path: "example.com/tool"},
+			Deps: []*debug.Module{{Path: modulePath, Version: "v1.3.0", Replace: &debug.Module{Path: "../jsonschema"}}},
+		}, true, develVersion},
+		{"absent", &debug.BuildInfo{Main: debug.Module{Path: "example.com/tool", Version: "v0.0.1"}}, true, develVersion},
+	}
+	for _, tc := range cases {
+		if got := versionFromBuildInfo(tc.info, tc.ok); got != tc.want {
+			t.Errorf("%s: got %q, want %q", tc.name, got, tc.want)
+		}
+	}
+	if got := implementationVersion(); got == "" {
+		t.Error("implementationVersion is empty")
 	}
 }

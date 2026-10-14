@@ -617,3 +617,177 @@ func TestGenerate_refNaming(t *testing.T) {
 		}
 	}
 }
+
+// TestGenerate_namingCollisions pins that every schema shape whose names
+// collide, shadow a predeclared identifier, or form a by-value cycle still
+// generates Go that compiles, with each field bound to the right type.
+func TestGenerate_namingCollisions(t *testing.T) {
+	cases := []struct {
+		name   string
+		schema string
+		wants  []string
+		fields map[[2]string]string // {type, field} → field type
+	}{
+		{
+			name:   "key without letters",
+			schema: `{"type":"object","properties":{"123":{"type":"string"},"-":{"type":"integer"}},"required":["-"]}`,
+			wants:  []string{"Field123 string `json:\"123,omitempty\"`", "Field int `json:\"-,\"`"},
+		},
+		{
+			name:   "definition named like a hoisted type",
+			schema: `{"type":"object","properties":{"foo":{"type":"object","properties":{"a":{"type":"string"}}}},"$defs":{"RootFoo":{"type":"object","properties":{"zzz":{"type":"integer"}}}}}`,
+			wants:  []string{"type RootFoo struct { Zzz int", "type RootFoo2 struct { A string"},
+			fields: map[[2]string]string{{"Root", "Foo"}: "*RootFoo2"},
+		},
+		{
+			name:   "definition named like the root title",
+			schema: `{"title":"Thing","type":"object","properties":{"a":{"$ref":"#/$defs/Thing"}},"$defs":{"Thing":{"type":"string"}}}`,
+			wants:  []string{"type Thing2 string"},
+			fields: map[[2]string]string{{"Thing", "A"}: "*Thing2"},
+		},
+		{
+			name:   "definition keys with one identifier",
+			schema: `{"type":"object","properties":{"x":{"$ref":"#/$defs/foo-bar"},"y":{"$ref":"#/$defs/FooBar"}},"$defs":{"foo-bar":{"type":"string"},"FooBar":{"type":"object","properties":{"q":{"type":"integer"}}}}}`,
+			wants:  []string{"type FooBar struct", "type FooBar2 string"},
+			fields: map[[2]string]string{{"Root", "X"}: "*FooBar2", {"Root", "Y"}: "*FooBar"},
+		},
+		{
+			name:   "definition named like a predeclared type",
+			schema: `{"type":"object","properties":{"a":{"type":"integer"},"b":{"$ref":"#/$defs/int"}},"$defs":{"int":{"type":"string"}}}`,
+			wants:  []string{"type Int string"},
+			fields: map[[2]string]string{{"Root", "A"}: "int", {"Root", "B"}: "*Int"},
+		},
+		{
+			name:   "properties with one identifier",
+			schema: `{"type":"object","properties":{"foo-bar":{"type":"string"},"foo_bar":{"type":"integer"}}}`,
+			fields: map[[2]string]string{{"Root", "FooBar"}: "string", {"Root", "FooBar2"}: "int"},
+		},
+		{
+			name:   "property named like an embedded type",
+			schema: `{"type":"object","allOf":[{"$ref":"#/$defs/Base"},{"properties":{"Base":{"type":"string"}}}],"$defs":{"Base":{"type":"object","properties":{"id":{"type":"string"}}}}}`,
+			wants:  []string{"type Root struct { Base"},
+			fields: map[[2]string]string{{"Root", "Base2"}: "string"},
+		},
+		{
+			name:   "required self-reference",
+			schema: `{"$defs":{"Node":{"type":"object","required":["next"],"properties":{"next":{"$ref":"#/$defs/Node"}}}},"type":"object","properties":{"n":{"$ref":"#/$defs/Node"}}}`,
+			fields: map[[2]string]string{{"Node", "Next"}: "*Node"},
+		},
+		{
+			name:   "required mutual references",
+			schema: `{"$defs":{"A":{"type":"object","required":["b"],"properties":{"b":{"$ref":"#/$defs/B"}}},"B":{"type":"object","required":["a","s"],"properties":{"a":{"$ref":"#/$defs/A"},"s":{"$ref":"#/$defs/S"}}},"S":{"type":"object","properties":{"v":{"type":"string"}}}}}`,
+			fields: map[[2]string]string{{"A", "B"}: "*B", {"B", "A"}: "*A", {"B", "S"}: "S"},
+		},
+		{
+			name:   "allOf referencing the root",
+			schema: `{"type":"object","allOf":[{"$ref":"#"}],"properties":{"a":{"type":"string"}}}`,
+			fields: map[[2]string]string{{"Root", "A"}: "string"},
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			src, err := gogen.Generate([]byte(tc.schema))
+			if err != nil {
+				t.Fatalf("Generate: %v", err)
+			}
+			typeCheck(t, src)
+			mustContain(t, src, tc.wants...)
+			for k, want := range tc.fields {
+				if got := structFieldType(t, src, k[0], k[1]); got != want {
+					t.Errorf("%s.%s = %s, want %s\n%s", k[0], k[1], got, want, src)
+				}
+			}
+		})
+	}
+}
+
+// TestGenerate_untaggableKeys pins that a property key encoding/json cannot
+// carry in a struct tag fails generation instead of yielding a field whose
+// value is silently lost.
+func TestGenerate_untaggableKeys(t *testing.T) {
+	for _, key := range []string{"", "a,b", "a`b", `a"b`, `a\b`} {
+		schema := fmt.Sprintf(`{"type":"object","properties":{%q:{"type":"string"}}}`, key)
+		src, err := gogen.Generate([]byte(schema))
+		if err == nil {
+			t.Errorf("key %q: Generate succeeded, want an error\n%s", key, src)
+			continue
+		}
+		if !strings.Contains(err.Error(), "struct tag") {
+			t.Errorf("key %q: error = %v, want a struct tag error", key, err)
+		}
+	}
+}
+
+// TestGenerate_controlCharactersInComments checks that schema text reaching
+// generated comments cannot break out of them or put characters Go source
+// may not hold into the file: a lone "\r" ends a comment line like "\n",
+// and other control and format characters are written as escapes.
+func TestGenerate_controlCharactersInComments(t *testing.T) {
+	esc := func(s string) string { return strings.ReplaceAll(s, "%u", `\`+"u") }
+	schema := esc(`{"type":"object","title":"Thing",
+		"description":"line1\r*/ package evil\u0000nul%u2028sep%u0085nel%ufeffbom\u001b[31m",
+		"properties":{"a":{"type":"string","description":"x\r\ny\rz"}}}`)
+	src, err := gogen.Generate([]byte(schema), gogen.WithPackage("m"),
+		gogen.WithHeaderComment("Code generated; DO NOT EDIT.\rpackage evil"))
+	if err != nil {
+		t.Fatalf("Generate: %v", err)
+	}
+	typeCheck(t, src)
+	for i, r := range string(src) {
+		if r != '\n' && r != '\t' && (r < 0x20 || r == 0x7f || (r >= 0x80 && r < 0xa0) ||
+			r == 0x2028 || r == 0x2029 || r == 0xfeff) {
+			t.Fatalf("raw control character %U at byte %d:\n%s", r, i, src)
+		}
+	}
+	for _, want := range []string{"// */ package evil\\x00nul\\u2028sep\\u0085nel\\ufeffbom\\x1b[31m", "\t// y\n", "\t// z\n"} {
+		mustContain(t, src, want)
+	}
+}
+
+// TestGenerateAllOfEmbedsOnlyStructs checks that an allOf $ref to a
+// definition that is not a struct is not embedded, since encoding/json
+// writes an embedded non-struct type as a field named after the type.
+func TestGenerateAllOfEmbedsOnlyStructs(t *testing.T) {
+	src, err := gogen.Generate([]byte(`{"title":"T","allOf":[{"$ref":"#/$defs/Extra"},{"$ref":"#/$defs/S"},{"$ref":"#/$defs/Base"}],
+		"properties":{"name":{"type":"string"}},
+		"$defs":{"Extra":{"type":"object","additionalProperties":{"type":"string"}},"S":{"type":"string"},
+		"Base":{"type":"object","properties":{"id":{"type":"string"}}}}}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	out := string(src)
+	for _, bad := range []string{"\tExtra\n", "\tS\n"} {
+		if strings.Contains(out, bad) {
+			t.Errorf("non-struct definition embedded (%q):\n%s", bad, out)
+		}
+	}
+	if !strings.Contains(out, "\tBase\n") {
+		t.Errorf("struct definition not embedded:\n%s", out)
+	}
+}
+
+// TestGenerateAllOfEmbedsThroughAliasAndEscapes checks that an allOf $ref
+// to a definition that only refers to a struct embeds it, and that a
+// percent-encoded $ref names the definition's type.
+func TestGenerateAllOfEmbedsThroughAliasAndEscapes(t *testing.T) {
+	src, err := gogen.Generate([]byte(`{"title":"T","allOf":[{"$ref":"#/$defs/A"},{"$ref":"#/$defs/a%20b"},{"$ref":"#/$defs/L"}],
+		"properties":{"name":{"type":"string"}},
+		"$defs":{"A":{"$ref":"#/$defs/B"},"B":{"type":"object","properties":{"x":{"type":"integer"}}},
+		"a b":{"type":"object","properties":{"y":{"type":"string"}}},
+		"L":{"$ref":"#/$defs/M"},"M":{"$ref":"#/$defs/L"}}}`), gogen.WithPackage("p"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	out := string(src)
+	for _, want := range []string{"\tA\n", "\tAB\n"} {
+		if !strings.Contains(out, want) {
+			t.Errorf("missing embed %q:\n%s", want, out)
+		}
+	}
+	if strings.Contains(out, "\tL\n") {
+		t.Errorf("a $ref cycle was embedded:\n%s", out)
+	}
+	if strings.Contains(out, "A20b") {
+		t.Errorf("percent escape kept in a type name:\n%s", out)
+	}
+}

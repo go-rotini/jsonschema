@@ -2,15 +2,25 @@ package gogen
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"go/format"
 	"go/token"
 	"maps"
+	"net/url"
+	"slices"
 	"sort"
+	"strconv"
 	"strings"
+	"unicode"
+	"unicode/utf8"
 
 	"github.com/go-rotini/jsonschema"
 )
+
+// errUntaggableKey reports a property key that encoding/json cannot carry in a
+// struct tag, so no generated field could ever hold its value.
+var errUntaggableKey = errors.New("key cannot be expressed as an encoding/json struct tag")
 
 // Option configures schema-to-Go-types generation. Pass options to
 // [Generate] or [New].
@@ -59,6 +69,13 @@ func WithHeaderComment(text string) Option {
 // httploader.Default().
 func WithLoader(l jsonschema.Loader) Option {
 	return func(o *options) { o.compileOpts = append(o.compileOpts, jsonschema.WithLoader(l)) }
+}
+
+// WithBaseURI sets the base URI the input schema's relative $refs resolve
+// against when it has no $id, such as "file:///abs/dir/schema.json" for a
+// schema read from a file, so that a loader can serve its neighbors.
+func WithBaseURI(uri string) Option {
+	return func(o *options) { o.compileOpts = append(o.compileOpts, jsonschema.WithBaseURI(uri)) }
 }
 
 // Generator is the configurable schema-to-Go-types worker. Reuse a single
@@ -118,16 +135,30 @@ func (g *Generator) Generate(schemaJSON []byte) ([]byte, error) {
 		return nil, fmt.Errorf("decode schema document: %w", err)
 	}
 
-	b := &goBuilder{opts: g.opts, seen: map[string]bool{}}
+	b := &goBuilder{opts: g.opts, taken: map[string]bool{}, defNames: map[string]string{}, rootSchema: root}
 	rootName := b.rootName(root)
 	b.root = rootName
-	b.defineType(rootName, stringOf(root["description"]), root)
+	b.taken[rootName] = true
 
+	// Every definition gets its name before any type is built, so a hoisted
+	// inline type can never claim a definition's name.
 	defs := definitions(root)
-	for _, name := range sortedKeys(defs) {
-		def := mapOf(defs[name])
-		b.defineType(name, stringOf(def["description"]), def)
+	b.defs = defs
+	defKeys := sortedKeys(defs)
+	for _, key := range defKeys {
+		b.defNames[key] = b.unique(typeIdent(key))
 	}
+
+	if err := b.defineType(rootName, stringOf(root["description"]), root); err != nil {
+		return nil, err
+	}
+	for _, key := range defKeys {
+		def := mapOf(defs[key])
+		if err := b.defineType(b.defNames[key], stringOf(def["description"]), def); err != nil {
+			return nil, err
+		}
+	}
+	b.breakValueCycles()
 
 	formatted, err := format.Source(b.render(rootName))
 	if err != nil {
@@ -138,12 +169,28 @@ func (g *Generator) Generate(schemaJSON []byte) ([]byte, error) {
 
 // goBuilder accumulates the type declarations discovered while walking a
 // schema. Inline object schemas are hoisted into named types as they are
-// encountered; seen guards against re-defining or infinitely recursing.
+// encountered. Every type name is unique: taken records the names in use and
+// defNames the name given to each definition key.
 type goBuilder struct {
-	opts  options
-	root  string
-	decls []typeDecl
-	seen  map[string]bool
+	opts     options
+	root     string
+	decls    []typeDecl
+	taken    map[string]bool
+	defNames map[string]string
+	// rootSchema and defs are the document's root and its definitions.
+	rootSchema map[string]any
+	defs       map[string]any
+}
+
+// unique returns base, or base with the smallest numeric suffix (from 2)
+// that is not yet taken, and marks the result as taken.
+func (b *goBuilder) unique(base string) string {
+	name := base
+	for i := 2; b.taken[name]; i++ {
+		name = base + strconv.Itoa(i)
+	}
+	b.taken[name] = true
+	return name
 }
 
 // typeDecl is one generated type: either a struct (fields/embeds) or, for a
@@ -179,57 +226,74 @@ func (b *goBuilder) rootName(root map[string]any) string {
 
 // defineType registers one named type derived from schema sch. Objects (and
 // allOf compositions) become structs; everything else becomes a type alias.
-func (b *goBuilder) defineType(name, doc string, sch map[string]any) {
-	name = typeIdent(name)
-	if name == "" || b.seen[name] {
-		return
-	}
-	b.seen[name] = true
-
+// name must already be unique (see unique).
+func (b *goBuilder) defineType(name, doc string, sch map[string]any) error {
 	_, hasProps := sch["properties"]
 	allOf, hasAllOf := sch["allOf"].([]any)
 	if !hasProps && !hasAllOf {
-		alias, _ := b.goType(sch, name)
+		alias, _, err := b.goType(sch, name)
+		if err != nil {
+			return err
+		}
 		b.decls = append(b.decls, typeDecl{name: name, doc: doc, alias: alias})
-		return
+		return nil
 	}
 
-	embeds, props, required := b.collectFields(sch, allOf, hasAllOf)
+	embeds, props, required := b.collectFields(name, sch, allOf, hasAllOf)
 	decl := typeDecl{name: name, doc: doc, embeds: embeds}
+	// Field names must be distinct from each other and from the embedded
+	// types, whose names are field names too.
+	used := map[string]bool{}
+	for _, e := range embeds {
+		used[e] = true
+	}
 	keys := sortedKeys(props)
 	decl.fields = make([]fieldDecl, 0, len(keys))
 	for _, key := range keys {
+		if !validTag(key) {
+			return fmt.Errorf("type %s: property %q: %w", name, key, errUntaggableKey)
+		}
+		fname := fieldName(key)
+		for i := 2; used[fname]; i++ {
+			fname = fieldName(key) + strconv.Itoa(i)
+		}
+		used[fname] = true
 		ps := mapOf(props[key])
-		typ, isObj := b.goType(ps, name+fieldName(key))
+		typ, isObj, err := b.goType(ps, name+fname)
+		if err != nil {
+			return err
+		}
 		if isObj && !required[key] {
 			typ = "*" + typ
 		}
 		decl.fields = append(decl.fields, fieldDecl{
-			name: fieldName(key),
+			name: fname,
 			typ:  typ,
 			tag:  jsonTag(key, required[key]),
 			doc:  stringOf(ps["description"]),
 		})
 	}
 	b.decls = append(b.decls, decl)
+	return nil
 }
 
 // collectFields gathers the embedded base types, merged property set, and
-// required-name set for a struct. allOf $refs become embeds; inline allOf
-// objects (and the plain non-allOf case) contribute their properties.
-func (b *goBuilder) collectFields(sch map[string]any, allOf []any, hasAllOf bool) (embeds []string, props map[string]any, required map[string]bool) {
+// required-name set for the struct name. allOf $refs to struct types become
+// embeds (a reference to the struct itself, or a repeated one, is skipped);
+// inline allOf objects contribute their properties, and the schema's own
+// properties are added last.
+func (b *goBuilder) collectFields(name string, sch map[string]any, allOf []any, hasAllOf bool) (embeds []string, props map[string]any, required map[string]bool) {
 	props = map[string]any{}
 	required = map[string]bool{}
-	if !hasAllOf {
-		maps.Copy(props, mapOf(sch["properties"]))
-		addRequired(required, sch["required"])
-		return embeds, props, required
+	if hasAllOf {
+		embeds = make([]string, 0, len(allOf))
 	}
-	embeds = make([]string, 0, len(allOf))
 	for _, raw := range allOf {
 		sub := mapOf(raw)
 		if ref, ok := sub["$ref"].(string); ok {
-			if typ, named := b.refType(ref); named {
+			// Only a struct can be embedded: encoding/json would write any
+			// other embedded type as a field named after it.
+			if typ, named := b.refType(ref); named && typ != name && !slices.Contains(embeds, typ) && b.refIsStruct(ref) {
 				embeds = append(embeds, typ)
 			}
 			continue
@@ -237,93 +301,207 @@ func (b *goBuilder) collectFields(sch map[string]any, allOf []any, hasAllOf bool
 		maps.Copy(props, mapOf(sub["properties"]))
 		addRequired(required, sub["required"])
 	}
+	maps.Copy(props, mapOf(sch["properties"]))
+	addRequired(required, sch["required"])
 	return embeds, props, required
 }
 
 // goType maps a property or value schema to a Go type expression. The second
 // result reports whether the type names an object, so callers can make an
-// optional occurrence a pointer.
-func (b *goBuilder) goType(sch map[string]any, hint string) (string, bool) {
+// optional occurrence a pointer. An inline object is hoisted into a new
+// named type derived from hint.
+func (b *goBuilder) goType(sch map[string]any, hint string) (string, bool, error) {
 	if ref, ok := sch["$ref"].(string); ok {
-		return b.refType(ref)
+		typ, named := b.refType(ref)
+		return typ, named, nil
 	}
-	if _, ok := sch["properties"]; ok {
-		b.defineType(hint, stringOf(sch["description"]), sch)
-		return hint, true
-	}
-	if _, ok := sch["allOf"]; ok {
-		b.defineType(hint, stringOf(sch["description"]), sch)
-		return hint, true
+	_, hasProps := sch["properties"]
+	_, hasAllOf := sch["allOf"]
+	if hasProps || hasAllOf {
+		name := b.unique(hint)
+		if err := b.defineType(name, stringOf(sch["description"]), sch); err != nil {
+			return "", false, err
+		}
+		return name, true, nil
 	}
 	if inner, ok := nullableAnyOf(sch); ok {
-		typ, _ := b.goType(inner, hint)
-		if strings.HasPrefix(typ, "*") || typ == "any" {
-			return typ, false
+		typ, _, err := b.goType(inner, hint)
+		if err != nil {
+			return "", false, err
 		}
-		return "*" + typ, false
+		if strings.HasPrefix(typ, "*") || typ == "any" {
+			return typ, false, nil
+		}
+		return "*" + typ, false, nil
 	}
 	switch typeName(sch) {
 	case "string":
-		return nullable(sch, "string"), false
+		return nullable(sch, "string"), false, nil
 	case "integer":
-		return nullable(sch, "int"), false
+		return nullable(sch, "int"), false, nil
 	case "number":
-		return nullable(sch, "float64"), false
+		return nullable(sch, "float64"), false, nil
 	case "boolean":
-		return nullable(sch, "bool"), false
+		return nullable(sch, "bool"), false, nil
 	case "array":
-		return "[]" + b.elemType(sch, hint), false
+		elem, err := b.elemType(sch, hint)
+		return "[]" + elem, false, err
 	case "object":
-		return b.mapType(sch, hint), false
+		typ, err := b.mapType(sch, hint)
+		return typ, false, err
 	}
 	if t := enumType(sch); t != "" {
-		return t, false
+		return t, false, nil
 	}
-	return "any", false
+	return "any", false, nil
 }
 
 // elemType returns the Go element type for an array schema, hoisting an
 // inline item object when necessary.
-func (b *goBuilder) elemType(sch map[string]any, hint string) string {
+func (b *goBuilder) elemType(sch map[string]any, hint string) (string, error) {
 	items, ok := sch["items"].(map[string]any)
 	if !ok {
-		return "any"
+		return "any", nil
 	}
-	typ, _ := b.goType(items, hint+"Item")
-	return typ
+	typ, _, err := b.goType(items, hint+"Item")
+	return typ, err
 }
 
 // mapType returns the Go type for an object schema without declared
 // properties: a map keyed by string whose value type comes from
 // additionalProperties, or map[string]any when that is absent.
-func (b *goBuilder) mapType(sch map[string]any, hint string) string {
+func (b *goBuilder) mapType(sch map[string]any, hint string) (string, error) {
 	if ap, ok := sch["additionalProperties"].(map[string]any); ok {
-		typ, _ := b.goType(ap, hint+"Value")
-		return "map[string]" + typ
+		typ, _, err := b.goType(ap, hint+"Value")
+		return "map[string]" + typ, err
 	}
 	if pp, ok := sch["patternProperties"].(map[string]any); ok && len(pp) > 0 {
-		return "map[string]" + b.patternValueType(pp, hint)
+		typ, err := b.patternValueType(pp, hint)
+		return "map[string]" + typ, err
 	}
-	return "map[string]any"
+	return "map[string]any", nil
 }
 
 // patternValueType returns the Go value type shared by every
 // patternProperties subschema, or "any" when they disagree or are empty.
-func (b *goBuilder) patternValueType(pp map[string]any, hint string) string {
+func (b *goBuilder) patternValueType(pp map[string]any, hint string) (string, error) {
 	common := ""
 	for _, key := range sortedKeys(pp) {
-		typ, _ := b.goType(mapOf(pp[key]), hint+"Value")
+		typ, _, err := b.goType(mapOf(pp[key]), hint+"Value")
+		if err != nil {
+			return "", err
+		}
 		switch {
 		case common == "":
 			common = typ
 		case common != typ:
-			return "any"
+			return "any", nil
 		}
 	}
 	if common == "" {
-		return "any"
+		return "any", nil
 	}
-	return common
+	return common, nil
+}
+
+// breakValueCycles makes the generated types finite. A type that holds
+// itself by value, directly or through other types, is an invalid recursive
+// type in Go, so every by-value reference between types of the same cycle
+// (a field, an embedded type, or an alias target) becomes a pointer.
+func (b *goBuilder) breakValueCycles() {
+	index := make(map[string]int, len(b.decls))
+	for i := range b.decls {
+		index[b.decls[i].name] = i
+	}
+	// edges lists the by-value references from each declaration.
+	edges := make([][]int, len(b.decls))
+	for i := range b.decls {
+		d := &b.decls[i]
+		if j, ok := index[d.alias]; ok {
+			edges[i] = append(edges[i], j)
+		}
+		for _, e := range d.embeds {
+			if j, ok := index[e]; ok {
+				edges[i] = append(edges[i], j)
+			}
+		}
+		for _, f := range d.fields {
+			if j, ok := index[f.typ]; ok {
+				edges[i] = append(edges[i], j)
+			}
+		}
+	}
+	comp := stronglyConnected(edges)
+	inCycle := func(from, to string) bool {
+		j, ok := index[to]
+		return ok && comp[index[from]] == comp[j]
+	}
+	for i := range b.decls {
+		d := &b.decls[i]
+		if inCycle(d.name, d.alias) {
+			d.alias = "*" + d.alias
+		}
+		for k, e := range d.embeds {
+			if inCycle(d.name, e) {
+				d.embeds[k] = "*" + e
+			}
+		}
+		for k := range d.fields {
+			if inCycle(d.name, d.fields[k].typ) {
+				d.fields[k].typ = "*" + d.fields[k].typ
+			}
+		}
+	}
+}
+
+// stronglyConnected returns the strongly connected component of every node
+// of the graph edges (Tarjan's algorithm). A node with a self-edge shares a
+// component with itself, so callers compare components to find cycles.
+func stronglyConnected(edges [][]int) []int {
+	n := len(edges)
+	comp := make([]int, n)
+	order := make([]int, n)
+	low := make([]int, n)
+	onStack := make([]bool, n)
+	for i := range order {
+		order[i] = -1
+	}
+	var stack []int
+	next, ncomp := 0, 0
+	var visit func(v int)
+	visit = func(v int) {
+		order[v], low[v] = next, next
+		next++
+		stack = append(stack, v)
+		onStack[v] = true
+		for _, w := range edges[v] {
+			switch {
+			case order[w] < 0:
+				visit(w)
+				low[v] = min(low[v], low[w])
+			case onStack[w]:
+				low[v] = min(low[v], order[w])
+			}
+		}
+		if low[v] == order[v] {
+			for {
+				w := stack[len(stack)-1]
+				stack = stack[:len(stack)-1]
+				onStack[w] = false
+				comp[w] = ncomp
+				if w == v {
+					break
+				}
+			}
+			ncomp++
+		}
+	}
+	for v := range n {
+		if order[v] < 0 {
+			visit(v)
+		}
+	}
+	return comp
 }
 
 // render orders the accumulated declarations (root first, then alphabetical)
@@ -342,7 +520,8 @@ func (b *goBuilder) render(rootName string) []byte {
 
 	var sb strings.Builder
 	if b.opts.header != "" {
-		fmt.Fprintf(&sb, "// %s\n\n", b.opts.header)
+		sb.WriteString(comment("", b.opts.header))
+		sb.WriteByte('\n')
 	}
 	fmt.Fprintf(&sb, "package %s\n", b.opts.pkg)
 	for i := range b.decls {
@@ -474,57 +653,151 @@ func scalarType(v any) string {
 }
 
 // jsonTag returns the json struct-tag body for a property: bare for required
-// fields, with ",omitempty" otherwise.
+// fields, with ",omitempty" otherwise. A bare "-" would tell encoding/json to
+// skip the field, so the key "-" keeps its trailing comma.
 func jsonTag(key string, required bool) string {
-	if required {
+	switch {
+	case !required:
+		return key + ",omitempty"
+	case key == "-":
+		return "-,"
+	default:
 		return key
 	}
-	return key + ",omitempty"
+}
+
+// validTag reports whether encoding/json accepts key as the name in a json
+// struct tag. For any other key it ignores the tag and uses the Go field
+// name, so the property could never be read or written.
+func validTag(key string) bool {
+	if key == "" {
+		return false
+	}
+	for _, c := range key {
+		switch {
+		case strings.ContainsRune("!#$%&()*+-./:;<=>?@[]^_{|}~ ", c):
+		case !unicode.IsLetter(c) && !unicode.IsDigit(c):
+			return false
+		}
+	}
+	return true
 }
 
 // refType maps a $ref to the Go type it names. "#" names the root type, and
 // a pointer to a "definitions" or "$defs" entry names that entry's type,
 // e.g. "#/definitions/Command" and "common.json#/$defs/Command" both become
-// "Command". Any other ref, such as a whole remote document, has no
-// generated type and maps to any; the second result is false then.
+// "Command" (or the name given to that definition when two keys would share
+// one). Any other ref, such as a whole remote document, has no generated type
+// and maps to any; the second result is false then.
 func (b *goBuilder) refType(ref string) (string, bool) {
 	if ref == "#" {
 		return b.root, true
 	}
+	name, ok := defKey(ref)
+	if !ok {
+		return "any", false
+	}
+	if typ, ok := b.defNames[name]; ok {
+		return typ, true
+	}
+	return typeIdent(name), true
+}
+
+// defKey returns the "definitions" or "$defs" key that ref points to: the
+// fragment is percent-decoded, then its JSON Pointer token unescaped. The
+// second result is false when ref points to no single entry.
+func defKey(ref string) (string, bool) {
 	_, frag, _ := strings.Cut(ref, "#")
+	if u, err := url.PathUnescape(frag); err == nil {
+		frag = u
+	}
 	for _, prefix := range []string{"/definitions/", "/$defs/"} {
 		name, ok := strings.CutPrefix(frag, prefix)
 		if !ok || name == "" || strings.Contains(name, "/") {
 			continue
 		}
-		name = strings.NewReplacer("~1", "/", "~0", "~").Replace(name)
-		if typ := typeIdent(name); typ != "" {
-			return typ, true
-		}
+		return strings.NewReplacer("~1", "/", "~0", "~").Replace(name), true
 	}
-	return "any", false
+	return "", false
+}
+
+// refIsStruct reports whether the $ref ref, which refType names, becomes a
+// struct type: its target has properties or allOf, or is itself a $ref to
+// such a type. A target outside the document is assumed to.
+func (b *goBuilder) refIsStruct(ref string) bool {
+	seen := map[string]bool{}
+	for {
+		target := b.rootSchema
+		if ref != "#" {
+			key, ok := defKey(ref)
+			def, found := b.defs[key]
+			if !ok || !found || !strings.HasPrefix(ref, "#") {
+				return true
+			}
+			target = mapOf(def)
+		}
+		_, hasProps := target["properties"]
+		_, hasAllOf := target["allOf"].([]any)
+		if hasProps || hasAllOf {
+			return true
+		}
+		next, ok := target["$ref"].(string)
+		if !ok || seen[next] {
+			return false
+		}
+		if _, named := b.refType(next); !named {
+			return false
+		}
+		seen[next] = true
+		ref = next
+	}
 }
 
 // typeIdent returns the Go type name for a definition key: the key itself
 // when it is already a Go identifier, else its PascalCase form (see
-// exportedName), or the empty string when none can be formed.
+// pascalCase). A key naming a predeclared identifier ("int", "string") is
+// capitalized so it does not shadow it, and a key with no usable letters
+// gets the prefix "Type" ("123" becomes "Type123").
 func typeIdent(name string) string {
-	if token.IsIdentifier(name) {
+	if token.IsIdentifier(name) && name != "_" {
+		if predeclared[name] {
+			return strings.ToUpper(name[:1]) + name[1:]
+		}
 		return name
 	}
-	return exportedName(name)
+	return identOr("Type", pascalCase(name))
 }
 
 // fieldName converts a JSON property key to an exported Go identifier:
-// "$schema" becomes "Schema", "gen_file" becomes "GenFile".
+// "$schema" becomes "Schema", "gen_file" becomes "GenFile", and a key with
+// no leading letter gets the prefix "Field" ("123" becomes "Field123").
 func fieldName(key string) string {
-	return exportedName(strings.TrimPrefix(key, "$"))
+	return identOr("Field", pascalCase(strings.TrimPrefix(key, "$")))
 }
 
-// exportedName converts an arbitrary label to a PascalCase Go identifier,
-// splitting on any non-alphanumeric run. It returns the empty string when no
-// usable identifier can be formed.
+// identOr returns name when it is a usable exported identifier, otherwise
+// name prefixed with prefix.
+func identOr(prefix, name string) string {
+	if name == "" || (name[0] >= '0' && name[0] <= '9') {
+		return prefix + name
+	}
+	return name
+}
+
+// exportedName converts an arbitrary label to a PascalCase Go identifier
+// (see pascalCase). It returns the empty string when no usable identifier
+// can be formed.
 func exportedName(s string) string {
+	out := pascalCase(s)
+	if out == "" || (out[0] >= '0' && out[0] <= '9') {
+		return ""
+	}
+	return out
+}
+
+// pascalCase joins the alphanumeric runs of s, each with its first letter
+// upper-cased: "gen_file" becomes "GenFile".
+func pascalCase(s string) string {
 	parts := strings.FieldsFunc(s, func(r rune) bool {
 		switch {
 		case r >= 'a' && r <= 'z', r >= 'A' && r <= 'Z', r >= '0' && r <= '9':
@@ -538,21 +811,21 @@ func exportedName(s string) string {
 		sb.WriteString(strings.ToUpper(p[:1]))
 		sb.WriteString(p[1:])
 	}
-	out := sb.String()
-	if out == "" || (out[0] >= '0' && out[0] <= '9') {
-		return ""
-	}
-	return out
+	return sb.String()
 }
 
 // comment renders text as a doc-comment block at the given indent, one line
-// per source line. Empty text yields nothing.
+// per source line (a "\r\n" or lone "\r" also ends a line). Empty text yields
+// nothing. Other control and format characters, which Go source may not
+// hold or which would render as line breaks, are written as Go escapes.
 func comment(indent, text string) string {
 	if text == "" {
 		return ""
 	}
+	text = strings.ReplaceAll(text, "\r\n", "\n")
+	text = strings.ReplaceAll(text, "\r", "\n")
 	var sb strings.Builder
-	for line := range strings.SplitSeq(text, "\n") {
+	for line := range strings.SplitSeq(commentSafe(text), "\n") {
 		fmt.Fprintf(&sb, "%s// %s\n", indent, line)
 	}
 	return sb.String()
@@ -590,4 +863,39 @@ func sortedKeys(m map[string]any) []string {
 	}
 	sort.Strings(keys)
 	return keys
+}
+
+// predeclared holds Go's predeclared identifiers, which a generated type must
+// not shadow.
+var predeclared = map[string]bool{
+	"any": true, "append": true, "bool": true, "byte": true, "cap": true, "clear": true,
+	"close": true, "comparable": true, "complex": true, "complex128": true, "complex64": true,
+	"copy": true, "delete": true, "error": true, "false": true, "float32": true, "float64": true,
+	"imag": true, "int": true, "int16": true, "int32": true, "int64": true, "int8": true,
+	"iota": true, "len": true, "make": true, "max": true, "min": true, "new": true, "nil": true,
+	"panic": true, "print": true, "println": true, "real": true, "recover": true, "rune": true,
+	"string": true, "true": true, "uint": true, "uint16": true, "uint32": true, "uint64": true,
+	"uint8": true, "uintptr": true,
+}
+
+// commentSafe returns text with every control or format character other
+// than newline and tab, and the Unicode line and paragraph separators,
+// written as a Go escape such as \x00 or \u2028.
+func commentSafe(text string) string {
+	var sb strings.Builder
+	for _, r := range text {
+		switch {
+		case r == '\n' || r == '\t':
+			sb.WriteRune(r)
+		case unicode.IsControl(r) || unicode.Is(unicode.Cf, r) || r == '\u2028' || r == '\u2029' || r == utf8.RuneError:
+			q := strconv.QuoteRune(r)
+			if !strings.HasPrefix(q, `'\`) {
+				q = fmt.Sprintf(`'\u%04x'`, r)
+			}
+			sb.WriteString(q[1 : len(q)-1])
+		default:
+			sb.WriteRune(r)
+		}
+	}
+	return sb.String()
 }

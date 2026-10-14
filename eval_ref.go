@@ -1,79 +1,88 @@
 package jsonschema
 
 import (
+	"errors"
 	"fmt"
+	"reflect"
 )
+
+var errNoBuilder = errors.New("no evaluator builder")
 
 type refEval struct {
 	loc       string
 	source    string
 	absolute  string
 	targetURI string
-	// target is the parsed schema node; nil for lazy edges (cycles).
+	// target is the parsed schema node the reference resolves to.
 	target any
-	// builderRef is the builder used to construct target subschemas at
-	// validation time when the ref is lazy.
+	// builder builds (or finds in its cache) the target's subschema.
 	builder *evalBuilder
+	// sub is the built target, set by Compile before the schema is
+	// returned and read without locking from then on.
+	sub *subschema
+	// err is why Compile could not resolve or build the target. It is
+	// reported when an instance reaches the reference.
+	err error
 }
 
 func (e *refEval) keyword() string { return "$ref" }
 
-func (e *refEval) eval(ctx *runCtx, instance any) {
+// enterRef counts one more reference hop at the current instance location
+// and reports false, after recording the error, when the hops exceed the
+// [WithMaxRefDepth] limit.
+func enterRef(ctx *runCtx, kw, loc string) bool {
 	ctx.refDepth++
-	defer func() { ctx.refDepth-- }()
 	maxDepth := 100
 	if ctx.schema != nil && ctx.schema.compileOpts != nil {
 		maxDepth = ctx.schema.compileOpts.maxRefDepth
 	}
 	if ctx.refDepth > maxDepth {
-		ctx.addError(e.loc, "$ref", "", ErrMaxRefDepth.Error())
+		ctx.addErrorWithCause(loc, kw, "", ErrMaxRefDepth.Error(), ErrMaxRefDepth)
+		return false
+	}
+	return true
+}
+
+func (e *refEval) eval(ctx *runCtx, instance any) {
+	defer func() { ctx.refDepth-- }()
+	if !enterRef(ctx, "$ref", e.loc) {
 		return
 	}
-	target := e.target
-	if target == nil {
-		if ctx.schema == nil || ctx.schema.resources == nil {
-			ctx.addError(e.loc, "$ref", "", fmt.Sprintf("cannot resolve %q", e.source))
-			return
-		}
-		resolved, err := resolveRef(ctx.schema.resources, e.builderLoader(), ctx.schema.id, e.source, nil, ctx.schema.draft)
-		if err != nil {
-			ctx.addError(e.loc, "$ref", "", err.Error())
-			return
-		}
-		target = resolved.Target
+	if e.err != nil {
+		ctx.addErrorWithCause(e.loc, "$ref", "", e.err.Error(), e.err)
+		return
 	}
-	if target == nil {
+	if e.target == nil {
 		ctx.addError(e.loc, "$ref", "", fmt.Sprintf("cannot resolve %q", e.source))
 		return
 	}
-	sub := e.subschemaFor(target)
+	sub := e.subschemaFor(e.target)
 	if sub == nil {
 		ctx.addError(e.loc, "$ref", "", fmt.Sprintf("cannot build subschema for %q", e.source))
 		return
 	}
-	ctx.evaluate(sub, instance)
-}
-
-func (e *refEval) builderLoader() Loader {
-	if e.builder == nil {
-		return nil
-	}
-	return e.builder.loader
+	ctx.evaluateRef(e.loc, sub, instance)
 }
 
 func (e *refEval) subschemaFor(target any) *subschema {
-	if e.builder == nil {
-		return nil
+	if e.sub != nil {
+		return e.sub
 	}
-	// buildSubschema acts as its own cache and serializes concurrent
-	// builders so foreign goroutines never see a partial subschema.
-	key := e.absolute
-	baseURI := e.targetURI
-	sub, err := e.builder.buildSubschema(target, key, baseURI, baseURI)
+	sub, err := e.build(target)
 	if err != nil {
 		return nil
 	}
 	return sub
+}
+
+// build returns the subschema for target. Compile builds every target in
+// advance, so during validation this is a cache lookup.
+func (e *refEval) build(target any) (*subschema, error) {
+	if e.builder == nil {
+		return nil, errNoBuilder
+	}
+	baseURI := e.builder.targetBase(target, e.targetURI)
+	return e.builder.buildSubschema(target, e.absolute, baseURI, baseURI)
 }
 
 // dynamicScopeRefEval is the shared evaluation core for $dynamicRef and
@@ -85,17 +94,11 @@ func dynamicScopeRefEval(
 	kw, loc, source string,
 	staticTarget any,
 	lookupTarget func() any,
-	subschemaFor func(any) *subschema,
+	subschemaFor func(any) (*subschema, error),
 	instance any,
 ) {
-	ctx.refDepth++
 	defer func() { ctx.refDepth-- }()
-	maxDepth := 100
-	if ctx.schema != nil && ctx.schema.compileOpts != nil {
-		maxDepth = ctx.schema.compileOpts.maxRefDepth
-	}
-	if ctx.refDepth > maxDepth {
-		ctx.addError(loc, kw, "", ErrMaxRefDepth.Error())
+	if !enterRef(ctx, kw, loc) {
 		return
 	}
 	target := lookupTarget()
@@ -106,12 +109,16 @@ func dynamicScopeRefEval(
 		ctx.addError(loc, kw, "", fmt.Sprintf("cannot resolve %q", source))
 		return
 	}
-	sub := subschemaFor(target)
+	sub, err := subschemaFor(target)
 	if sub == nil {
-		ctx.addError(loc, kw, "", fmt.Sprintf("cannot build subschema for %q", source))
+		msg := fmt.Sprintf("cannot build subschema for %q", source)
+		if err != nil {
+			msg += ": " + err.Error()
+		}
+		ctx.addErrorWithCause(loc, kw, "", msg, err)
 		return
 	}
-	ctx.evaluate(sub, instance)
+	ctx.evaluateRef(loc, sub, instance)
 }
 
 type dynamicRefEval struct {
@@ -123,9 +130,15 @@ type dynamicRefEval struct {
 	// fragmentName is set when source is a plain-name fragment ("#name").
 	fragmentName string
 	builder      *evalBuilder
+	// built maps the identity of each target Compile built to its
+	// subschema, and failed each target it could not build to the error.
+	// Both are written only while compiling and read without locking from
+	// then on.
+	built  map[any]*subschema
+	failed map[any]error
 }
 
-func (e *dynamicRefEval) keyword() string { return "$dynamicRef" }
+func (e *dynamicRefEval) keyword() string { return keyDynamicRef }
 
 func (e *dynamicRefEval) eval(ctx *runCtx, instance any) {
 	dynamicScopeRefEval(ctx, "$dynamicRef", e.loc, e.source, e.target,
@@ -152,27 +165,59 @@ func (e *dynamicRefEval) findDynamic(ctx *runCtx) any {
 	return nil
 }
 
-func (e *dynamicRefEval) subschemaFor(target any) *subschema {
-	if e.builder == nil {
-		return nil
+func (e *dynamicRefEval) subschemaFor(target any) (*subschema, error) {
+	id := rawIdentity(target)
+	if sub, ok := e.built[id]; ok {
+		return sub, nil
 	}
-	key := fmt.Sprintf("dyn:%p", rawIdentity(target))
-	sub, err := e.builder.buildSubschema(target, key, e.targetURI, e.targetURI)
-	if err != nil {
-		return nil
+	if err, ok := e.failed[id]; ok {
+		return nil, err
 	}
-	return sub
+	return e.build(target)
 }
 
-// rawIdentity returns a value suitable for %p formatting: a pointer-shaped
-// identity for maps/slices, a stable address for booleans, and the value
-// itself otherwise.
+// prebuild builds target while compiling; a target that fails is recorded
+// in failed and reported when validation reaches it.
+func (e *dynamicRefEval) prebuild(target any) {
+	if _, err := e.build(target); err != nil {
+		e.failed = recordFailure(e.failed, target, err)
+	}
+}
+
+func (e *dynamicRefEval) build(target any) (*subschema, error) {
+	if e.builder == nil {
+		return nil, errNoBuilder
+	}
+	sub, err := buildDynamicTarget(e.builder, e.built, "dyn:", target, e.targetURI)
+	if e.built == nil && sub != nil && !e.builder.frozen {
+		e.built = map[any]*subschema{rawIdentity(target): sub}
+	}
+	return sub, err
+}
+
+// buildDynamicTarget builds target under the cache key prefix plus its
+// identity and, while the schema is still compiling, records the result
+// in built (when the caller has one) for lock-free lookups during
+// validation.
+func buildDynamicTarget(b *evalBuilder, built map[any]*subschema, prefix string, target any, targetURI string) (*subschema, error) {
+	id := rawIdentity(target)
+	key := fmt.Sprintf("%s%v", prefix, id)
+	base := b.targetBase(target, targetURI)
+	sub, err := b.buildSubschema(target, key, base, base)
+	if err == nil && built != nil && !b.frozen {
+		built[id] = sub
+	}
+	return sub, err
+}
+
+// rawIdentity returns a value whose %v form identifies schema node v: the
+// address of a map or slice, or the value itself for a boolean.
 func rawIdentity(v any) any {
 	switch t := v.(type) {
 	case map[string]any:
-		return &t
+		return reflect.ValueOf(t).Pointer()
 	case []any:
-		return &t
+		return reflect.ValueOf(t).Pointer()
 	}
 	return v
 }
@@ -188,6 +233,9 @@ type recursiveRefEval struct {
 	targetURI string
 	target    any
 	builder   *evalBuilder
+	// built and failed are as for [dynamicRefEval].
+	built  map[any]*subschema
+	failed map[any]error
 }
 
 func (e *recursiveRefEval) keyword() string { return "$recursiveRef" }
@@ -227,16 +275,57 @@ func (e *recursiveRefEval) findRecursive(ctx *runCtx) any {
 	return nil
 }
 
-func (e *recursiveRefEval) subschemaFor(target any) *subschema {
+func (e *recursiveRefEval) subschemaFor(target any) (*subschema, error) {
+	id := rawIdentity(target)
+	if sub, ok := e.built[id]; ok {
+		return sub, nil
+	}
+	if err, ok := e.failed[id]; ok {
+		return nil, err
+	}
+	return e.build(target)
+}
+
+// prebuild is as for [dynamicRefEval].
+func (e *recursiveRefEval) prebuild(target any) {
+	if _, err := e.build(target); err != nil {
+		e.failed = recordFailure(e.failed, target, err)
+	}
+}
+
+// recordFailure adds target's build error to failed, allocating it when
+// nil, and returns the map.
+func recordFailure(failed map[any]error, target any, err error) map[any]error {
+	if failed == nil {
+		failed = map[any]error{}
+	}
+	failed[rawIdentity(target)] = err
+	return failed
+}
+
+func (e *recursiveRefEval) build(target any) (*subschema, error) {
 	if e.builder == nil {
-		return nil
+		return nil, errNoBuilder
 	}
-	key := fmt.Sprintf("rec:%p", rawIdentity(target))
-	sub, err := e.builder.buildSubschema(target, key, e.targetURI, e.targetURI)
-	if err != nil {
-		return nil
+	sub, err := buildDynamicTarget(e.builder, e.built, "rec:", target, e.targetURI)
+	if e.built == nil && sub != nil && !e.builder.frozen {
+		e.built = map[any]*subschema{rawIdentity(target): sub}
 	}
-	return sub
+	return sub, err
+}
+
+// resolve resolves ref, written at a location whose base URI is base. Once
+// compilation has finished the loader is not used, so validation never
+// fetches documents or changes the resource map.
+func (b *evalBuilder) resolve(base, ref string, draft Draft) (*resolvedRef, error) {
+	if base == "" {
+		base = b.schema.id
+	}
+	loader := b.loader
+	if b.frozen {
+		loader = nil
+	}
+	return resolveRef(b.rm, loader, base, ref, nil, draft)
 }
 
 func registerRefKeywords() {
@@ -245,15 +334,12 @@ func registerRefKeywords() {
 		if !ok {
 			return nil, &CompileError{KeywordLocation: loc, Message: "$ref must be a string"}
 		}
-		baseURI := f.base
-		if baseURI == "" {
-			baseURI = b.schema.id
-		}
-		resolved, err := resolveRef(b.rm, b.loader, baseURI, ref, nil, f.draft)
+		resolved, err := b.resolve(f.base, ref, f.draft)
 		if err != nil {
-			// Defer to a lazy edge: validation re-attempts resolution and
-			// surfaces an error if the target is still missing.
-			return &refEval{loc: loc, source: ref, absolute: ref, builder: b}, nil //nolint:nilerr // intentional fallback to runtime resolution
+			// A reference that cannot be resolved fails only the
+			// instances that reach it.
+			return &refEval{loc: loc, source: ref, builder: b,
+				err: fmt.Errorf("cannot resolve %q: %w", ref, err)}, nil
 		}
 		return &refEval{
 			loc:       loc,
@@ -269,20 +355,21 @@ func registerRefKeywords() {
 		if !ok {
 			return nil, &CompileError{KeywordLocation: loc, Message: "$dynamicRef must be a string"}
 		}
-		baseURI := f.base
-		if baseURI == "" {
-			baseURI = b.schema.id
-		}
-		resolved, err := resolveRef(b.rm, b.loader, baseURI, ref, nil, f.draft)
-		var fragName string
-		if abs, frag := splitFragment(ref); abs == "" && len(frag) > 1 && frag[0] == '#' && frag[1] != '/' {
-			fragName = frag[1:]
-		}
-		ev := &dynamicRefEval{loc: loc, source: ref, fragmentName: fragName, builder: b}
+		resolved, err := b.resolve(f.base, ref, f.draft)
+		ev := &dynamicRefEval{loc: loc, source: ref, builder: b}
 		if err == nil {
 			ev.absolute = resolved.AbsoluteURI
 			ev.targetURI = resolved.TargetURI
 			ev.target = resolved.Target
+		}
+		// The reference is dynamic only when its fragment is a plain name
+		// and the schema it first resolves to declares that name as its
+		// $dynamicAnchor; otherwise it behaves like $ref.
+		if _, frag := splitFragment(ref); len(frag) > 1 && frag[1] != '/' {
+			name := frag[1:]
+			if m, ok := ev.target.(map[string]any); ok && m["$dynamicAnchor"] == name {
+				ev.fragmentName = name
+			}
 		}
 		return ev, nil
 	})
@@ -291,11 +378,7 @@ func registerRefKeywords() {
 		if !ok {
 			return nil, &CompileError{KeywordLocation: loc, Message: "$recursiveRef must be a string"}
 		}
-		baseURI := f.base
-		if baseURI == "" {
-			baseURI = b.schema.id
-		}
-		resolved, err := resolveRef(b.rm, b.loader, baseURI, ref, nil, f.draft)
+		resolved, err := b.resolve(f.base, ref, f.draft)
 		ev := &recursiveRefEval{loc: loc, source: ref, builder: b}
 		if err == nil {
 			ev.absolute = resolved.AbsoluteURI

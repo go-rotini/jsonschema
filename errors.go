@@ -5,13 +5,15 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"net/url"
 	"strconv"
 	"strings"
 )
 
-// CompileError is returned when a schema document is malformed, references a
-// non-existent vocabulary, or violates a keyword's value constraints (e.g.
-// minLength is a string instead of a non-negative integer).
+// CompileError is returned when a schema document is malformed or violates a
+// keyword's value constraints (e.g. minLength is a string instead of a
+// non-negative integer). An unresolvable $ref is reported as a [*RefError]
+// instead.
 type CompileError struct {
 	// KeywordLocation is the JSON Pointer (or URL with fragment) to the
 	// position in the schema where the problem was found.
@@ -157,9 +159,11 @@ func (e *FormatError) Is(target error) bool {
 func (e *FormatError) Unwrap() error { return e.Cause }
 
 // Sentinel errors. The pointer-typed sentinels (ErrCompile, ErrValidation,
-// ErrRef, ErrLoader, ErrFormat) match instances of their concrete error
-// type via [errors.Is]; the package-level errors.New sentinels surface
-// specific failure conditions that do not warrant a structured type.
+// ErrRef, ErrLoader, ErrFormat) match any error of their concrete type via
+// [errors.Is]; the others mark specific failure conditions. Never pass a
+// pointer-typed sentinel's address to [errors.As] (as in &ErrValidation):
+// that overwrites the shared sentinel. Declare a variable of the error type
+// for errors.As instead.
 var (
 	// ErrCompile matches any [*CompileError].
 	ErrCompile = &CompileError{}
@@ -178,25 +182,37 @@ var (
 	// ErrUnknownKeyword indicates a keyword that is not registered for the
 	// active draft and [WithStrictKeywords] is enabled.
 	ErrUnknownKeyword = errors.New("jsonschema: unknown keyword")
+	// ErrUnknownVocabulary indicates a custom meta-schema whose $vocabulary
+	// requires (true) a vocabulary this package does not implement. It is
+	// the Cause of the resulting [*CompileError].
+	ErrUnknownVocabulary = errors.New("jsonschema: unknown required vocabulary")
 	// ErrUnknownFormat indicates a "format" value with no registered
 	// validator while the unknown-format policy is [UnknownFormatError].
-	// Surfaced as the [FormatError.Cause] inside the wrapping
-	// [*ValidationError.Cause].
+	// It is the Cause of the [*FormatError] held in [ValidationError.Cause].
 	ErrUnknownFormat = errors.New("jsonschema: unknown format")
-	// ErrRefCycle indicates a cyclic $ref chain that the compiler could
-	// not turn into a lazy edge. Reserved for future use; v0.1's compile
-	// path resolves every cycle into a lazy edge bounded at run time by
-	// [WithMaxRefDepth] (which surfaces as [ErrMaxRefDepth]).
+	// ErrRefCycle names a $ref cycle. Nothing returns it: $ref cycles are
+	// legal JSON Schema, and validation follows them, bounded by
+	// [WithMaxRefDepth].
+	//
+	// Deprecated: a cycle that never terminates is reported as a
+	// [ValidationError] with Cause [ErrMaxRefDepth]; match that instead.
 	ErrRefCycle = errors.New("jsonschema: ref cycle detected")
-	// ErrMaxRefDepth indicates a single keyword evaluation followed more
-	// than [WithMaxRefDepth] hops.
+	// ErrMaxRefDepth indicates validation nested more than [WithMaxRefDepth]
+	// $ref, $dynamicRef or $recursiveRef hops. It is the Cause of the
+	// resulting [ValidationError].
 	ErrMaxRefDepth = errors.New("jsonschema: max ref depth exceeded")
-	// ErrMaxValidationDepth indicates the validator recursed past
-	// [WithMaxValidationDepth] levels into nested instances.
+	// ErrMaxValidationDepth indicates subschema evaluation nested deeper
+	// than [WithMaxValidationDepth]. It is the Cause of the resulting
+	// [ValidationError].
 	ErrMaxValidationDepth = errors.New("jsonschema: max validation depth exceeded")
 	// ErrMaxKeyCount indicates an object instance had more keys than the
-	// [WithMaxKeyCount] cap allows.
+	// [WithMaxKeyCount] cap allows. It is the Cause of the resulting
+	// [ValidationError].
 	ErrMaxKeyCount = errors.New("jsonschema: max key count exceeded")
+	// ErrMaxEvaluations indicates validation stopped after more subschema
+	// evaluations than [WithMaxEvaluations] allows. The Validate methods
+	// return it as their error, with no [Result].
+	ErrMaxEvaluations = errors.New("jsonschema: max evaluations exceeded")
 	// ErrInstanceTooLarge indicates an instance document larger than
 	// [WithMaxInstanceSize] was rejected before parsing.
 	ErrInstanceTooLarge = errors.New("jsonschema: instance exceeds size limit")
@@ -205,41 +221,37 @@ var (
 	// [DefaultLoader] declining an https:// $ref, since it serves only the
 	// embedded meta-schemas).
 	ErrLoaderRejected = errors.New("jsonschema: loader rejected URI scheme")
-	// ErrSchemaNotCompiled indicates a [*Schema] method was called on a
-	// nil receiver, or on a value that was not produced by the compiler
-	// (e.g. a zero-value [Schema] literal).
+	// ErrSchemaNotCompiled indicates a nil [*Schema] or [*Compiler] (or a
+	// nil generator in a subpackage) was used, including a nil schema passed
+	// to [ValidateTo] or the multi-format Validate functions.
 	ErrSchemaNotCompiled = errors.New("jsonschema: schema not compiled")
-	// ErrValidationFailed is returned when validation produced no
-	// structured [*ValidationError] but the instance was nevertheless
-	// rejected.
+	// ErrValidationFailed is returned by [ValidateTo] and
+	// [Schema.ValidateAndUnmarshal] when the instance was rejected without
+	// a structured [*ValidationError] to return.
 	ErrValidationFailed = errors.New("jsonschema: validation failed")
 	// ErrNilReader indicates a nil [io.Reader] was passed to
 	// [*Schema.ValidateReader].
 	ErrNilReader = errors.New("jsonschema: nil reader")
-	// ErrUnsupportedSchemaShape indicates a schema slot held a value the
-	// compiler/runtime cannot evaluate (neither a JSON object nor a
-	// boolean schema). Surfaced as the [CompileError.Cause].
+	// ErrUnsupportedSchemaShape indicates a schema, or a subschema the
+	// compiler builds, that is neither a JSON object nor a boolean (e.g.
+	// {"not": 5}). It is the Cause of the resulting [*CompileError].
 	ErrUnsupportedSchemaShape = errors.New("jsonschema: unsupported schema shape")
 )
 
-// RenderError produces a human-readable error string.
+// RenderError produces a human-readable, multi-line error string.
 //
-// When err is a [*ValidationError] (single or multi-cause), the output
-// emits one structured block per leaf cause with the schema keyword
-// location, the instance pointer, the human-readable message, and — when
-// schemaSrc / instanceSrc are non-empty and the JSON pointer can be
-// resolved against them — a snippet of the offending source line with a
-// caret pointer. When err is a [*CompileError], only the schema side is
-// rendered. For other error types the function falls through to err.Error().
+// When err wraps a [*ValidationError], the output has one block per leaf
+// failure in its cause tree, giving the message, keyword, schema location
+// and instance location, plus — when schemaSrc / instanceSrc are non-empty
+// JSON and the location resolves in them — the offending source line with
+// a caret. When err wraps a [*CompileError], only the schema side is
+// rendered, followed by its cause. Any other error renders as err.Error().
 //
-// Set color to true to wrap error text and the caret in ANSI escape
-// sequences (red for errors; bold for the line snippet header). Color is
-// off by default.
+// Pass true for color to add ANSI escapes (red error labels and caret,
+// bold snippet headers). Color is off by default.
 //
-// Programmatic callers should not parse the returned string — use
-// [errors.Is] / [errors.As] against the typed errors ([*CompileError],
-// [*ValidationError], [*RefError], [*LoaderError], [*FormatError]) and
-// switch on [ValidationError.Keyword] for stable classification.
+// Do not parse the returned string; use [errors.Is] / [errors.As] with the
+// typed errors and switch on [ValidationError.Keyword].
 func RenderError(schemaSrc, instanceSrc []byte, err error, color ...bool) string {
 	if err == nil {
 		return ""
@@ -312,7 +324,9 @@ func writeValidationBlock(buf *bytes.Buffer, schemaSrc, instanceSrc []byte, ve *
 	}
 
 	if len(schemaSrc) > 0 && ve.KeywordLocation != "" {
-		writeSourceSnippet(buf, "schema", schemaSrc, ve.KeywordLocation, color, bold)
+		if ptr, ok := followLocalRefs(schemaSrc, ve.KeywordLocation); ok {
+			writeSourceSnippet(buf, "schema", schemaSrc, ptr, color, bold)
+		}
 	}
 	if len(instanceSrc) > 0 && ve.InstanceLocation != "" {
 		writeSourceSnippet(buf, "instance", instanceSrc, ve.InstanceLocation, color, bold)
@@ -346,6 +360,57 @@ func renderCompileError(schemaSrc []byte, ce *CompileError, color bool) string {
 		fmt.Fprintf(&buf, "  cause: %s\n", ce.Cause.Error())
 	}
 	return buf.String()
+}
+
+// followLocalRefs maps keywordLocation, an evaluation path, onto a JSON
+// Pointer into src by replacing each crossed "$ref", "$dynamicRef" or
+// "$recursiveRef" with the local JSON Pointer it names. It reports false
+// when the path crosses a reference that is not a local JSON Pointer.
+func followLocalRefs(src []byte, keywordLocation string) (string, bool) {
+	p := strings.TrimPrefix(keywordLocation, "#")
+	if !strings.HasPrefix(p, "/") || !strings.Contains(p, "/$") {
+		return keywordLocation, true
+	}
+	var doc any
+	if err := json.Unmarshal(src, &doc); err != nil {
+		return keywordLocation, true
+	}
+	var out []string
+	cur := doc
+	for tok := range strings.SplitSeq(p[1:], "/") {
+		m, isMap := cur.(map[string]any)
+		name := unescapeJSONPointerToken(tok)
+		ref, isRef := "", false
+		if isMap && (name == "$ref" || name == keyDynamicRef || name == "$recursiveRef") {
+			ref, isRef = m[name].(string)
+		}
+		if !isRef {
+			out = append(out, tok)
+			next, err := jsonPointer(cur, "/"+tok)
+			if err != nil {
+				return keywordLocation, true
+			}
+			cur = next
+			continue
+		}
+		if ref != "#" && !strings.HasPrefix(ref, "#/") {
+			return "", false
+		}
+		frag, err := url.PathUnescape(ref[1:])
+		if err != nil {
+			return "", false
+		}
+		target, err := jsonPointer(doc, frag)
+		if err != nil {
+			return "", false
+		}
+		out = splitPointer(frag)
+		cur = target
+	}
+	if len(out) == 0 {
+		return "", true
+	}
+	return "/" + strings.Join(out, "/"), true
 }
 
 // writeSourceSnippet attempts to resolve pointer against src and emit a
@@ -584,3 +649,14 @@ func unescapeJSONPointerToken(t string) string {
 func isJSONWS(b byte) bool {
 	return b == ' ' || b == '\t' || b == '\n' || b == '\r'
 }
+
+// wrapError is a package-level sentinel that wraps another: what fmt.Errorf with one %w
+// builds, laid out as static data so it costs nothing at init.
+type wrapError struct {
+	msg string
+	err error
+}
+
+func (e *wrapError) Error() string { return e.msg }
+
+func (e *wrapError) Unwrap() error { return e.err }

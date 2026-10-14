@@ -6,6 +6,8 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"reflect"
+	"slices"
 	"strings"
 	"sync"
 )
@@ -46,13 +48,23 @@ type keywordBinding struct {
 // The schema's effective draft is determined by the $schema keyword if
 // present; otherwise the package falls back to the value passed via
 // [WithDefaultDraft], then [DraftDefault].
+//
+// Compile fetches every document the schema references, so validation
+// never calls the [Loader]. A $ref inside a fetched document that cannot be
+// resolved, or a $ref target that does not compile (such as a pattern
+// using lookaround), does not fail Compile: each evaluation that reaches
+// that reference fails it, with a [ValidationError] whose Cause is the
+// error. That failure counts like any failing keyword, so where a failing
+// subschema is allowed it can let the instance pass: under not the
+// instance passes, if takes else, and anyOf or oneOf go on to their other
+// branches.
 func Compile(schemaJSON []byte, opts ...CompileOption) (*Schema, error) {
 	c := NewCompiler(opts...)
 	return c.Compile(schemaJSON)
 }
 
-// MustCompile is the panic-on-error variant of [Compile]. Intended for
-// package-init use of static, well-known schemas.
+// MustCompile is the panic-on-error variant of [Compile], for static,
+// known-good schemas such as package-level variables.
 func MustCompile(schemaJSON []byte, opts ...CompileOption) *Schema {
 	s, err := Compile(schemaJSON, opts...)
 	if err != nil {
@@ -78,8 +90,8 @@ func MustCompileValue(schemaValue any, opts ...CompileOption) *Schema {
 	return s
 }
 
-// CompileURL fetches the schema at uri using the configured Loader (or the
-// default chain) and compiles it.
+// CompileURL fetches the schema at uri with the [WithLoader] loader (default
+// [DefaultLoader]) and compiles it, using uri as the base URI.
 func CompileURL(uri string, opts ...CompileOption) (*Schema, error) {
 	c := NewCompiler(opts...)
 	return c.CompileURL(uri)
@@ -94,10 +106,9 @@ func MustCompileURL(uri string, opts ...CompileOption) *Schema {
 	return s
 }
 
-// Validate compiles schemaJSON and validates instanceJSON against it in one
-// call. This is a convenience for one-shot use; callers performing multiple
-// validations against the same schema should call [Compile] once and use
-// [*Schema.Validate] to amortize compilation cost.
+// Validate compiles schemaJSON with default compile options and validates
+// instanceJSON against it in one call. To validate many instances, call
+// [Compile] once and reuse the [*Schema].
 func Validate(schemaJSON, instanceJSON []byte, opts ...Option) (*Result, error) {
 	s, err := Compile(schemaJSON)
 	if err != nil {
@@ -106,18 +117,30 @@ func Validate(schemaJSON, instanceJSON []byte, opts ...Option) (*Result, error) 
 	return s.Validate(instanceJSON, opts...)
 }
 
-// Compiler holds compile-time configuration and a cache of compiled remote
-// schemas. Reuse a Compiler when compiling many schemas that share remote
-// references — the cache amortizes loader I/O.
+// Compiler holds compile-time configuration, resources registered with
+// [Compiler.AddResource], and a cache of the schemas compiled by
+// [Compiler.CompileURL], keyed by URI. External $refs fetched while
+// compiling are not cached across calls; to fetch a remote document once,
+// pass a caching [Loader] (such as an httploader.Loader with Cache set).
 //
-// A Compiler is safe for concurrent use after construction. The cache is
-// keyed by absolute URI; concurrent [*Compiler.CompileURL] calls for the
-// same URI share a single fetch+compile pipeline via an inline single-flight.
+// A Compiler is safe for concurrent use. Concurrent CompileURL calls for the
+// same URI share one fetch and compile.
 type Compiler struct {
-	opts      *compileOptions
-	cache     sync.Map // map[string]*Schema
-	resources sync.Map // map[string][]byte — pre-registered AddResource entries
-	flight    sync.Map // map[string]*compileInflight — in-flight CompileURL calls
+	opts   *compileOptions
+	cache  sync.Map // map[string]*Schema
+	flight sync.Map // map[string]*compileInflight — in-flight CompileURL calls
+
+	// resources holds the AddResource entries in registration order. It is
+	// replaced, never mutated in place, so a compile can range over a
+	// snapshot without holding resMu.
+	resMu     sync.RWMutex
+	resources []registeredResource
+}
+
+// registeredResource is one [Compiler.AddResource] entry, parsed once.
+type registeredResource struct {
+	uri   string
+	value any
 }
 
 // compileInflight is the single-flight record used by [*Compiler.CompileURL]
@@ -162,8 +185,8 @@ func (l *tracingLoader) Load(uri string) ([]byte, error) {
 	return data, nil
 }
 
-// Compile parses and compiles schemaJSON. The result is cached by $id so
-// subsequent calls referencing the same document via $ref short-circuit.
+// Compile parses and compiles schemaJSON. Each call compiles afresh; the
+// result is not cached.
 func (c *Compiler) Compile(schemaJSON []byte) (*Schema, error) {
 	if c == nil {
 		return nil, ErrSchemaNotCompiled
@@ -203,9 +226,9 @@ func (c *Compiler) MustCompileValue(v any) *Schema {
 }
 
 // CompileURL fetches uri via the compiler's loader and compiles the
-// resulting bytes. Concurrent calls for the same URI share a single
-// fetch+compile pipeline (single-flight); the result is cached so subsequent
-// calls return immediately.
+// resulting bytes. A successful result is cached by uri, so later calls
+// return it without fetching; concurrent calls for the same uri share one
+// fetch and compile.
 func (c *Compiler) CompileURL(uri string) (*Schema, error) {
 	if c == nil {
 		return nil, ErrSchemaNotCompiled
@@ -272,10 +295,19 @@ func (c *Compiler) MustCompileURL(uri string) *Schema {
 	return s
 }
 
-// AddResource registers a schema document under uri so subsequent
-// compilations resolving that URI can find it without invoking the Loader.
-// The bytes are validated as JSON; the document is parsed lazily when first
-// referenced.
+// AddResource registers a schema document under uri so later compilations
+// on this Compiler resolve $refs to that URI without invoking the Loader.
+// The bytes must be valid JSON; they are parsed once here and not retained.
+// It does not affect [Compiler.CompileURL], which always fetches through the
+// Loader.
+//
+// Registering a uri that is already registered follows the compiler's
+// [RefCollisionPolicy]: [RefCollisionError] (the default) returns a
+// [*CompileError], [RefCollisionFirstWins] keeps the earlier document, and
+// [RefCollisionLastWins] replaces it. The same policy settles a nested $id
+// in one registered document that matches another's URI. The schema being
+// compiled always takes its own URI, even when a registered resource
+// shares it.
 func (c *Compiler) AddResource(uri string, schemaJSON []byte) error {
 	if c == nil {
 		return ErrSchemaNotCompiled
@@ -283,13 +315,36 @@ func (c *Compiler) AddResource(uri string, schemaJSON []byte) error {
 	if uri == "" {
 		return &CompileError{Message: "AddResource: empty URI"}
 	}
-	if _, err := decodeSchemaBytes(schemaJSON); err != nil {
+	value, err := decodeSchemaBytes(schemaJSON)
+	if err != nil {
 		return &CompileError{KeywordLocation: uri, Message: "AddResource: invalid JSON", Cause: err}
 	}
-	stored := make([]byte, len(schemaJSON))
-	copy(stored, schemaJSON)
-	c.resources.Store(uri, stored)
-	return nil
+	scratch := newResourceMap()
+	scratch.policy = c.opts.refCollisionPolicy
+	if err := walkDocument(scratch, value, uri, DraftDefault); err != nil {
+		return err
+	}
+	c.resMu.Lock()
+	defer c.resMu.Unlock()
+	i := slices.IndexFunc(c.resources, func(r registeredResource) bool { return r.uri == uri })
+	if i < 0 {
+		c.resources = append(slices.Clip(c.resources), registeredResource{uri: uri, value: value})
+		return nil
+	}
+	if reflect.DeepEqual(c.resources[i].value, value) {
+		return nil
+	}
+	switch c.opts.refCollisionPolicy {
+	case RefCollisionFirstWins:
+		return nil
+	case RefCollisionLastWins:
+		next := slices.Clone(c.resources)
+		next[i].value = value
+		c.resources = next
+		return nil
+	default:
+		return &CompileError{KeywordLocation: uri, Message: fmt.Sprintf("AddResource: duplicate URI %q", uri)}
+	}
 }
 
 // compile is the inner entry point shared by every public Compile* call.
@@ -333,7 +388,10 @@ func (c *Compiler) compile(value any, rawSource []byte, baseURI string) (*Schema
 	}
 
 	rm := newResourceMap()
-	c.seedResources(rm)
+	rm.policy = c.opts.refCollisionPolicy
+	if err := c.seedResources(rm); err != nil {
+		return nil, err
+	}
 	if err := walkResource(rm, value, rootURI, draft); err != nil {
 		return nil, err
 	}
@@ -363,18 +421,26 @@ func (c *Compiler) compile(value any, rawSource []byte, baseURI string) (*Schema
 		bindings:      bindings,
 		compileOpts:   c.opts,
 	}
+	vocab, err := c.vocabularies(rm, metaSchemaURI, draft)
+	if err != nil {
+		return nil, err
+	}
 	eb := &evalBuilder{
-		schema: schema,
-		rm:     rm,
-		loader: c.opts.loader,
-		draft:  draft,
-		cache:  map[string]*subschema{},
+		schema:        schema,
+		rm:            rm,
+		loader:        c.opts.loader,
+		draft:         draft,
+		cache:         map[string]*subschema{},
+		vocabOff:      vocab.off,
+		formatAsserts: vocab.formatAsserts,
 	}
 	root, err := eb.buildSubschema(value, "#", rootURI, rootURI)
 	if err != nil {
 		return nil, err
 	}
+	eb.buildAll()
 	schema.root = root
+	schema.subschemas = len(eb.cache)
 
 	if c.opts.metaSchemaValidation {
 		if err := validateAgainstMetaSchema(schema, value, draft, metaSchemaURI); err != nil {
@@ -435,31 +501,19 @@ func validateAgainstMetaSchema(_ *Schema, value any, draft Draft, metaSchemaURI 
 	return nil
 }
 
-// seedResources copies any entries registered via [Compiler.AddResource]
-// into rm as parsed-but-unwalked entries. The first $ref to such a resource
-// will materialize it via the existing external-load path; the seed here
-// simply skips the loader call.
-func (c *Compiler) seedResources(rm *resourceMap) {
-	c.resources.Range(func(key, val any) bool {
-		uri, ok := key.(string)
-		if !ok {
-			return true
+// seedResources walks every entry registered via [Compiler.AddResource]
+// into rm, in registration order, so $refs to them resolve without the
+// Loader. A $id collision between registered documents follows rm's policy.
+func (c *Compiler) seedResources(rm *resourceMap) error {
+	c.resMu.RLock()
+	seeds := c.resources
+	c.resMu.RUnlock()
+	for _, r := range seeds {
+		if err := walkDocument(rm, r.value, r.uri, DraftDefault); err != nil {
+			return err
 		}
-		data, ok := val.([]byte)
-		if !ok {
-			return true
-		}
-		parsed, err := decodeSchemaBytes(data)
-		if err != nil {
-			return true
-		}
-		// Seeding is best-effort: walk failures surface when the resource
-		// is actually consulted.
-		if walkErr := walkResource(rm, parsed, uri, DraftDefault); walkErr != nil {
-			_ = walkErr
-		}
-		return true
-	})
+	}
+	return nil
 }
 
 // bindAndResolve walks node and emits keyword bindings plus resolved $ref /
@@ -468,38 +522,49 @@ func (c *Compiler) seedResources(rm *resourceMap) {
 // keywords" — the strict-keyword option determines which side of that line
 // unknown keys fall on.
 func (c *Compiler) bindAndResolve(rm *resourceMap, node any, baseURI, location string, draft Draft, refStack []string) ([]keywordBinding, error) {
-	v, ok := node.(map[string]any)
-	if !ok {
-		return nil, nil
-	}
-	idKey, subDraft := bindResolveDraftKey(v, draft)
-	newBaseURI, err := bindResolveBaseURI(v, idKey, baseURI, location)
-	if err != nil {
+	var out []keywordBinding
+	if err := c.bindInto(&out, rm, node, baseURI, location, draft, refStack); err != nil {
 		return nil, err
 	}
-	var out []keywordBinding
-	for key, raw := range v {
+	return out, nil
+}
+
+// bindInto appends the bindings bindAndResolve returns for node to out.
+func (c *Compiler) bindInto(out *[]keywordBinding, rm *resourceMap, node any, baseURI, location string, draft Draft, refStack []string) error {
+	v, ok := node.(map[string]any)
+	if !ok {
+		return nil
+	}
+	idKey, subDraft := bindResolveDraftKey(v, draft)
+	newBaseURI := baseURI
+	// Before 2019-09, $ref replaces every sibling keyword, $id included.
+	if _, hasRef := v["$ref"]; !hasRef || subDraft > Draft7 {
+		var err error
+		if newBaseURI, err = bindResolveBaseURI(v, idKey, baseURI, location); err != nil {
+			return err
+		}
+	}
+	for _, key := range orderKeys(v) {
+		raw := v[key]
 		loc := location + "/" + escapePointerToken(key)
 		if _, known := LookupKeyword(key, draft); !known && c.opts.strictKeywords {
-			return nil, &CompileError{KeywordLocation: loc, Message: fmt.Sprintf("unknown keyword %q", key), Cause: ErrUnknownKeyword}
+			return &CompileError{KeywordLocation: loc, Message: fmt.Sprintf("unknown keyword %q", key), Cause: ErrUnknownKeyword}
 		}
 		if err := validateKeywordShape(key, raw, loc); err != nil {
-			return nil, err
+			return err
 		}
 		binding, err := c.buildBinding(rm, key, raw, newBaseURI, loc, subDraft, refStack)
 		if err != nil {
-			return nil, err
+			return err
 		}
-		out = append(out, binding)
+		*out = append(*out, binding)
 		if descendsInto(key, draft) {
-			children, err := c.bindAndResolveChild(rm, raw, newBaseURI, loc, subDraft, append(refStack, newBaseURI), key)
-			if err != nil {
-				return nil, err
+			if err := c.bindChildInto(out, rm, raw, newBaseURI, loc, subDraft, append(refStack, newBaseURI), key); err != nil {
+				return err
 			}
-			out = append(out, children...)
 		}
 	}
-	return out, nil
+	return nil
 }
 
 // bindResolveDraftKey returns the draft and id-keyword pair active inside v.
@@ -552,7 +617,7 @@ func (c *Compiler) buildBinding(rm *resourceMap, key string, raw any, baseURI, l
 			return binding, err
 		}
 		binding.Resolved = resolved
-	case "$dynamicRef":
+	case keyDynamicRef:
 		ref := raw.(string) //nolint:forcetypeassert // validateKeywordShape rejects non-string $dynamicRef upstream.
 		resolved, err := resolveRef(rm, c.opts.loader, baseURI, ref, append(refStack, baseURI), subDraft)
 		if err != nil {
@@ -566,77 +631,66 @@ func (c *Compiler) buildBinding(rm *resourceMap, key string, raw any, baseURI, l
 	return binding, nil
 }
 
-// bindAndResolveChild dispatches descent into keyword-specific child shapes.
-func (c *Compiler) bindAndResolveChild(rm *resourceMap, raw any, baseURI, location string, draft Draft, refStack []string, key string) ([]keywordBinding, error) {
-	var out []keywordBinding
+// bindChildInto dispatches descent into keyword-specific child shapes.
+func (c *Compiler) bindChildInto(out *[]keywordBinding, rm *resourceMap, raw any, baseURI, location string, draft Draft, refStack []string, key string) error {
 	switch key {
 	case keyProperties, keyPatternProperties, keyDefs, keyDefinitions, "dependentSchemas":
 		m, ok := raw.(map[string]any)
 		if !ok {
-			return nil, nil
+			return nil
 		}
-		for k, child := range m {
+		for _, k := range orderKeys(m) {
+			child := m[k]
 			loc := location + "/" + escapePointerToken(k)
-			children, err := c.bindAndResolve(rm, child, baseURI, loc, draft, refStack)
-			if err != nil {
-				return nil, err
+			if err := c.bindInto(out, rm, child, baseURI, loc, draft, refStack); err != nil {
+				return err
 			}
-			out = append(out, children...)
 		}
 	case "items", "prefixItems":
 		switch t := raw.(type) {
 		case []any:
 			for i, child := range t {
 				loc := location + "/" + escapePointerToken(itoa(i))
-				children, err := c.bindAndResolve(rm, child, baseURI, loc, draft, refStack)
-				if err != nil {
-					return nil, err
+				if err := c.bindInto(out, rm, child, baseURI, loc, draft, refStack); err != nil {
+					return err
 				}
-				out = append(out, children...)
 			}
 		default:
-			children, err := c.bindAndResolve(rm, t, baseURI, location, draft, refStack)
-			if err != nil {
-				return nil, err
+			if err := c.bindInto(out, rm, t, baseURI, location, draft, refStack); err != nil {
+				return err
 			}
-			out = append(out, children...)
 		}
 	case "allOf", "anyOf", "oneOf":
 		arr, ok := raw.([]any)
 		if !ok {
-			return nil, nil
+			return nil
 		}
 		for i, child := range arr {
 			loc := location + "/" + escapePointerToken(itoa(i))
-			children, err := c.bindAndResolve(rm, child, baseURI, loc, draft, refStack)
-			if err != nil {
-				return nil, err
+			if err := c.bindInto(out, rm, child, baseURI, loc, draft, refStack); err != nil {
+				return err
 			}
-			out = append(out, children...)
 		}
 	case "dependencies":
 		m, ok := raw.(map[string]any)
 		if !ok {
-			return nil, nil
+			return nil
 		}
-		for k, child := range m {
+		for _, k := range orderKeys(m) {
+			child := m[k]
 			loc := location + "/" + escapePointerToken(k)
 			if _, ok := child.(map[string]any); ok {
-				children, err := c.bindAndResolve(rm, child, baseURI, loc, draft, refStack)
-				if err != nil {
-					return nil, err
+				if err := c.bindInto(out, rm, child, baseURI, loc, draft, refStack); err != nil {
+					return err
 				}
-				out = append(out, children...)
 			}
 		}
 	default:
-		children, err := c.bindAndResolve(rm, raw, baseURI, location, draft, refStack)
-		if err != nil {
-			return nil, err
+		if err := c.bindInto(out, rm, raw, baseURI, location, draft, refStack); err != nil {
+			return err
 		}
-		out = append(out, children...)
 	}
-	return out, nil
+	return nil
 }
 
 // validateKeywordShape verifies that a keyword's raw JSON value has the
@@ -765,43 +819,21 @@ func checkNonEmptyArray(key string, raw any, loc string) error {
 // isNonNegativeInteger reports whether v is a JSON number ≥ 0 with no
 // fractional part. Numbers like 2.0 count as integers per the spec.
 func isNonNegativeInteger(v any) bool {
-	switch t := v.(type) {
-	case json.Number:
-		if i, err := t.Int64(); err == nil {
-			return i >= 0
-		}
-		if f, err := t.Float64(); err == nil {
-			return f >= 0 && f == float64(int64(f))
-		}
-		return false
-	case int:
-		return t >= 0
-	case int64:
-		return t >= 0
-	case float64:
-		return t >= 0 && t == float64(int64(t))
-	}
-	return false
+	d, ok := parseNumber(v)
+	return ok && d.sign() >= 0 && d.isInteger()
 }
 
 func isPositiveNumber(v any) bool {
-	switch t := v.(type) {
-	case json.Number:
-		f, err := t.Float64()
-		return err == nil && f > 0
-	case int:
-		return t > 0
-	case int64:
-		return t > 0
-	case float64:
-		return t > 0
-	}
-	return false
+	d, ok := parseNumber(v)
+	return ok && !d.nan && !d.inf && d.huge == 0 && d.sign() > 0
 }
 
 // escapePointerToken escapes ~ and / within a JSON Pointer reference
 // token. Inverse of [unescapePointerToken].
 func escapePointerToken(s string) string {
+	if !strings.ContainsAny(s, "~/") {
+		return s
+	}
 	out := make([]byte, 0, len(s))
 	for i := range s {
 		switch s[i] {
@@ -842,6 +874,9 @@ func itoa(i int) string {
 // decodeSchemaBytes parses schemaJSON via [encoding/json.Decoder] with
 // UseNumber set so multipleOf and friends preserve full precision.
 func decodeSchemaBytes(schemaJSON []byte) (any, error) {
+	if v, ok := decodeJSONFast(schemaJSON); ok {
+		return v, nil
+	}
 	dec := json.NewDecoder(bytes.NewReader(schemaJSON))
 	dec.UseNumber()
 	var v any
@@ -856,4 +891,101 @@ func decodeSchemaBytes(schemaJSON []byte) (any, error) {
 		return nil, fmt.Errorf("decode: %w", err)
 	}
 	return v, nil
+}
+
+// vocabularyUse is what a custom meta-schema's $vocabulary turns on.
+type vocabularyUse struct {
+	// off holds the standard vocabularies (by their 2020-12 URIs, with
+	// [VocabFormatAnnot] standing for "format") whose keywords do not
+	// apply.
+	off map[string]bool
+	// formatAsserts is set when the format-assertion vocabulary is listed.
+	formatAsserts bool
+}
+
+// knownVocabularies maps each vocabulary URI this package implements to the
+// 2020-12 vocabularies whose keywords it covers. In 2019-09 the applicator
+// vocabulary also holds the unevaluated* keywords, and the format
+// vocabulary is named "format".
+var knownVocabularies = map[string][]string{
+	VocabCore:         {VocabCore},
+	VocabApplicator:   {VocabApplicator},
+	VocabUnevaluated:  {VocabUnevaluated},
+	VocabValidation:   {VocabValidation},
+	VocabFormatAnnot:  {VocabFormatAnnot},
+	VocabFormatAssert: {VocabFormatAnnot},
+	VocabContent:      {VocabContent},
+	VocabMetaData:     {VocabMetaData},
+	VocabOAS:          nil,
+
+	"https://json-schema.org/draft/2019-09/vocab/core":       {VocabCore},
+	"https://json-schema.org/draft/2019-09/vocab/applicator": {VocabApplicator, VocabUnevaluated},
+	"https://json-schema.org/draft/2019-09/vocab/validation": {VocabValidation},
+	"https://json-schema.org/draft/2019-09/vocab/format":     {VocabFormatAnnot},
+	"https://json-schema.org/draft/2019-09/vocab/content":    {VocabContent},
+	"https://json-schema.org/draft/2019-09/vocab/meta-data":  {VocabMetaData},
+}
+
+// vocabularies reads the $vocabulary of the custom meta-schema
+// metaSchemaURI: the standard vocabularies it leaves out, so their keywords
+// do not apply, and whether it asks for format assertion. It returns the
+// zero value when the meta-schema is a known one, cannot be loaded, or
+// declares no $vocabulary, and an error when it requires a vocabulary this
+// package does not implement.
+func (c *Compiler) vocabularies(rm *resourceMap, metaSchemaURI string, draft Draft) (vocabularyUse, error) {
+	if metaSchemaURI == "" || draft < Draft201909 || DraftFromMetaSchemaURL(metaSchemaURI) != DraftUnknown {
+		return vocabularyUse{}, nil
+	}
+	if _, ok := metaSchemaForDialect(metaSchemaURI); ok {
+		return vocabularyUse{}, nil
+	}
+	var meta map[string]any
+	if resolved, rerr := resolveRef(rm, c.opts.loader, "", metaSchemaURI, nil, draft); rerr == nil {
+		meta, _ = resolved.Target.(map[string]any)
+	}
+	declared, ok := meta["$vocabulary"].(map[string]any)
+	if !ok {
+		return vocabularyUse{}, nil
+	}
+	var use vocabularyUse
+	listed := map[string]bool{VocabCore: true} // required by every meta-schema
+	for _, uri := range orderKeys(declared) {
+		covers, known := knownVocabularies[uri]
+		if !known {
+			if required, _ := declared[uri].(bool); required {
+				return vocabularyUse{}, &CompileError{
+					KeywordLocation: "#/$schema",
+					Message:         fmt.Sprintf("meta-schema %q requires vocabulary %q, which is not supported", metaSchemaURI, uri),
+					Cause:           ErrUnknownVocabulary,
+				}
+			}
+			continue
+		}
+		for _, v := range covers {
+			listed[v] = true
+		}
+		if uri == VocabFormatAssert {
+			use.formatAsserts = true
+		}
+	}
+	use.off = map[string]bool{}
+	for _, uri := range stdVocabularySet(Draft202012) {
+		if uri != VocabFormatAssert && !listed[uri] {
+			use.off[uri] = true
+		}
+	}
+	return use, nil
+}
+
+// keywordVocabulary returns the URI of the standard vocabulary that holds
+// keyword name.
+func keywordVocabulary(name string) string {
+	for _, v := range stdVocabularies {
+		for _, k := range v.Keywords {
+			if k.Name() == name {
+				return v.URI
+			}
+		}
+	}
+	return ""
 }

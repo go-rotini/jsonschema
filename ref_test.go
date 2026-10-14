@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"math/rand"
 	"strings"
 	"sync"
 	"testing"
@@ -324,7 +325,7 @@ func TestRefBillionLaughs(t *testing.T) {
 	}
 	res, err := schema.Validate([]byte(`"hi"`))
 	if err != nil {
-		if strings.Contains(err.Error(), "max ref depth") {
+		if errors.Is(err, ErrMaxEvaluations) {
 			return
 		}
 		t.Fatalf("validate: %v", err)
@@ -332,7 +333,7 @@ func TestRefBillionLaughs(t *testing.T) {
 	if res == nil {
 		t.Fatal("nil result")
 	}
-	// Either Valid:true (validation bounded) or a max-ref-depth error are
+	// Either Valid:true (validation bounded) or ErrMaxEvaluations is
 	// acceptable; the only failure mode is stack overflow / OOM.
 	_ = res
 }
@@ -544,36 +545,41 @@ func TestRefMaxDepthExceeded(t *testing.T) {
 	}
 	have := false
 	for _, e := range res.Errors {
-		if e.Keyword == "$ref" && strings.Contains(e.Message, "max ref depth") {
+		if e.Keyword == "$ref" && strings.Contains(e.Message, "max ref depth") && errors.Is(&e, ErrMaxRefDepth) {
 			have = true
 			break
 		}
 	}
 	if !have {
-		t.Errorf("expected max ref depth error in %v", res.Errors)
+		t.Errorf("expected a max ref depth error matching ErrMaxRefDepth in %v", res.Errors)
 	}
 }
 
-// TestDynamicRefMaxDepth covers the depth-limit branch on $dynamicRef.
+// TestDynamicRefMaxDepth covers the depth-limit branch on $dynamicRef: a
+// reference loop that never moves into the instance.
 func TestDynamicRefMaxDepth(t *testing.T) {
 	src := []byte(`{
 		"$id":"https://example.com/x",
 		"$dynamicAnchor":"loop",
-		"properties":{"x":{"$dynamicRef":"#loop"}}
+		"allOf":[{"$dynamicRef":"#loop"}]
 	}`)
 	s, err := Compile(src, WithMaxRefDepth(50))
 	if err != nil {
 		t.Fatalf("Compile: %v", err)
 	}
-	// Build a deeply nested instance.
-	deep := strings.Repeat(`{"x":`, 200) + `null` + strings.Repeat(`}`, 200)
-	res, err := s.Validate([]byte(deep))
+	res, err := s.Validate([]byte(`null`))
 	if err != nil {
 		t.Fatalf("Validate: %v", err)
 	}
-	if res.Valid {
-		// Either invalid via depth limit or via deeper validation.
-		t.Logf("deep validation invalid (errors=%d)", len(res.Errors))
+	found := false
+	for i := range res.Errors {
+		if errors.Is(&res.Errors[i], ErrMaxRefDepth) {
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Errorf("deep $dynamicRef recursion: no error matches ErrMaxRefDepth in %v", res.Errors)
 	}
 }
 
@@ -809,12 +815,11 @@ func TestResolveURIBranches(t *testing.T) {
 // readOnly/writeOnly scan) so any per-call build state read off the wrong
 // frame surfaces as an incorrect validity verdict — not just a race-flag.
 //
-// The bug Phase 2.5 fixed was that evalBuilder kept compile-time scratch
-// state (currentParent / currentLoc / currentBase / currentResource /
-// draft) on the shared struct. Two goroutines validating concurrently
-// would trample each other's scratch state mid-build at runtime, producing
-// observably wrong validation outputs in 5-15% of runs. Per-call frames
-// (buildFrame) eliminate the shared mutable state entirely.
+// Lazy refs build subschemas at validation time, so the per-build state
+// (parent, location, base URI, resource, draft) must live in a per-call
+// buildFrame rather than on the shared evalBuilder; shared state would let
+// concurrent validations corrupt each other's builds and return wrong
+// verdicts.
 //
 // The test asserts that every goroutine's verdict matches the expected
 // verdict computed up front against a single-threaded validation.
@@ -992,6 +997,305 @@ func TestConcurrentLazyRefValidate(t *testing.T) {
 			}
 			t.Logf("worker=%d iter=%d case=%s expected=%v got=%v errs=%v",
 				m.worker, m.iter, m.caseName, m.expected, m.got, m.errs)
+		}
+	}
+}
+
+// TestMaxEvaluations checks that branching reference graphs stop with
+// ErrMaxEvaluations under the default budget, quickly and in bounded
+// memory, while ordinary large instances stay within it.
+func TestMaxEvaluations(t *testing.T) {
+	selfRef := MustCompile([]byte(`{"$defs":{"d":{"allOf":[{"$ref":"#/$defs/d"},{"$ref":"#/$defs/d"}]}},"$ref":"#/$defs/d"}`))
+	var b strings.Builder
+	b.WriteString(`{"$ref":"#/$defs/d0","$defs":{`)
+	for i := range 40 {
+		fmt.Fprintf(&b, `"d%d":{"allOf":[{"$ref":"#/$defs/d%d"},{"$ref":"#/$defs/d%d"}]},`, i, i+1, i+1)
+	}
+	b.WriteString(`"d40":{"type":"integer"}}}`)
+	dag := MustCompile([]byte(b.String()))
+	for name, s := range map[string]*Schema{"self": selfRef, "dag": dag} {
+		for _, inst := range []string{`1`, `"x"`} {
+			res, err := s.Validate([]byte(inst))
+			if !errors.Is(err, ErrMaxEvaluations) || res != nil {
+				t.Errorf("%s %s: res=%v err=%v; want ErrMaxEvaluations", name, inst, res, err)
+			}
+			// The walk stops once the cap is passed; only the errors
+			// recorded as it unwinds count past it.
+			stopped, evals, limit := evaluationsUsed(t, s, inst)
+			if !stopped || evals > limit+limit/100 {
+				t.Errorf("%s %s: stopped=%v after %d evaluations; cap %d", name, inst, stopped, evals, limit)
+			}
+		}
+	}
+
+	if _, err := dag.Validate([]byte(`"x"`), WithMaxEvaluations(-1), WithStopOnFirstError(true)); err != nil {
+		t.Errorf("unlimited: %v", err)
+	}
+	simple := MustCompile([]byte(`{"items":{"type":"integer"}}`))
+	if _, err := simple.Validate([]byte(`[1,2,3]`), WithMaxEvaluations(3)); !errors.Is(err, ErrMaxEvaluations) {
+		t.Errorf("cap 3: err=%v", err)
+	}
+	if res, err := simple.Validate([]byte(`[1,2,3]`), WithMaxEvaluations(4)); err != nil || !res.Valid {
+		t.Errorf("cap 4: res=%v err=%v", res, err)
+	}
+
+	// The default grows with the instance: 300,000 values, each checked
+	// through two references and several keywords, stay within it.
+	tree := MustCompile([]byte(`{"type":"array","items":{"$ref":"#/$defs/item"},"$defs":{"item":{"type":"object","properties":{"a":{"$ref":"#/$defs/n"},"b":{"$ref":"#/$defs/n"}}},"n":{"anyOf":[{"type":"string"},{"type":"integer","minimum":0}]}}}`))
+	items := make([]any, 100000)
+	for i := range items {
+		items[i] = map[string]any{"a": float64(i), "b": "x"}
+	}
+	if res, err := tree.ValidateValue(items); err != nil || !res.Valid {
+		t.Fatalf("large instance: err=%v", err)
+	}
+}
+
+// evaluationsUsed validates inst against s with the default options as
+// Validate does, and reports whether the evaluation cap stopped it, how
+// many evaluations it counted and the cap.
+func evaluationsUsed(t *testing.T, s *Schema, inst string) (stopped bool, evals, limit int) {
+	t.Helper()
+	v, err := decodeInstanceBytes([]byte(inst))
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx := newRunCtx(s, defaultRunOptions())
+	defer ctx.release()
+	ctx.setEvalLimit(v)
+	ctx.evaluate(s.evalRoot(), v)
+	return ctx.overBudget, ctx.evals, ctx.evalLimit
+}
+
+// TestMaxEvaluationsWideUnions checks that the default budget accepts valid
+// documents whose values are checked against wide anyOf and oneOf unions:
+// errors from discarded branches do not count, and the budget grows with
+// the number of subschemas.
+func TestMaxEvaluationsWideUnions(t *testing.T) {
+	union := func(kw string, n int) *Schema {
+		var b strings.Builder
+		fmt.Fprintf(&b, `{"type":"array","items":{%q:[`, kw)
+		for i := range n {
+			if i > 0 {
+				b.WriteByte(',')
+			}
+			fmt.Fprintf(&b, `{"const":"value-%d"}`, i)
+		}
+		b.WriteString(`]}}`)
+		return MustCompile([]byte(b.String()))
+	}
+	list := func(items, last int) []any {
+		out := make([]any, items)
+		for i := range out {
+			out[i] = fmt.Sprintf("value-%d", last-i%3)
+		}
+		return out
+	}
+	cases := []struct {
+		kw           string
+		width, items int
+	}{
+		{"oneOf", 20, 10000},
+		{"anyOf", 20, 10000},
+		{"oneOf", 150, 1000},
+	}
+	for _, tc := range cases {
+		res, err := union(tc.kw, tc.width).ValidateValue(list(tc.items, tc.width-1))
+		if err != nil || !res.Valid {
+			t.Errorf("%s of %d, %d items: res=%v err=%v", tc.kw, tc.width, tc.items, res, err)
+		}
+	}
+
+	// A union over many referenced object schemas, as in large
+	// resource-type catalogs: each value is checked against every branch.
+	var b strings.Builder
+	b.WriteString(`{"type":"object","additionalProperties":{"anyOf":[`)
+	const width = 1000
+	for i := range width {
+		if i > 0 {
+			b.WriteByte(',')
+		}
+		fmt.Fprintf(&b, `{"$ref":"#/$defs/r%d"}`, i)
+	}
+	b.WriteString(`]},"$defs":{`)
+	for i := range width {
+		if i > 0 {
+			b.WriteByte(',')
+		}
+		fmt.Fprintf(&b, `"r%d":{"type":"object","required":["Type"],"properties":{"Type":{"enum":["T%d"]},"Properties":{"type":"object","properties":{"Name":{"type":"string"}}}}}`, i, i)
+	}
+	b.WriteString(`}}`)
+	catalog := MustCompile([]byte(b.String()))
+	doc := map[string]any{}
+	for i := range 200 {
+		doc[fmt.Sprintf("R%d", i)] = map[string]any{"Type": fmt.Sprintf("T%d", width-1-i), "Properties": map[string]any{"Name": "x"}}
+	}
+	if res, err := catalog.ValidateValue(doc); err != nil || !res.Valid {
+		t.Errorf("catalog: res=%v err=%v", res, err)
+	}
+}
+
+// TestDefaultMaxEvaluations checks that a cap set at compile time applies
+// to validations without options and that a run option overrides it.
+func TestDefaultMaxEvaluations(t *testing.T) {
+	s := MustCompile([]byte(`{"items":{"type":"integer"}}`), WithDefaultMaxEvaluations(3))
+	if _, err := s.Validate([]byte(`[1,2,3]`)); !errors.Is(err, ErrMaxEvaluations) {
+		t.Errorf("compile-time cap 3: err=%v", err)
+	}
+	if res, err := s.Validate([]byte(`[1,2,3]`), WithMaxEvaluations(4)); err != nil || !res.Valid {
+		t.Errorf("run cap 4: res=%v err=%v", res, err)
+	}
+	unlimited := MustCompile([]byte(`{"$defs":{"d":{"allOf":[{"$ref":"#/$defs/d"},{"type":"integer"}]}},"items":{"type":"integer"}}`), WithDefaultMaxEvaluations(-1))
+	if res, err := unlimited.ValidateValue(make([]any, 0)); err != nil || !res.Valid {
+		t.Errorf("no cap: res=%v err=%v", res, err)
+	}
+}
+
+// TestMaxEvaluationsChargesHeldBranchErrors checks that the errors of failed
+// anyOf and oneOf branches count against the cap while they are held, so a
+// union that passes only at its last branch cannot hold errors without
+// bound, and that they stop counting once a branch passes.
+func TestMaxEvaluationsChargesHeldBranchErrors(t *testing.T) {
+	name := strings.Repeat("n", 100_000)
+	union := func(kw string, passFirst bool) *Schema {
+		var b strings.Builder
+		fmt.Fprintf(&b, `{"$defs":{"r":{"required":[%q]}},%q:[`, name, kw)
+		if passFirst {
+			b.WriteString(`true,`)
+		}
+		for i := range 400 {
+			if i > 0 {
+				b.WriteByte(',')
+			}
+			b.WriteString(`{"$ref":"#/$defs/r"}`)
+		}
+		if !passFirst {
+			b.WriteString(`,true`)
+		}
+		b.WriteString(`]}`)
+		return MustCompile([]byte(b.String()))
+	}
+	for _, kw := range []string{"anyOf", "oneOf"} {
+		if res, err := union(kw, false).Validate([]byte(`{}`)); !errors.Is(err, ErrMaxEvaluations) {
+			t.Errorf("%s passing last: res=%v err=%v; want ErrMaxEvaluations", kw, res, err)
+		}
+		// Each failed branch is charged and its errors are dropped once
+		// the union passes, so the charge never accumulates.
+		s := union(kw, true)
+		if res, err := s.Validate([]byte(`{}`), WithMaxEvaluations(10_000)); err != nil || !res.Valid {
+			t.Errorf("%s passing first: res=%v err=%v", kw, res, err)
+		}
+	}
+	var b strings.Builder
+	b.WriteString(`{"properties":{`)
+	for i := range 400 {
+		if i > 0 {
+			b.WriteByte(',')
+		}
+		fmt.Fprintf(&b, `"p%d":{"anyOf":[{"$ref":"#/$defs/r"},true]}`, i)
+	}
+	fmt.Fprintf(&b, `},"$defs":{"r":{"required":[%q]}}}`, name)
+	obj := map[string]any{}
+	for i := range 400 {
+		obj[fmt.Sprintf("p%d", i)] = map[string]any{}
+	}
+	if res, err := MustCompile([]byte(b.String())).ValidateValue(obj); err != nil || !res.Valid {
+		t.Errorf("many passing unions: res=%v err=%v", res, err)
+	}
+}
+
+// heldErrorCost returns the charge of errs and their causes, as
+// chargeError counts it.
+func heldErrorCost(errs []ValidationError) int {
+	n := 0
+	for i := range errs {
+		e := &errs[i]
+		n += (128 + len(e.KeywordLocation) + len(e.AbsoluteKeywordLocation) +
+			len(e.InstanceLocation) + len(e.Message)) / 32
+		n += heldErrorCost(e.Causes)
+	}
+	return n
+}
+
+// randomBranchingSchema returns a random schema of the keywords that hold,
+// keep or drop branch errors.
+func randomBranchingSchema(r *rand.Rand, depth int) any {
+	if depth == 0 || r.Intn(4) == 0 {
+		return []any{
+			map[string]any{"type": "string"},
+			map[string]any{"minimum": 3.0},
+			map[string]any{"required": []any{"a", "b"}},
+			map[string]any{"maxLength": 1.0},
+			true,
+			map[string]any{"$ref": "#/$defs/x"},
+		}[r.Intn(6)]
+	}
+	sub := func() any { return randomBranchingSchema(r, depth-1) }
+	kids := func() []any {
+		out := make([]any, 1+r.Intn(4))
+		for i := range out {
+			out[i] = sub()
+		}
+		return out
+	}
+	switch r.Intn(9) {
+	case 0:
+		return map[string]any{"anyOf": kids()}
+	case 1:
+		return map[string]any{"oneOf": kids()}
+	case 2:
+		return map[string]any{"allOf": kids()}
+	case 3:
+		return map[string]any{"not": sub()}
+	case 4:
+		return map[string]any{"if": sub(), "then": sub(), "else": sub()}
+	case 5:
+		return map[string]any{"items": sub(), "contains": sub()}
+	case 6:
+		return map[string]any{"properties": map[string]any{"a": sub(), "b": sub()}, "additionalProperties": sub()}
+	case 7:
+		return map[string]any{"contentMediaType": "application/json", "contentSchema": sub()}
+	default:
+		return map[string]any{"anyOf": kids(), "oneOf": kids()}
+	}
+}
+
+// TestErrorChargeMatchesErrorsHeld checks, over random branching schemas,
+// that after a validation the errors' charge against the cap is exactly
+// that of the errors kept, with and without WithMaxErrors.
+func TestErrorChargeMatchesErrorsHeld(t *testing.T) {
+	r := rand.New(rand.NewSource(1))
+	insts := []any{1.0, 5.0, "x", "xyz", `{"a":1}`, []any{1.0, "x", 4.0},
+		map[string]any{"a": 1.0, "c": "zz"}, map[string]any{"a": "q", "b": []any{2.0}}}
+	for range 500 {
+		root := randomBranchingSchema(r, 4)
+		m, ok := root.(map[string]any)
+		if !ok {
+			m = map[string]any{"allOf": []any{root}}
+		}
+		m["$defs"] = map[string]any{"x": randomBranchingSchema(r, 2)}
+		raw, _ := json.Marshal(m)
+		s, err := Compile(raw)
+		if err != nil {
+			continue
+		}
+		for _, inst := range insts {
+			for _, maxErrors := range []int{0, 1, 2} {
+				ro := defaultRunOptions()
+				ro.contentAssertion = true
+				ro.maxErrors = maxErrors
+				ro.maxEvaluations = 20_000
+				ctx := newRunCtx(s, ro)
+				ctx.setEvalLimit(inst)
+				ctx.evaluate(s.evalRoot(), inst)
+				if !ctx.overBudget {
+					if want := heldErrorCost(ctx.errors); ctx.errCost != want {
+						t.Fatalf("%s with %v (max errors %d): charged %d, errors hold %d",
+							raw, inst, maxErrors, ctx.errCost, want)
+					}
+				}
+				ctx.release()
+			}
 		}
 	}
 }

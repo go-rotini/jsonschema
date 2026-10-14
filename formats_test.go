@@ -204,8 +204,8 @@ func TestFormatNonStringSilentPass(t *testing.T) {
 	}
 }
 
-// TestCustomFormatOverridesBuiltin verifies the spec ordering: a custom
-// validator wins over the built-in of the same name.
+// TestCustomFormatOverridesBuiltin verifies that a custom validator wins
+// over the built-in of the same name.
 func TestCustomFormatOverridesBuiltin(t *testing.T) {
 	schema, _ := Compile([]byte(`{"format":"ipv4"}`))
 	// Custom: accept everything regardless of value.
@@ -953,5 +953,165 @@ func TestFormatEmailAndIDN(t *testing.T) {
 				t.Errorf("%s(%q): got %v, want %v (err=%v)", tc.format, tc.val, got, tc.valid, err)
 			}
 		})
+	}
+}
+
+// TestHostnameIDNARules checks the IDNA label rules: Draft 4 and 6
+// hostnames follow RFC 1123 only; later drafts reserve "--" in the third
+// and fourth positions for A-labels, which must be canonical Punycode.
+func TestHostnameIDNARules(t *testing.T) {
+	for _, tc := range []struct {
+		draft  Draft
+		format string
+		s      string
+		valid  bool
+	}{
+		{Draft4, "hostname", "ab--cd.example", true},
+		{Draft6, "hostname", "ab--cd.example", true},
+		{Draft7, "hostname", "ab--cd.example", false},
+		{Draft202012, "hostname", "xn--X", false},
+		{Draft202012, "hostname", "xn--nxasmq6b.example", true},
+		{Draft202012, "hostname", "XN--nxasmq6b", true},
+		{Draft202012, "hostname", "xn---9uc", false},
+		{Draft202012, "hostname", "xn--hello-zed", false},
+		{Draft202012, "idn-hostname", "xn--X", false},
+		{Draft202012, "idn-hostname", "XN--aa---o47jg78q", false},
+		{Draft202012, "idn-hostname", "ab--cd", false},
+		{Draft202012, "idn-hostname", "例え.テスト", true},
+		{Draft202012, "idn-hostname", "例え。テスト", true},
+		{Draft202012, "idn-hostname", "example.", false},
+		{Draft202012, "idn-hostname", "。", false},
+		{Draft202012, "idn-hostname", "a​b", true},
+		{Draft202012, "idn-hostname", "ｘｎ--nxasmq6b", true},
+		{Draft202012, "idn-hostname", strings.Repeat("ü", 60), false},
+	} {
+		schema := MustCompile([]byte(`{"format":"`+tc.format+`"}`), WithDefaultDraft(tc.draft))
+		res, err := schema.ValidateValue(tc.s, WithFormatAssertion(true))
+		if err != nil || res.Valid != tc.valid {
+			t.Errorf("draft %v %s %q: valid=%v err=%v, want %v", tc.draft, tc.format, tc.s, res.Valid, err, tc.valid)
+		}
+	}
+}
+
+// TestPunycodeRoundTrip checks the Punycode decoder against RFC 3492
+// sample strings and its encoder.
+func TestPunycodeRoundTrip(t *testing.T) {
+	for enc, dec := range map[string]string{
+		"nxasmq6b":                 "βόλοσ",
+		"bcher-kva":                "bücher",
+		"-9uc":                     "",
+		"ihqwcrb4cv8a8dqg056pqjye": "他们为什么不说中文",
+		"mnchen-3ya":               "münchen",
+	} {
+		got, err := decodePunycode(enc)
+		if dec == "" {
+			if err == nil && encodePunycode(got) == enc {
+				t.Errorf("%s: decoded and re-encoded to itself", enc)
+			}
+			continue
+		}
+		if err != nil || got != dec {
+			t.Errorf("decode %s = %q, %v; want %q", enc, got, err, dec)
+		}
+		if e := encodePunycode(dec); e != enc {
+			t.Errorf("encode %q = %s; want %s", dec, e, enc)
+		}
+	}
+	for _, bad := range []string{"X", "999999999999", "a-é"} {
+		if _, err := decodePunycode(bad); err == nil {
+			t.Errorf("decode %q: no error", bad)
+		}
+	}
+}
+
+// TestULabelLengthWithoutEncoding checks that a U-label too long for any
+// A-label is rejected without Punycode-encoding it, and that labels near
+// the limit keep their result.
+func TestULabelLengthWithoutEncoding(t *testing.T) {
+	long := strings.Repeat("中", 1000)
+	if err := checkULabel(long); !errors.Is(err, errLabelLength) {
+		t.Fatalf("err = %v", err)
+	}
+	if n := testing.AllocsPerRun(10, func() { _ = checkULabel(long) }); n > 1 {
+		t.Errorf("%v allocations: the label was encoded", n)
+	}
+	for n := 50; n <= 70; n++ {
+		for _, lbl := range []string{strings.Repeat("ü", n), "a" + strings.Repeat("ü", n-1)} {
+			want := 4+len(encodePunycode(lbl)) > 63
+			if got := errors.Is(checkULabel(lbl), errLabelLength); got != want {
+				t.Errorf("%d runes: too long = %v, want %v", n, got, want)
+			}
+		}
+	}
+}
+
+// TestHostnameContextO checks the RFC 5892 CONTEXTO rules in hostname
+// and idn-hostname.
+func TestHostnameContextO(t *testing.T) {
+	cases := []struct {
+		format, value string
+		want          bool
+	}{
+		{"idn-hostname", "l·l", true},
+		{"idn-hostname", "a·l", false},
+		{"idn-hostname", "α͵β", true},
+		{"idn-hostname", "α͵S", false},
+		{"idn-hostname", "א׳ב", true},
+		{"idn-hostname", "A״ב", false},
+		{"idn-hostname", "・ぁ", true},
+		{"idn-hostname", "def・abc", false},
+		{"idn-hostname", "ب٠ب", true},
+		{"idn-hostname", "ب٠۰", false},
+		{"idn-hostname", "ب٠.ب۰", true},
+		{"hostname", "xn--ll-0ea", true},
+		{"hostname", "xn--al-0ea", false},
+		{"hostname", "xn--vek", false},
+	}
+	for _, tc := range cases {
+		s := MustCompile([]byte(`{"format":"` + tc.format + `"}`))
+		res, err := s.Validate([]byte(jsonString(tc.value)), WithFormatAssertion(true))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if res.Valid != tc.want {
+			t.Errorf("%s %q: valid=%v, want %v", tc.format, tc.value, res.Valid, tc.want)
+		}
+	}
+}
+
+// TestFormatErrorMessage checks that a format failure's message says why
+// the value failed without repeating the format name or quoting the value,
+// and that the FormatError cause keeps the value.
+func TestFormatErrorMessage(t *testing.T) {
+	cases := []struct {
+		format, value, want string
+	}{
+		{"date-time", "2024-01-02T03:04:05",
+			`value does not match format "date-time": time zone missing (Z or an offset such as +01:00)`},
+		{"date-time", "2024-01-02T03:04:05.123", `value does not match format "date-time": time zone missing (Z or an offset such as +01:00)`},
+		{"date-time", "2024-01-02", `value does not match format "date-time": too short`},
+		{"date-time", "2024-01-02T25:04:05Z", `value does not match format "date-time": invalid time component`},
+		{"ipv4", strings.Repeat("9", 10_000), `value does not match format "ipv4": too long`},
+		{"ipv6", strings.Repeat("1", 10_000), `value does not match format "ipv6": too long`},
+		{"uri", "http://h:port" + strings.Repeat("x", 10_000), `value does not match format "uri": invalid port ":portxxx`},
+	}
+	for _, tc := range cases {
+		s := MustCompile([]byte(`{"format":` + jsonString(tc.format) + `}`))
+		res, err := s.Validate([]byte(jsonString(tc.value)), WithFormatAssertion(true))
+		if err != nil || res.Valid || len(res.Errors) != 1 {
+			t.Fatalf("%s %.20q: res=%v err=%v", tc.format, tc.value, res, err)
+		}
+		e := res.Errors[0]
+		if !strings.HasPrefix(e.Message, tc.want) || strings.Contains(e.Message, tc.value) || len(e.Message) > 400 {
+			t.Errorf("%s %.20q: message %q, want %q", tc.format, tc.value, e.Message, tc.want)
+		}
+		var fe *FormatError
+		if !errors.As(e.Cause, &fe) || fe.Value != tc.value {
+			t.Errorf("%s %.20q: cause %v does not keep the value", tc.format, tc.value, e.Cause)
+		}
+	}
+	long := formatDetail(errors.New(strings.Repeat("é", 300)))
+	if len(long) > maxFormatDetail+len("…") || !strings.HasSuffix(long, "…") {
+		t.Errorf("long detail not cut: %d bytes", len(long))
 	}
 }

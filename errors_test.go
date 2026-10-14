@@ -2,6 +2,7 @@ package jsonschema
 
 import (
 	"errors"
+	"fmt"
 	"io"
 	"strings"
 	"testing"
@@ -609,5 +610,45 @@ func TestUnescapeJSONPointerToken(t *testing.T) {
 	}
 	if got := unescapeJSONPointerToken("a~1b~0c"); got != "a/b~c" {
 		t.Errorf("escapes: got %q", got)
+	}
+}
+
+// TestUnsupportedSchemaShape checks that a subschema that is neither an
+// object nor a boolean fails compilation with ErrUnsupportedSchemaShape.
+func TestUnsupportedSchemaShape(t *testing.T) {
+	for _, src := range []string{`5`, `"s"`, `null`, `{"not":5}`, `{"properties":{"a":[]}}`, `{"items":"x"}`} {
+		_, err := Compile([]byte(src))
+		if !errors.Is(err, ErrUnsupportedSchemaShape) {
+			t.Errorf("Compile(%s): err = %v, want ErrUnsupportedSchemaShape", src, err)
+		}
+	}
+	for _, src := range []string{`true`, `{"not":false}`, `{"$defs":{"unused":5}}`} {
+		if _, err := Compile([]byte(src)); err != nil {
+			t.Errorf("Compile(%s): %v", src, err)
+		}
+	}
+}
+
+func TestWrappedSentinelsMatchErrorf(t *testing.T) {
+	for _, c := range []struct {
+		got  error
+		text string
+	}{
+		{errHyphens34, "hyphens in positions 3-4"},
+		{errBadALabel, "invalid A-label"},
+		{errBadULabel, "invalid U-label"},
+		{errLabelLength, "label too long"},
+		{errContextO, "character not allowed in this context"},
+	} {
+		want := fmt.Errorf("%w: "+c.text, errFormatInvalid)
+		if c.got.Error() != want.Error() {
+			t.Errorf("message %q, want %q", c.got.Error(), want.Error())
+		}
+		if !errors.Is(c.got, errFormatInvalid) || errors.Unwrap(c.got) != errFormatInvalid {
+			t.Errorf("%q does not wrap errFormatInvalid", c.got)
+		}
+		if fmt.Sprintf("%v|%s|%+v|%q", c.got, c.got, c.got, c.got) != fmt.Sprintf("%v|%s|%+v|%q", want, want, want, want) {
+			t.Errorf("formatting differs for %q", c.got)
+		}
 	}
 }

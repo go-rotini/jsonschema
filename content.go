@@ -4,7 +4,6 @@ import (
 	"encoding/base32"
 	"encoding/base64"
 	"encoding/hex"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -18,6 +17,8 @@ import (
 type contentEncodingEval struct {
 	loc      string
 	encoding string
+	// annot is encoding as an annotation value, boxed once.
+	annot any
 }
 
 func (e *contentEncodingEval) keyword() string { return "contentEncoding" }
@@ -27,7 +28,7 @@ func (e *contentEncodingEval) eval(ctx *runCtx, instance any) {
 	if !ok {
 		return
 	}
-	ctx.addAnnotation(e.loc, "contentEncoding", e.encoding)
+	ctx.addAnnotation(e.loc, "contentEncoding", e.annot)
 	if !ctx.opts.contentAssertion {
 		return
 	}
@@ -49,6 +50,8 @@ func (e *contentEncodingEval) eval(ctx *runCtx, instance any) {
 type contentMediaTypeEval struct {
 	loc       string
 	mediaType string
+	// annot is mediaType as an annotation value, boxed once.
+	annot any
 }
 
 func (e *contentMediaTypeEval) keyword() string { return "contentMediaType" }
@@ -58,7 +61,7 @@ func (e *contentMediaTypeEval) eval(ctx *runCtx, instance any) {
 	if !ok {
 		return
 	}
-	ctx.addAnnotation(e.loc, "contentMediaType", e.mediaType)
+	ctx.addAnnotation(e.loc, "contentMediaType", e.annot)
 	if !ctx.opts.contentAssertion {
 		return
 	}
@@ -70,8 +73,8 @@ func (e *contentMediaTypeEval) eval(ctx *runCtx, instance any) {
 	if bytes == nil {
 		bytes = []byte(s)
 	}
-	var v any
-	if err := json.Unmarshal(bytes, &v); err != nil {
+	v, err := decodeSchemaBytes(bytes)
+	if err != nil {
 		ctx.addError(e.loc, "contentMediaType", "contentMediaType",
 			"value is not valid "+e.mediaType+": "+err.Error())
 		return
@@ -105,13 +108,16 @@ func (e *contentSchemaEval) eval(ctx *runCtx, instance any) {
 		_ = s
 		return
 	}
-	branch, annos := ctx.evaluateBranch(e.sub, parsed)
-	if len(branch) > 0 {
-		ctx.addCausesError(e.loc, "contentSchema",
-			"decoded content does not validate against contentSchema", branch)
+	// The decoded content is a separate document: its annotations do not
+	// describe this instance, so they are not kept.
+	ctx.growEvalLimit(parsed)
+	branch, _, cost := ctx.evaluateBranch(e.sub, parsed)
+	if len(branch) == 0 {
+		ctx.refundErrors(cost)
 		return
 	}
-	ctx.addBranchAnnotations(annos)
+	ctx.addCausesError(e.loc, "contentSchema",
+		"decoded content does not validate against contentSchema", branch, cost)
 }
 
 // errUnknownEncoding signals that contentEncoding named an unrecognized
