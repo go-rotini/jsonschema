@@ -1,6 +1,6 @@
-github.com/go-rotini/jsonc v1.1.2 h1:wWcVVflbIHdb6md7lvwVlBhhDZI9lX4864FD22DVTJo=
-github.com/go-rotini/jsonc v1.1.2/go.mod h1:t709DMcbWVANfnK3FrplXYPAWSpD7R7P78omko/9He8=
-github.com/go-rotini/toml v1.2.1 h1:OkhwmbtDpA8YNfivI7FEozTw1EPQ+TBICwsgb892ukM=
-github.com/go-rotini/toml v1.2.1/go.mod h1:5R61YyC6cmJ+WcDJRaymjEsYgb2eV5yzJjfibtsg60k=
-github.com/go-rotini/yaml v1.2.3 h1:NxaAcyiOql2f+x7LDZsWJedKARYpOF8S0vz+lXH73mQ=
-github.com/go-rotini/yaml v1.2.3/go.mod h1:8he7cn5KkOe3AiQwT/fy55vKFX4xDH2ouENU6ZBSf4E=
+github.com/go-rotini/jsonc v1.1.4 h1:qeGUDjz3lVl+hAliZZ77VZMLRg19mBC/twUZOtRYC84=
+github.com/go-rotini/jsonc v1.1.4/go.mod h1:t709DMcbWVANfnK3FrplXYPAWSpD7R7P78omko/9He8=
+github.com/go-rotini/toml v1.2.2 h1:vbx1JGIVWlWMHBHQhK62x+IluvkNBr5jzvdhVC+nb+I=
+github.com/go-rotini/toml v1.2.2/go.mod h1:5R61YyC6cmJ+WcDJRaymjEsYgb2eV5yzJjfibtsg60k=
+github.com/go-rotini/yaml v1.2.6 h1:nljltjKRpj4h94lF0xUwFuZ0sWboDXYsZJOwZlImPgA=
+github.com/go-rotini/yaml v1.2.6/go.mod h1:8he7cn5KkOe3AiQwT/fy55vKFX4xDH2ouENU6ZBSf4E=
