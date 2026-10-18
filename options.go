@@ -19,7 +19,7 @@ type compileOptions struct {
 	baseURI              string
 	maxRefDepth          int
 	strictKeywords       bool
-	metaSchemaValidation bool
+	metaSchemaValidation func(*Schema, any, Draft, string) error // validateAgainstMetaSchema when on, else nil
 	refCollisionPolicy   RefCollisionPolicy
 	loaderTrace          io.Writer
 	maxEvaluations       int
@@ -100,7 +100,15 @@ func WithStrict() CompileOption {
 // the embedded dialect meta-schema is used; otherwise the standard
 // meta-schema for the schema's draft is used.
 func WithMetaSchemaValidation(b bool) CompileOption {
-	return func(o *compileOptions) { o.metaSchemaValidation = b }
+	return func(o *compileOptions) {
+		// A function value rather than a bool, so a program that never turns
+		// this on does not link the meta-schema validator or the embedded
+		// meta-schemas behind it.
+		o.metaSchemaValidation = nil
+		if b {
+			o.metaSchemaValidation = validateAgainstMetaSchema
+		}
+	}
 }
 
 // WithRefCollisionPolicy sets how a duplicate $id, or a second

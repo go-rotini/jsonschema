@@ -133,7 +133,7 @@ func TestBuiltinFormats(t *testing.T) {
 	}
 	for _, c := range cases {
 		t.Run(c.format, func(t *testing.T) {
-			fn, ok := builtinFormats[c.format]
+			fn, ok := builtinFormat(c.format)
 			if !ok {
 				t.Fatalf("no builtin %q", c.format)
 			}
