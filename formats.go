@@ -18,29 +18,51 @@ import (
 // [*FormatError] but any error is accepted from custom validators).
 type FormatValidator func(string) error
 
-// builtinFormats holds every format validator the package ships with. Custom
-// formats registered via [WithCustomFormat] win when both are defined for a
-// name.
-var builtinFormats = map[string]FormatValidator{
-	"date-time":             validateDateTime,
-	"date":                  validateDate,
-	"time":                  validateTime,
-	"duration":              validateDuration,
-	"uuid":                  validateUUID,
-	"uri":                   validateURI,
-	"uri-reference":         validateURIReference,
-	"iri":                   validateIRI,
-	"iri-reference":         validateIRIReference,
-	"uri-template":          validateURITemplate,
-	"json-pointer":          validateJSONPointer,
-	"relative-json-pointer": validateRelativeJSONPointer,
-	"ipv4":                  validateIPv4,
-	"ipv6":                  validateIPv6,
-	"hostname":              validateHostname,
-	"idn-hostname":          validateIDNHostname,
-	"email":                 validateEmail,
-	"idn-email":             validateIDNEmail,
-	"regex":                 validateRegex,
+// builtinFormat returns the format validator the package ships for name.
+// Custom formats registered via [WithCustomFormat] win when both are
+// defined for a name.
+func builtinFormat(name string) (FormatValidator, bool) {
+	switch name {
+	case "date-time":
+		return validateDateTime, true
+	case "date":
+		return validateDate, true
+	case "time":
+		return validateTime, true
+	case "duration":
+		return validateDuration, true
+	case "uuid":
+		return validateUUID, true
+	case "uri":
+		return validateURI, true
+	case "uri-reference":
+		return validateURIReference, true
+	case "iri":
+		return validateIRI, true
+	case "iri-reference":
+		return validateIRIReference, true
+	case "uri-template":
+		return validateURITemplate, true
+	case "json-pointer":
+		return validateJSONPointer, true
+	case "relative-json-pointer":
+		return validateRelativeJSONPointer, true
+	case "ipv4":
+		return validateIPv4, true
+	case "ipv6":
+		return validateIPv6, true
+	case "hostname":
+		return validateHostname, true
+	case "idn-hostname":
+		return validateIDNHostname, true
+	case "email":
+		return validateEmail, true
+	case "idn-email":
+		return validateIDNEmail, true
+	case "regex":
+		return validateRegex, true
+	}
+	return nil, false
 }
 
 // lookupFormat returns the validator registered for name, consulting custom
@@ -50,8 +72,7 @@ func lookupFormat(name string, custom map[string]func(string) error) (FormatVali
 	if fn, ok := custom[name]; ok {
 		return fn, true
 	}
-	fn, ok := builtinFormats[name]
-	return fn, ok
+	return builtinFormat(name)
 }
 
 // errFormatInvalid is the sentinel underlying every built-in format failure.

@@ -442,8 +442,8 @@ func (c *Compiler) compile(value any, rawSource []byte, baseURI string) (*Schema
 	schema.root = root
 	schema.subschemas = len(eb.cache)
 
-	if c.opts.metaSchemaValidation {
-		if err := validateAgainstMetaSchema(schema, value, draft, metaSchemaURI); err != nil {
+	if c.opts.metaSchemaValidation != nil {
+		if err := c.opts.metaSchemaValidation(schema, value, draft, metaSchemaURI); err != nil {
 			return nil, err
 		}
 	}
@@ -697,10 +697,10 @@ func (c *Compiler) bindChildInto(out *[]keywordBinding, rm *resourceMap, raw any
 // right shape (string vs. number vs. object, ...). Full meta-schema
 // validation is opt-in via [WithMetaSchemaValidation].
 func validateKeywordShape(key string, raw any, loc string) error {
-	if shape, ok := shapeIntegers[key]; ok {
-		return shape.check(key, raw, loc)
-	}
 	switch key {
+	case "minLength", "maxLength", "minItems", "maxItems",
+		"minProperties", "maxProperties", "minContains", "maxContains":
+		return checkNonNegativeInt(key, raw, loc)
 	case "multipleOf":
 		if !isPositiveNumber(raw) {
 			return &CompileError{KeywordLocation: loc, Message: "multipleOf must be a positive number"}
@@ -730,23 +730,6 @@ func validateKeywordShape(key string, raw any, loc string) error {
 		return checkString(key, raw, loc)
 	}
 	return nil
-}
-
-// shapeChecker is one entry in the per-keyword shape table.
-type shapeChecker struct {
-	check func(key string, raw any, loc string) error
-}
-
-// shapeIntegers groups all "non-negative integer" keywords behind one entry.
-var shapeIntegers = map[string]shapeChecker{
-	"minLength":     {check: checkNonNegativeInt},
-	"maxLength":     {check: checkNonNegativeInt},
-	"minItems":      {check: checkNonNegativeInt},
-	"maxItems":      {check: checkNonNegativeInt},
-	"minProperties": {check: checkNonNegativeInt},
-	"maxProperties": {check: checkNonNegativeInt},
-	"minContains":   {check: checkNonNegativeInt},
-	"maxContains":   {check: checkNonNegativeInt},
 }
 
 func checkNonNegativeInt(key string, raw any, loc string) error {
@@ -903,27 +886,33 @@ type vocabularyUse struct {
 	formatAsserts bool
 }
 
-// knownVocabularies maps each vocabulary URI this package implements to the
-// 2020-12 vocabularies whose keywords it covers. In 2019-09 the applicator
-// vocabulary also holds the unevaluated* keywords, and the format
-// vocabulary is named "format".
-var knownVocabularies = map[string][]string{
-	VocabCore:         {VocabCore},
-	VocabApplicator:   {VocabApplicator},
-	VocabUnevaluated:  {VocabUnevaluated},
-	VocabValidation:   {VocabValidation},
-	VocabFormatAnnot:  {VocabFormatAnnot},
-	VocabFormatAssert: {VocabFormatAnnot},
-	VocabContent:      {VocabContent},
-	VocabMetaData:     {VocabMetaData},
-	VocabOAS:          nil,
-
-	"https://json-schema.org/draft/2019-09/vocab/core":       {VocabCore},
-	"https://json-schema.org/draft/2019-09/vocab/applicator": {VocabApplicator, VocabUnevaluated},
-	"https://json-schema.org/draft/2019-09/vocab/validation": {VocabValidation},
-	"https://json-schema.org/draft/2019-09/vocab/format":     {VocabFormatAnnot},
-	"https://json-schema.org/draft/2019-09/vocab/content":    {VocabContent},
-	"https://json-schema.org/draft/2019-09/vocab/meta-data":  {VocabMetaData},
+// knownVocabulary reports whether this package implements the vocabulary
+// uri, and the 2020-12 vocabularies whose keywords it covers (at most two;
+// empty strings are unused). In 2019-09 the applicator vocabulary also
+// holds the unevaluated* keywords, and the format vocabulary is named
+// "format".
+func knownVocabulary(uri string) (covers [2]string, known bool) {
+	switch uri {
+	case VocabCore, "https://json-schema.org/draft/2019-09/vocab/core":
+		return [2]string{VocabCore}, true
+	case VocabApplicator:
+		return [2]string{VocabApplicator}, true
+	case "https://json-schema.org/draft/2019-09/vocab/applicator":
+		return [2]string{VocabApplicator, VocabUnevaluated}, true
+	case VocabUnevaluated:
+		return [2]string{VocabUnevaluated}, true
+	case VocabValidation, "https://json-schema.org/draft/2019-09/vocab/validation":
+		return [2]string{VocabValidation}, true
+	case VocabFormatAnnot, VocabFormatAssert, "https://json-schema.org/draft/2019-09/vocab/format":
+		return [2]string{VocabFormatAnnot}, true
+	case VocabContent, "https://json-schema.org/draft/2019-09/vocab/content":
+		return [2]string{VocabContent}, true
+	case VocabMetaData, "https://json-schema.org/draft/2019-09/vocab/meta-data":
+		return [2]string{VocabMetaData}, true
+	case VocabOAS:
+		return [2]string{}, true
+	}
+	return [2]string{}, false
 }
 
 // vocabularies reads the $vocabulary of the custom meta-schema
@@ -950,7 +939,7 @@ func (c *Compiler) vocabularies(rm *resourceMap, metaSchemaURI string, draft Dra
 	var use vocabularyUse
 	listed := map[string]bool{VocabCore: true} // required by every meta-schema
 	for _, uri := range orderKeys(declared) {
-		covers, known := knownVocabularies[uri]
+		covers, known := knownVocabulary(uri)
 		if !known {
 			if required, _ := declared[uri].(bool); required {
 				return vocabularyUse{}, &CompileError{
@@ -962,7 +951,9 @@ func (c *Compiler) vocabularies(rm *resourceMap, metaSchemaURI string, draft Dra
 			continue
 		}
 		for _, v := range covers {
-			listed[v] = true
+			if v != "" {
+				listed[v] = true
+			}
 		}
 		if uri == VocabFormatAssert {
 			use.formatAsserts = true
